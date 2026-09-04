@@ -1,0 +1,107 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  swift:
+    name: Swift tests (iOS Simulator)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -switch /Applications/Xcode_26.2.app
+
+      # `swift test` CANNOT work here and this is not a CI quirk: Package.swift
+      # declares .iOS(.v17) only, and the sources use iOS-only WebKit and
+      # CryptoKit APIs, so a host build fails to compile. An iOS Simulator
+      # destination is the only way to run these tests.
+      - name: Test
+        run: |
+          xcodebuild test \
+            -scheme CleanPlayer \
+            -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
+            -resultBundlePath swift-tests.xcresult \
+            | xcpretty && exit ${PIPESTATUS[0]}
+        working-directory: ios
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: swift-tests
+          path: ios/swift-tests.xcresult
+
+  app:
+    name: App UI tests
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode
+        run: sudo xcode-select -switch /Applications/Xcode_26.2.app
+
+      # Drives the real app through the real screens. The unit suites can all
+      # pass while a control is unreachable — which is how this project shipped
+      # four well-tested components no user could get to.
+      - name: Build and UI test
+        run: |
+          xcodebuild test \
+            -project CleanPlayerApp.xcodeproj \
+            -scheme CleanPlayerApp \
+            -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
+            -resultBundlePath ui-tests.xcresult \
+            | xcpretty && exit ${PIPESTATUS[0]}
+        working-directory: ios/App
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: ui-tests
+          path: ios/App/ui-tests.xcresult
+
+  agent:
+    name: Page agent (Chromium + WebKit)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      # Both engines. Mode B rests on webkitEnterFullscreen, which does not
+      # exist in Chromium — running Chromium alone leaves the app's
+      # highest-coverage playback mode untested.
+      - run: npx playwright install --with-deps chromium webkit
+
+      - run: npx playwright test
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: playwright-report/
+
+  rules:
+    name: Rule data, ad coverage and app icon
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Seconds, no macOS runner. Catches the two rule failures that have no
+      # symptom in the app: a payload that has drifted from the manifest hash
+      # that keys WebKit's compile cache, and a conversion that still produces
+      # a big rule count but no longer blocks anything.
+      - run: python3 tools/check-rules.py
+
+      # Two silent failures with no symptom until App Store upload rejects the
+      # build: a configuration with no ASSETCATALOG_COMPILER_APPICON_NAME, and
+      # an icon carrying an alpha channel.
+      - run: python3 tools/check-icon.py

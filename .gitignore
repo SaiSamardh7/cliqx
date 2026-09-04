@@ -1,0 +1,13 @@
+node_modules/
+test-results/
+playwright-report/
+.build/
+DerivedData/
+*.xcuserdatad
+
+# Build outputs: downloaded filter lists and the Rust converter's target dir.
+# Both are regenerable by tools/convert-filters.sh and are large.
+build/
+tools/filter-convert/target/
+
+.DS_Store

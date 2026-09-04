@@ -1,0 +1,13 @@
+[package]
+name = "filter-convert"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# adblock-rust is MPL-2.0. It is used here as a build-time tool only and is not
+# linked into the shipped iOS app, so no MPL file-level obligation attaches to
+# the app's own sources. Pin the version: rule-conversion output must be
+# reproducible.
+[dependencies]
+adblock = { version = "0.13", default-features = false, features = ["content-blocking"] }
+serde_json = "1"

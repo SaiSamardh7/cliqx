@@ -1,0 +1,31 @@
+declare const __cp: {
+  scan(): void;
+  isTheater(): boolean;
+  findEpisodes(): { next: string | null; prev: string | null };
+  episodeList(): { label: string; href: string; current: boolean }[];
+  enterTheater(v: Element): boolean;
+  exitTheater(): boolean;
+  hostTheater(): boolean;
+  unhostTheater(): boolean;
+  largestFrame(): Element | null;
+  showAirPlay(): boolean;
+  autoTheater(ms?: number): Promise<boolean>;
+  largestVideo(): HTMLVideoElement | null;
+  allVideos(root?: ParentNode): HTMLVideoElement[];
+  resumeCandidate(elapsed: number, graceMs?: number): HTMLVideoElement | null;
+  blockOverlays(): number;
+  setOverlayBlocking(on: boolean): boolean;
+  nativeFullscreen(v: Element): boolean;
+  canNativeFullscreen(v: Element): boolean;
+  togglePlay(): boolean;
+  beginScrub(): boolean;
+  seek(to: number): boolean;
+  skip(by: number): boolean;
+  setRate(rate: number): boolean;
+  textTracks(): { index: number; label: string; active: boolean }[];
+  selectTextTrack(index: number): boolean;
+  setObjectFit(mode: string): boolean;
+  selectSource(index: number): boolean;
+  togglePiP(): boolean;
+};
+interface Window { __submitted: boolean; __cp: typeof __cp; }

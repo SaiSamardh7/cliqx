@@ -1,0 +1,33 @@
+{
+  "convertedAt": "2026-09-03T12:46:37.696572+00:00",
+  "converter": "cargo 1.98.0 (797e8a9bc 2026-08-05) (Homebrew)",
+  "sources": {
+    "easylist": {
+      "version": "202609031223",
+      "sourceSha256": "f89e2a256c4632cf4f7264248829425cc52c5f1e221db2452022964a5304f980",
+      "generated": "ads.json",
+      "ruleCount": 77963,
+      "generatedSha256": "75aef088eb497f5ec0afb2eef7b7a0fed8b6c101e051835197b28ce319e69ee2",
+      "bytes": 8381242,
+      "compressedBytes": 787103
+    },
+    "easyprivacy": {
+      "version": "202609031233",
+      "sourceSha256": "352d11830f62d7dc2110836a5dd4d338e70ddbc2ad85a40aa9045dff69ae7aa8",
+      "generated": "privacy.json",
+      "ruleCount": 56364,
+      "generatedSha256": "8ab6a630bf339ac0d60a075607339a2f1ee179d8ee636552ef055d0c05984411",
+      "bytes": 6000396,
+      "compressedBytes": 498216
+    },
+    "annoyances": {
+      "version": "202609031223",
+      "sourceSha256": "aaf3036fd1c9d5c162d669517fb42800da49a5b7de7ae309112e6014d15353aa",
+      "generated": "annoyances.json",
+      "ruleCount": 49553,
+      "generatedSha256": "a0bd9405f324bc6bcbf2bbbe77b0b1ec43ced130858c70cceebadcdd5257dd3f",
+      "bytes": 6024197,
+      "compressedBytes": 638009
+    }
+  }
+}
