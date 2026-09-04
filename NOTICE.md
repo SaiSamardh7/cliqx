@@ -85,3 +85,10 @@ particular is GPL-3.0, which would be incompatible with a closed distribution.
 `ios/App/CleanPlayerApp/Resources/blocklist.json` was written for this project
 and carries no third-party obligation. It is the offline fallback when no
 downloaded list is active.
+
+## Which licence covers what
+
+The app's own source is MIT — see [`LICENSE`](LICENSE). That licence does not
+extend to the generated filter-rule data in
+`ios/App/CleanPlayerApp/Resources/rules/`, which is a derived work of EasyList
+and is offered under CC BY-SA 3.0 as set out above.
