@@ -13,10 +13,17 @@ jobs:
     name: Swift tests (iOS Simulator)
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Select Xcode
         run: sudo xcode-select -switch /Applications/Xcode_26.2.app
+
+      # A UDID, not a model name. xcodebuild cannot resolve a simulator by name
+      # for the package scheme — it reports the scheme's supported platforms as
+      # empty and then offers no concrete simulators — so the name matched
+      # nothing and the job failed with exit 70. See tools/pick-simulator.py.
+      - name: Pick a simulator
+        run: echo "SIMULATOR=$(python3 tools/pick-simulator.py)" >> "$GITHUB_ENV"
 
       # `swift test` CANNOT work here and this is not a CI quirk: Package.swift
       # declares .iOS(.v17) only, and the sources use iOS-only WebKit and
@@ -26,12 +33,12 @@ jobs:
         run: |
           xcodebuild test \
             -scheme CleanPlayer \
-            -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
+            -destination "platform=iOS Simulator,id=$SIMULATOR" \
             -resultBundlePath swift-tests.xcresult \
             | xcpretty && exit ${PIPESTATUS[0]}
         working-directory: ios
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         if: failure()
         with:
           name: swift-tests
@@ -41,9 +48,14 @@ jobs:
     name: App UI tests
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Select Xcode
         run: sudo xcode-select -switch /Applications/Xcode_26.2.app
+
+      # This job resolves a name fine today, but it is the same standing bet on
+      # the runner image shipping one exact model. Same resolver, same reason.
+      - name: Pick a simulator
+        run: echo "SIMULATOR=$(python3 tools/pick-simulator.py)" >> "$GITHUB_ENV"
 
       # Drives the real app through the real screens. The unit suites can all
       # pass while a control is unreachable — which is how this project shipped
@@ -53,12 +65,12 @@ jobs:
           xcodebuild test \
             -project CleanPlayerApp.xcodeproj \
             -scheme CleanPlayerApp \
-            -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
+            -destination "platform=iOS Simulator,id=$SIMULATOR" \
             -resultBundlePath ui-tests.xcresult \
             | xcpretty && exit ${PIPESTATUS[0]}
         working-directory: ios/App
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         if: failure()
         with:
           name: ui-tests
@@ -68,8 +80,8 @@ jobs:
     name: Page agent (Chromium + WebKit)
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -83,7 +95,7 @@ jobs:
 
       - run: npx playwright test
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         if: failure()
         with:
           name: playwright-report
@@ -93,7 +105,7 @@ jobs:
     name: Rule data, ad coverage and app icon
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # Seconds, no macOS runner. Catches the two rule failures that have no
       # symptom in the app: a payload that has drifted from the manifest hash
