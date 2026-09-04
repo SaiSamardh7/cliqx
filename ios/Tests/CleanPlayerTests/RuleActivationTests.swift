@@ -15,7 +15,10 @@ final class RuleActivationTests: XCTestCase {
     private var directory: URL!
     private var store: WKContentRuleListStore!
 
-    private static let probeSelector = "cp-probe-ad"
+    // `nonisolated` because it is a default argument on probeHidden, which is
+    // evaluated in a nonisolated context. CI warned that referencing it there
+    // is an error under the Swift 6 language mode.
+    private nonisolated static let probeSelector = "cp-probe-ad"
 
     override func setUp() async throws {
         try await super.setUp()
@@ -63,7 +66,21 @@ final class RuleActivationTests: XCTestCase {
     /// hidden by a content rule.
     private func probeHidden(with rules: RuleListController,
                              selector: String = probeSelector) async throws -> Bool {
-        let webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 320, height: 480))
+        let frame = CGRect(x: 0, y: 0, width: 320, height: 480)
+        let webView = WKWebView(frame: frame)
+
+        // In a real window, not detached. WebKit will not grant a web view that
+        // is in no window a visibility assertion for its content process, and a
+        // loaded machine then suspends that process mid-navigation — which
+        // arrives here as the navigation failing with `InvalidTransition`,
+        // never as a timeout. It does not reproduce on a developer machine and
+        // failed on the very first CI run; the `WebProcess NearSuspended
+        // Assertion` lines in that log are the same cause.
+        let window = UIWindow(frame: frame)
+        window.isHidden = false
+        window.addSubview(webView)
+        defer { webView.removeFromSuperview() }
+
         rules.attach(to: webView)
 
         let delegate = LoadWaiter()
