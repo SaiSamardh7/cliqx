@@ -1,5 +1,7 @@
 # Cliqx
 
+[![CI](https://github.com/SaiSamardh7/cliqx/actions/workflows/ci.yml/badge.svg)](https://github.com/SaiSamardh7/cliqx/actions/workflows/ci.yml)
+
 **iOS only.** Cliqx is a native iPhone and iPad app, and there is no Android,
 web or desktop version — not planned, not in progress. The whole approach is
 built on iOS-specific WebKit APIs (`WKContentWorld`, `WKContentRuleList`,
@@ -14,8 +16,8 @@ No account, no server, no analytics, no third-party SDKs.
 ## Status
 
 Pre-release, and not on the App Store yet. The engineering is in place and
-covered by tests — 190 Playwright specs across Chromium and WebKit, plus the
-XCTest suite — but see [`docs/ROADMAP.md`](docs/ROADMAP.md) for what is still
+covered by tests — 190 Playwright specs across Chromium and WebKit, 58 XCTest
+cases and 5 UI tests, all green in CI — but see [`docs/ROADMAP.md`](docs/ROADMAP.md) for what is still
 open before submission.
 
 - [`ARCHITECTURE.md`](ARCHITECTURE.md) — how it works and why
