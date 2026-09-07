@@ -64,22 +64,58 @@ final class RuleActivationTests: XCTestCase {
 
     /// Loads a page on a real origin and reports whether the probe element was
     /// hidden by a content rule.
+    ///
+    /// Retried, and the retry is not padding. CI fails here with
+    /// `InvalidTransition { phase: idle, targetPhase: failed(deinit) }` — a
+    /// navigation torn down having never started, because the web content
+    /// process did not come up. It has never reproduced on a developer machine.
+    ///
+    /// Retrying any *thrown* error is sound because a thrown error is never
+    /// this helper's answer. A rule list that failed to attach returns `false`
+    /// from a load that succeeded; it does not throw. So a retry can rescue a
+    /// content process that died on the way up without being able to hide a
+    /// rule that is genuinely not in force.
     private func probeHidden(with rules: RuleListController,
-                             selector: String = probeSelector) async throws -> Bool {
+                             selector: String = probeSelector,
+                             attempts: Int = 3) async throws -> Bool {
+        var failure: Error?
+        for attempt in 1...attempts {
+            do {
+                return try await loadProbe(with: rules, selector: selector)
+            } catch {
+                failure = error
+                // Each attempt builds a fresh web view: one whose content
+                // process died is not reliably reusable.
+                if attempt < attempts {
+                    try? await Task.sleep(nanoseconds: 750_000_000)
+                }
+            }
+        }
+        throw failure!
+    }
+
+    private func loadProbe(with rules: RuleListController,
+                           selector: String) async throws -> Bool {
         let frame = CGRect(x: 0, y: 0, width: 320, height: 480)
         let webView = WKWebView(frame: frame)
 
         // In a real window, not detached. WebKit will not grant a web view that
         // is in no window a visibility assertion for its content process, and a
         // loaded machine then suspends that process mid-navigation — which
-        // arrives here as the navigation failing with `InvalidTransition`,
-        // never as a timeout. It does not reproduce on a developer machine and
-        // failed on the very first CI run; the `WebProcess NearSuspended
-        // Assertion` lines in that log are the same cause.
+        // arrives here as the navigation failing, never as a timeout. The
+        // `WebProcess NearSuspended Assertion` lines in the CI log are that.
+        //
+        // The `defer` is what keeps the window alive. Nothing else refers to it
+        // once the web view is added, so ARC may release it immediately — which
+        // takes the web view straight back out of the window and undoes the
+        // point of having one.
         let window = UIWindow(frame: frame)
         window.isHidden = false
         window.addSubview(webView)
-        defer { webView.removeFromSuperview() }
+        defer {
+            webView.removeFromSuperview()
+            window.isHidden = true
+        }
 
         rules.attach(to: webView)
 
