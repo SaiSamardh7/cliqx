@@ -43,4 +43,32 @@ final class CleanPlayerTests: XCTestCase {
         XCTAssertEqual(webView.configuration.userContentController.userScripts.count,
                        baseline + 1, "so late additions DO reach the live web view")
     }
+
+    /// The four media capabilities the player depends on. Each is a product
+    /// requirement, and three of them used to be set while the fourth was
+    /// inherited from the framework default — which is untestable and silently
+    /// removable.
+    @MainActor
+    func testMediaPlaybackCapabilitiesAreStatedNotInherited() {
+        let cfg = BrowserSetup.makeConfiguration(agentJS: "void 0;")
+
+        XCTAssertTrue(cfg.allowsAirPlayForMediaPlayback,
+                      "AirPlay is off, so the route picker can never work")
+        XCTAssertTrue(cfg.allowsPictureInPictureMediaPlayback)
+        XCTAssertTrue(cfg.allowsInlineMediaPlayback,
+                      "without this iOS insists on its own fullscreen player, "
+                      + "and theater then plays audio over a black screen")
+        XCTAssertTrue(cfg.mediaTypesRequiringUserActionForPlayback.isEmpty,
+                      "autoplay is what lets a resumed episode start itself")
+    }
+
+    func testLocalNetworkProbeDoesNotPersistBrowserState() {
+        let cfg = BrowserSetup.makeLocalNetworkProbeConfiguration()
+
+        XCTAssertEqual(cfg.requestCachePolicy, .reloadIgnoringLocalAndRemoteCacheData)
+        XCTAssertNil(cfg.urlCache)
+        XCTAssertNil(cfg.httpCookieStorage)
+        XCTAssertFalse(cfg.httpShouldSetCookies)
+        XCTAssertNil(cfg.urlCredentialStorage)
+    }
 }

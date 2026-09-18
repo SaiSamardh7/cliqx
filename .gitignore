@@ -11,3 +11,6 @@ build/
 tools/filter-convert/target/
 
 .DS_Store
+
+# Local development-council state (SQLite database, locks, and workspace cache).
+.devcouncil/

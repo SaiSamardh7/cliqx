@@ -78,6 +78,8 @@ final class ProtectionUITests: XCTestCase {
         // reachable for the shipped rule data to be redistributable.
         XCTAssertTrue(app.staticTexts["EasyList"].waitForExistence(timeout: 5),
                       "attribution screen does not name its sources")
+        XCTAssertTrue(scrollToRow("Public Suffix List"),
+                      "the bundled security-boundary data is not attributed in-app")
     }
 
     func testPrivacyPolicyIsReachableFromSettings() {
@@ -99,5 +101,69 @@ final class ProtectionUITests: XCTestCase {
                      "EasyList", "EasyPrivacy"] {
             XCTAssertTrue(scrollToRow(list), "\(list) is not listed in Settings")
         }
+    }
+
+    /// Brave's 944 compatibility exceptions are compiled INTO every shipped
+    /// list, so their MPL-2.0 attribution obligation is live — the app ships
+    /// the rule data, not just a build tool that touched it. The attribution
+    /// string existed in `FilterSource.braveUnbreak` and reached no screen,
+    /// because `FilterSource.all` does not contain it.
+    func testCompiledInExceptionsAreAttributed() {
+        finishOnboarding()
+        app.buttons["Settings"].tap()
+        tapRow("Attribution and licences")
+
+        XCTAssertTrue(scrollToRow("Brave Unbreak"),
+                      "the shipped MPL-2.0 rule data is not attributed in-app")
+        // The obligation is the credit line itself, not the heading above it.
+        XCTAssertTrue(scrollToRow("Site-compatibility exceptions from Brave "
+                                  + "Unbreak (github.com/brave/adblock-lists), "
+                                  + "used under MPL-2.0."),
+                      "the MPL-2.0 attribution text is not shown")
+    }
+
+    /// Strict is a real superset of Standard, so choosing it must leave
+    /// protection reporting Active on a larger set — not degraded, and not
+    /// stuck on Preparing. This is the path that recompiles and re-attaches.
+    func testChoosingStrictKeepsProtectionActive() {
+        finishOnboarding()
+        app.buttons["Settings"].tap()
+
+        let active = app.staticTexts["Active"]
+        XCTAssertTrue(active.waitForExistence(timeout: 90),
+                      "protection never reported Active at the default level")
+
+        app.buttons["Strict"].tap()
+        XCTAssertTrue(active.waitForExistence(timeout: 120),
+                      "protection did not come back to Active on Strict")
+        XCTAssertFalse(app.staticTexts["Limited"].exists,
+                       "switching to Strict left protection degraded")
+    }
+
+    /// Private browsing is a promise about what touches the disk. The control
+    /// has to be reachable and has to hold its state, because the web view is
+    /// rebuilt from it and a data store cannot be swapped on a live one.
+    func testPrivateBrowsingTogglesAndSticks() {
+        finishOnboarding()
+        app.buttons["Settings"].tap()
+
+        XCTAssertTrue(scrollToRow("Private browsing"),
+                      "private browsing is not reachable in Settings")
+        let toggle = app.switches["Private browsing"]
+        XCTAssertTrue(toggle.waitForExistence(timeout: 5))
+
+        let before = toggle.value as? String
+        // A Form row's switch does not reliably take a tap at the cell centre;
+        // the control itself is at the trailing edge.
+        toggle.coordinate(withNormalizedOffset: CGVector(dx: 0.92, dy: 0.5)).tap()
+
+        // SwiftUI republishes on the next runloop pass, so poll rather than
+        // reading the value straight back.
+        var changed = false
+        for _ in 0..<20 where !changed {
+            if (toggle.value as? String) != before { changed = true; break }
+            Thread.sleep(forTimeInterval: 0.25)
+        }
+        XCTAssertTrue(changed, "the private browsing toggle did not change state")
     }
 }

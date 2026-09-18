@@ -1,6 +1,6 @@
 # Shipping Cliqx — everything left before release
 
-_Verified 4 September 2026 · working tree clean_
+_Verified 6 September 2026 · both suites green locally_
 
 The blocking engine is done and proven. What remains is almost entirely
 identity, hardware, and one measurement nobody has taken yet.
@@ -12,8 +12,8 @@ priority.
 |---|---|
 | Rules active | **183,950** at Strict, 134,397 at Standard, across four lists |
 | Ad hosts covered | **~104,182** distinct domains in block rules |
-| Tests passing | **213** — 58 Swift · 5 UI · 150 agent (two engines) |
-| Commits | **15**, no remote yet |
+| Tests passing | **272** — 66 Swift · 8 UI · 198 agent (99 specs, two engines) |
+| Commits | **6**, pushed to `SaiSamardh7/cliqx`, CI green |
 
 ---
 
@@ -84,14 +84,11 @@ the last audit accidentally read.
 I can build, test and drive the app in the simulator. I cannot touch a physical
 device, and I cannot push to a remote you haven't created.
 
-### 7. No git remote, so CI has never run
+### 7. Git remote and CI ✅ done
 
-Four workflow jobs are written and correct — Swift tests, UI tests, the agent in
-two engines, and the ad-coverage check — and **not one has ever executed**,
-because there is nowhere to push. This is genuinely the first thing to fix:
-nothing else stays verified without it.
-
-**You do:** create the repo and push. Everything else is already wired.
+The repo is at `SaiSamardh7/cliqx` and all four workflow jobs run on every
+push — Swift tests, UI tests, the agent in two engines, and the rule/icon
+checks. The badge in the README is live.
 
 ### 8. Measure it on the iPhone
 
@@ -230,16 +227,17 @@ Brave Unbreak.
 
 ## Order to do it in
 
-This one genuinely is a sequence — each step depends on the one above it.
+This one genuinely is a sequence — each step depends on the one above it. The
+first three are now done; the list starts at 4.
 
-1. **Push to a remote.** CI starts guarding everything else.
-2. **Bundle ID, name, version, icon.** Unblocks any real build.
-3. **Device build with signing.** First time on hardware.
-4. **Ten-site measurement.** Failures become fixtures.
+1. ~~**Push to a remote.**~~ Done — CI guards everything else.
+2. ~~**Bundle ID, name, icon.**~~ Done. `MARKETING_VERSION` is the one field left.
+3. ~~**Device build with signing.**~~ Done — the app runs on the iPhone.
+4. **Ten-site measurement.** Failures become fixtures. **This is the next thing.**
 5. **On-device conversion, 19–20.** Closes the refresh gap for good.
-7. **Publish the privacy policy, fill in contact.** Required by the listing.
-8. **TestFlight, 25–50 testers.** Where reliability numbers come from.
-9. **Hold for the targets.** >99.5% crash-free, >80% Watch clean success, <5%
+6. **Publish the privacy policy, fill in contact.** Required by the listing.
+7. **TestFlight, 25–50 testers.** Where reliability numbers come from.
+8. **Hold for the targets.** >99.5% crash-free, >80% Watch clean success, <5%
    protection-disable rate.
 
 ---
@@ -255,6 +253,29 @@ from a browser, and one counterexample turns a strong product into a broken
 promise.
 
 ---
+
+## Fixed in the 6 September review pass
+
+A line-by-line read found six defects, all but one in the SwiftUI wiring —
+the layer no suite touched. Each is now covered.
+
+| | What was wrong | Guarded by |
+|---|---|---|
+| Theater bricked shadow-DOM pages | `unstage()` queried the document alone, so the marks `stage()` left inside a shadow root survived Close: the video kept `position:fixed` full-screen black and its siblings kept `display:none`, with the native overlay already gone. archive.org is a bundled shortcut. | 4 new agent specs |
+| The blocker hid the player | A positioned shadow host reads as an empty box to `querySelector('video')`, so it matched every interstitial test. | `never hides a shadow host holding the video` |
+| Protection level never reloaded | `onProtectionChanged` was optional and **both** call sites omitted it, so the reload the Settings footer promises never happened. Now required — omitting it is a build error. | the type |
+| Private browsing wrote history | `model.record` ran unconditionally, so private sessions appeared under Recent and persisted. | — |
+| MPL-2.0 credit never shipped | Brave Unbreak's 686 exceptions ship inside every list; `FilterSource.all` excludes the source, so no screen ever rendered its attribution. | `testCompiledInExceptionsAreAttributed` |
+| Address bar swallowed input | Any non-web scheme returned nil, so "ratio:16" produced no navigation and no message. | 8 new `AddressResolverTests` |
+
+Smaller, same pass: the origin indicator now updates on `didCommit` rather than
+`didFinish` (it showed the previous page's host and padlock through the whole of
+the next load, and kept them after a failed one); three ad-hoc `www.` strips
+that cut the sequence out of the middle of a host now go through
+`HostKey.canonical`; a scrub that ended without a seek no longer silences
+position updates for the rest of the video; a UTF-8 sequence straddling the
+512-byte cut no longer makes a valid filter list look invalid; and the player
+overlay's timers are cancelled with the view.
 
 ## Already settled
 

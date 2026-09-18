@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Not settable as an INFOPLIST_KEY_ build setting: Xcode maps only a
+	     documented subset of keys that way, UIBackgroundModes is not among
+	     them, and an unsupported INFOPLIST_KEY_ is silently ignored rather
+	     than rejected. GENERATE_INFOPLIST_FILE stays on and merges everything
+	     else into this file. -->
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>audio</string>
+	</array>
+	<!-- A media player needs a way to get files onto the device: these expose
+	     the app's Documents folder in the Files app and to Finder file sharing,
+	     so videos can be dropped in and opened with the picker. -->
+	<key>UIFileSharingEnabled</key>
+	<true/>
+	<key>LSSupportsOpeningDocumentsInPlace</key>
+	<true/>
+	<!-- The narrowest ATS exception that makes a home server usable. A NAS or
+	     Jellyfin box on the LAN almost never has a publicly trusted
+	     certificate, and cleartext to a private address is blocked by default —
+	     loopback is exempt, 192.168.x.x is not. NSAllowsLocalNetworking permits
+	     cleartext ONLY to local/private addresses; ATS stays fully enforced for
+	     the public internet, so no arbitrary-loads hole is opened. -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+	<!-- Shown when iOS asks permission to reach devices on the local network. -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Cliqx uses your local network only to reach media servers you enter yourself, such as a NAS or home media server. It never scans or browses your network on its own.</string>
+</dict>
+</plist>

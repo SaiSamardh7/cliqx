@@ -2,14 +2,18 @@ declare const __cp: {
   scan(): void;
   isTheater(): boolean;
   findEpisodes(): { next: string | null; prev: string | null };
-  episodeList(): { label: string; href: string; current: boolean }[];
+  episodeList(): { label: string; href: string; current: boolean; number: number | null }[];
+  navigateEpisode(href: string): boolean;
   enterTheater(v: Element): boolean;
   exitTheater(): boolean;
   hostTheater(): boolean;
   unhostTheater(): boolean;
   largestFrame(): Element | null;
   showAirPlay(): boolean;
+  sourceKind(v: HTMLVideoElement): string;
+  attachAirPlaySource(v: HTMLVideoElement): string;
   autoTheater(ms?: number): Promise<boolean>;
+  checkStaged(timeoutMs?: number): void;
   largestVideo(): HTMLVideoElement | null;
   allVideos(root?: ParentNode): HTMLVideoElement[];
   resumeCandidate(elapsed: number, graceMs?: number): HTMLVideoElement | null;
@@ -22,6 +26,8 @@ declare const __cp: {
   seek(to: number): boolean;
   skip(by: number): boolean;
   setRate(rate: number): boolean;
+  setVolume(percent: number): boolean;
+  armEpisodeTransition(): boolean;
   textTracks(): { index: number; label: string; active: boolean }[];
   selectTextTrack(index: number): boolean;
   setObjectFit(mode: string): boolean;

@@ -134,6 +134,19 @@ final class RuleActivationTests: XCTestCase {
 
     // MARK: Activation
 
+    func testCompletedActivationIsPublishedForAnOpenPageToReload() async throws {
+        let json = probeRules(selector: Self.probeSelector)
+        try write(json, as: "probe")
+        let rules = controller([spec("probe", group: .appSpecific,
+                                     resource: "probe",
+                                     hash: RuleData.hash(json), rules: 1)])
+        XCTAssertEqual(rules.completedActivationCount, 0)
+
+        await rules.activate(.standard)
+
+        XCTAssertEqual(rules.completedActivationCount, 1)
+    }
+
     func testActivationPutsTheRulesInForce() async throws {
         let json = probeRules(selector: Self.probeSelector)
         try write(json, as: "probe")

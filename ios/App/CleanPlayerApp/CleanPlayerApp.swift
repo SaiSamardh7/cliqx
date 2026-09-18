@@ -5,6 +5,7 @@ import SwiftUI
 struct CleanPlayerApp: App {
     @StateObject private var model = BrowserModel()
     @StateObject private var settings = ProtectionSettings()
+    @StateObject private var gestureSettings = PlayerGestureSettings()
     @StateObject private var rules = RuleListController()
 
     var body: some Scene {
@@ -13,9 +14,11 @@ struct CleanPlayerApp: App {
                 if !settings.hasOnboarded {
                     OnboardingView(settings: settings)
                 } else if let url = model.current {
-                    BrowserView(url: url, model: model, rules: rules, settings: settings)
+                    BrowserView(url: url, model: model, rules: rules, settings: settings,
+                                gestureSettings: gestureSettings)
                 } else {
-                    HomeView(model: model, rules: rules, settings: settings)
+                    HomeView(model: model, rules: rules, settings: settings,
+                             gestureSettings: gestureSettings)
                 }
             }
             .task {
@@ -23,6 +26,11 @@ struct CleanPlayerApp: App {
                 // milliseconds afterwards. Starting at launch — not at first
                 // navigation — is what keeps that cost off the critical path.
                 rules.begin(settings.level)
+                // What makes the `audio` background mode mean something. The
+                // default category is silenced by the ring switch and stops on
+                // lock, which would suspend Picture in Picture and cut AirPlay
+                // the moment the phone locked.
+                MediaSession.activate()
             }
         }
     }

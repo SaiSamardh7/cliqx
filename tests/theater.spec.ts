@@ -181,6 +181,34 @@ test.describe('episode discovery', () => {
     });
   });
 
+  test('uses the site episode link so an in-place player router can handle Next',
+    async ({ page }) => {
+      await serve(page, `${HEAD}
+        <a id="next" href="/ep/2">Next episode</a>
+        <video id="v" playsinline></video>
+        <script>
+          document.querySelector('#next').addEventListener('click', event => {
+            event.preventDefault();
+            document.body.dataset.switched = 'yes';
+          });
+        </script>`);
+
+      expect(await page.evaluate(() => __cp.navigateEpisode(`${location.origin}/ep/2`)))
+        .toBe(true);
+      expect(await page.locator('body').getAttribute('data-switched')).toBe('yes');
+      expect(page.url()).toBe(`${ORIGIN}/ep/1`);
+    });
+
+  test('refuses to activate a cross-origin episode target', async ({ page }) => {
+    await serve(page, `${HEAD}
+      <a id="next" href="https://elsewhere.test/ep/2">Next episode</a>
+      <video id="v" playsinline></video>`);
+
+    expect(await page.evaluate(() =>
+      __cp.navigateEpisode('https://elsewhere.test/ep/2'))).toBe(false);
+    expect(page.url()).toBe(`${ORIGIN}/ep/1`);
+  });
+
   test('never follows an episode link off-origin', async ({ page }) => {
     await serve(page, `${HEAD}
       <a href="https://elsewhere.test/ep/2">Next episode</a>
@@ -195,6 +223,43 @@ test.describe('episode discovery', () => {
       <video id="v" playsinline></video>`);
 
     expect(await page.evaluate(() => __cp.findEpisodes().next)).toBeNull();
+  });
+
+  // Jellyfin, Emby and Plex are one page each, routed in the hash. Treating
+  // every fragment as an in-page anchor made every episode on those servers
+  // the same page as the one being watched, so Next was never offered.
+  test('a hash route is a different page', async ({ page }) => {
+    await serve(page, `${HEAD}
+      <a href="#/ep/2">Next episode</a>
+      <a href="#/ep/0">Previous episode</a>
+      <video id="v" playsinline></video>`, `${ORIGIN}/web/index.html#/ep/1`);
+
+    expect(await page.evaluate(() => __cp.findEpisodes())).toEqual({
+      next: `${ORIGIN}/web/index.html#/ep/2`,
+      prev: `${ORIGIN}/web/index.html#/ep/0`,
+    });
+  });
+
+  test('a plain anchor is still not a page', async ({ page }) => {
+    await serve(page, `${HEAD}
+      <a href="#comments">Next</a>
+      <video id="v" playsinline></video>`, `${ORIGIN}/web/index.html#/ep/1`);
+
+    expect(await page.evaluate(() => __cp.findEpisodes().next)).toBeNull();
+  });
+
+  test('hash-routed episode lists have neighbours too', async ({ page }) => {
+    await serve(page, `${HEAD}
+      <video id="v" playsinline style="width:360px;height:200px"></video>
+      ${[1, 2, 3].map(n => `<a href="#!/item?ep=${n}">Episode ${n}</a>`).join('')}`,
+      `${ORIGIN}/web/index.html#!/item?ep=2`);
+
+    const list = await page.evaluate(() => __cp.episodeList());
+    expect(list.map(e => e.current)).toEqual([false, true, false]);
+    expect(await page.evaluate(() => __cp.findEpisodes())).toEqual({
+      next: `${ORIGIN}/web/index.html#!/item?ep=3`,
+      prev: `${ORIGIN}/web/index.html#!/item?ep=1`,
+    });
   });
 });
 
@@ -233,9 +298,231 @@ test.describe('AirPlay', () => {
       document.querySelector('video')!.dispatchEvent(e);
     });
 
-    expect(await posted(page)).toContainEqual({ type: 'airplay', available: true });
+    // `source` rides along now; this test is about availability, and the
+    // stream kind has a test of its own.
+    expect(await posted(page)).toContainEqual(
+      expect.objectContaining({ type: 'airplay', available: true }));
     expect(await page.evaluate(() => __cp.showAirPlay())).toBe(true);
     expect(await page.evaluate(() => (window as any).__picked)).toBe(true);
+  });
+
+  // Entering theater used to add an availability listener and never remove it,
+  // because both handlers were anonymous closures with nothing holding a
+  // reference. Enter, leave, enter again and one route report became three —
+  // and since `airplayAvailable` is module state, a listener left on an old
+  // video could overwrite the answer for the current one.
+  const dispatchAvailability = (page: Page) => page.evaluate(() => {
+    const e: any = new Event('webkitplaybacktargetavailabilitychanged');
+    e.availability = 'available';
+    document.querySelector('video')!.dispatchEvent(e);
+  });
+
+  // WebKit fires a genuine availability event of its own — "not-available",
+  // since no engine under test has a route — so counting from zero would fold
+  // the engine's own answer in with the listeners under test. Only what the
+  // dispatch itself caused is interesting.
+  const forgetPosts = (page: Page) =>
+    page.evaluate(() => { (window as any).__posted.length = 0; });
+
+  const availabilityReports = async (page: Page) =>
+    (await posted(page)).filter((m: any) => m.type === 'airplay').length;
+
+  test('reports a route once, however many times theater was entered',
+    async ({ page }) => {
+      await serve(page, PLAYER);
+
+      for (let round = 0; round < 3; round++) {
+        await page.evaluate(() => __cp.enterTheater(
+          document.querySelector('video') as HTMLVideoElement));
+        await page.evaluate(() => __cp.exitTheater());
+      }
+      await page.evaluate(() => __cp.enterTheater(
+        document.querySelector('video') as HTMLVideoElement));
+
+      await forgetPosts(page);
+      await dispatchAvailability(page);
+      expect(await availabilityReports(page)).toBe(1);
+    });
+
+  /// Once theater is over the video is not the one on screen any more, and it
+  /// must not still be answering for the app.
+  test('a video left behind by theater no longer reports routes',
+    async ({ page }) => {
+      await serve(page, PLAYER);
+      await page.evaluate(() => __cp.enterTheater(
+        document.querySelector('video') as HTMLVideoElement));
+      await page.evaluate(() => __cp.exitTheater());
+
+      await forgetPosts(page);
+      await dispatchAvailability(page);
+      expect(await availabilityReports(page)).toBe(0);
+    });
+});
+
+// A MediaSource has no URL a receiver could fetch, so AirPlay offloads the
+// audio and leaves the picture on the phone. WebKit's documented answer is a
+// second <source> carrying a real URL, which it switches to when a route is
+// picked. The page author is expected to supply it; a browser has to find it.
+test.describe('AirPlay source for MSE', () => {
+  const asMSE = async (page: Page) => page.evaluate(() => {
+    Object.defineProperty(document.querySelector('video')!, 'currentSrc',
+                          { get: () => 'blob:https://example.test/abcd' });
+  });
+  const injected = (page: Page) => page.evaluate(() =>
+    document.querySelector('video source.cp-airplay-source')?.getAttribute('src') ?? null);
+  // The body has to be read: a resource-timing entry is not recorded until the
+  // response completes, and fetch() resolves on headers alone.
+  const fetchManifest = (page: Page) => page.evaluate(
+    (o) => fetch(o + '/master.m3u8').then((r) => r.text()).catch(() => {}), ORIGIN);
+
+  test('recognises a MediaSource blob, an HLS manifest and a plain file', async ({ page }) => {
+    await serve(page, PLAYER);
+    await asMSE(page);
+    expect(await page.evaluate(() =>
+      __cp.sourceKind(document.querySelector('video')!))).toBe('mse');
+
+    expect(await page.evaluate(() => {
+      const v = document.createElement('video');
+      v.src = 'https://example.test/a.m3u8?token=1';
+      return __cp.sourceKind(v);
+    })).toBe('hls');
+
+    expect(await page.evaluate(() => {
+      const v = document.createElement('video');
+      v.src = 'https://example.test/a.mp4';
+      return __cp.sourceKind(v);
+    })).toBe('file');
+
+    expect(await page.evaluate(() =>
+      __cp.sourceKind(document.createElement('video')))).toBe('none');
+  });
+
+  test('attaches a discovered manifest as a second source', async ({ page }) => {
+    await serve(page, PLAYER);
+    await fetchManifest(page);
+    await asMSE(page);
+
+    expect(await page.evaluate(() =>
+      __cp.attachAirPlaySource(document.querySelector('video')!))).toBe('attached');
+    expect(await injected(page)).toContain('/master.m3u8');
+  });
+
+  // Observed live on echovideo: `/cdn/<hash>?t.m3u8` is a 191-byte image/jpeg,
+  // not a playlist. Testing the whole URL let the query string decide, so the
+  // scan attached a decoy image to the video as an AirPlay source — and the
+  // diagnostic that exists to explain a failed offload reported success.
+  test('judges a manifest by its path, not by its query string',
+    async ({ page }) => {
+      await serve(page, PLAYER);
+
+      const verdicts = await page.evaluate(() => ({
+        decoy: __cp.isManifestURL('https://cdn.test/cdn/abc123?t.m3u8'),
+        decoyMidQuery: __cp.isManifestURL('https://cdn.test/x?a=1&f=.m3u8&b=2'),
+        real: __cp.isManifestURL('https://cdn.test/hls/master.m3u8'),
+        realWithToken: __cp.isManifestURL('https://cdn.test/hls/master.m3u8?t=9'),
+        segment: __cp.isManifestURL('https://cdn.test/hls/seg-1.ts'),
+        notWeb: __cp.isManifestURL('blob:https://cdn.test/abcd'),
+      }));
+
+      expect(verdicts).toEqual({
+        decoy: false, decoyMidQuery: false, real: true,
+        realWithToken: true, segment: false, notWeb: false,
+      });
+    });
+
+  test('will not attach a decoy whose query merely ends in .m3u8',
+    async ({ page }) => {
+      await serve(page, PLAYER);
+      await page.evaluate((o) => fetch(o + '/cdn/abc?t.m3u8').then((r) => r.text())
+        .catch(() => {}), ORIGIN);
+      await asMSE(page);
+
+      expect(await page.evaluate(() =>
+        __cp.attachAirPlaySource(document.querySelector('video')!)))
+        .toBe('no-candidate');
+      expect(await injected(page)).toBeNull();
+    });
+
+  // The native side gates the AirPlay button on this. Without it the button
+  // opens a picker that puts the sound on the television and leaves the
+  // picture on the phone — observed on a real receiver, and the reason the
+  // control now explains itself instead.
+  test('tells native what kind of stream a route would have to carry',
+    async ({ page }) => {
+      await serve(page, PLAYER);
+      await asMSE(page);
+      await page.evaluate(() => __cp.enterTheater(
+        document.querySelector('video') as HTMLVideoElement));
+
+      await page.evaluate(() => {
+        const e: any = new Event('webkitplaybacktargetavailabilitychanged');
+        e.availability = 'available';
+        document.querySelector('video')!.dispatchEvent(e);
+      });
+
+      const report = (await posted(page)).filter((m: any) => m.type === 'airplay').pop();
+      expect(report).toEqual({ type: 'airplay', available: true, source: 'mse' });
+    });
+
+  // Ranking, not guessing. A manifest with segments behind it was fetched from
+  // a directory the player kept returning to; a stray hit was not.
+  test('ranks a manifest with siblings above a lone one', async ({ page }) => {
+    await serve(page, PLAYER);
+    await page.evaluate(async (o) => {
+      // One directory the player keeps returning to, one it does not.
+      await fetch(o + '/lonely/solo.m3u8').then((r) => r.text()).catch(() => {});
+      await fetch(o + '/hls/master.m3u8').then((r) => r.text()).catch(() => {});
+      await fetch(o + '/hls/seg-1.ts').then((r) => r.text()).catch(() => {});
+      await fetch(o + '/hls/seg-2.ts').then((r) => r.text()).catch(() => {});
+    }, ORIGIN);
+
+    const candidates = await page.evaluate(() => __cp.streamCandidates());
+    expect(candidates[0]).toContain('/hls/master.m3u8');
+    expect(candidates).toContain(`${ORIGIN}/lonely/solo.m3u8`);
+  });
+
+  test('does nothing when the page requested no manifest', async ({ page }) => {
+    await serve(page, PLAYER);
+    await asMSE(page);
+
+    expect(await page.evaluate(() =>
+      __cp.attachAirPlaySource(document.querySelector('video')!))).toBe('no-candidate');
+    expect(await injected(page)).toBeNull();
+  });
+
+  // A src attribute makes WebKit ignore <source> children outright, so
+  // attaching one would be theatre. Moving the blob into a child would need
+  // load(), which tears down the page's MediaSource session mid-playback.
+  test('refuses when the blob is on the src attribute', async ({ page }) => {
+    await serve(page, PLAYER);
+    await fetchManifest(page);
+    await page.evaluate(() => {
+      document.querySelector('video')!.src = 'blob:https://example.test/abcd';
+    });
+
+    expect(await page.evaluate(() =>
+      __cp.attachAirPlaySource(document.querySelector('video')!))).toBe('src-attribute');
+    expect(await injected(page)).toBeNull();
+  });
+
+  test('leaves a non-MSE video alone', async ({ page }) => {
+    await serve(page, PLAYER);
+    await fetchManifest(page);
+
+    expect(await page.evaluate(() =>
+      __cp.attachAirPlaySource(document.querySelector('video')!))).toBe('not-mse');
+  });
+
+  test('attaches on entering theater and cleans up on exit', async ({ page }) => {
+    await serve(page, PLAYER);
+    await fetchManifest(page);
+    await asMSE(page);
+
+    await watchClean(page).click();
+    expect(await injected(page)).toContain('/master.m3u8');
+
+    await page.evaluate(() => __cp.exitTheater());
+    expect(await injected(page)).toBeNull();
   });
 });
 
@@ -345,6 +632,71 @@ test.describe('playback control', () => {
     await serve(page, PLAYER);
     expect(await page.evaluate(() => __cp.togglePlay())).toBe(false);
   });
+
+  test('volume up to 100 percent is acknowledged for native hardware control', async ({ page }) => {
+    await serve(page, PLAYER);
+    await page.evaluate(() => {
+      const video = document.querySelector('video')!;
+      // An unsafe cross-origin source cannot be routed through Web Audio. A
+      // desktop engine may still use its writable media-element volume.
+      video.src = 'https://media.example/episode.mp4';
+      __cp.enterTheater(video);
+    });
+    expect(await page.evaluate(() => __cp.setVolume(50))).toBe(true);
+    expect(await posted(page)).toContainEqual(
+      { type: 'volume', percent: 50, boosted: false });
+  });
+
+  test('all website volume levels use the primed gain node and cap at 200 percent', async ({ page }) => {
+    await serve(page, PLAYER);
+    await page.evaluate(() => {
+      const gain = { gain: { value: 1 }, connect: () => {} };
+      (window as any).__gain = gain;
+      (window as any).AudioContext = class {
+        destination = {};
+        state = 'running';
+        createMediaElementSource() { return { connect: () => {} }; }
+        createGain() { return gain; }
+        resume() { return Promise.resolve(); }
+      };
+      const video = document.querySelector('video')!;
+      video.src = `${location.origin}/episode.mp4`;
+      __cp.enterTheater(video);
+    });
+
+    expect(await page.evaluate(() => __cp.setVolume(50))).toBe(true);
+    expect(await page.evaluate(() => (window as any).__gain.gain.value)).toBe(1);
+    expect(await posted(page)).toContainEqual(
+      { type: 'volume', percent: 50, boosted: false });
+
+    expect(await page.evaluate(() => __cp.setVolume(250))).toBe(true);
+    expect(await page.evaluate(() => (window as any).__gain.gain.value)).toBe(2);
+    expect(await posted(page)).toContainEqual(
+      { type: 'volume', percent: 200, boosted: true });
+  });
+
+  test('does not claim boost when WebKit rejects audio activation', async ({ page }) => {
+    await serve(page, PLAYER);
+    await page.evaluate(() => {
+      const gain = { gain: { value: 1 }, connect: () => {} };
+      (window as any).__gain = gain;
+      (window as any).AudioContext = class {
+        destination = {};
+        state = 'suspended';
+        createMediaElementSource() { return { connect: () => {} }; }
+        createGain() { return gain; }
+        resume() { return Promise.reject(new Error('activation denied')); }
+      };
+      const video = document.querySelector('video')!;
+      video.src = `${location.origin}/episode.mp4`;
+      __cp.enterTheater(video);
+    });
+
+    expect(await page.evaluate(() => __cp.setVolume(175))).toBe(true);
+    await expect.poll(() => posted(page)).toContainEqual(
+      { type: 'volume', percent: 100, boosted: false });
+    expect(await page.evaluate(() => (window as any).__gain.gain.value)).toBe(1);
+  });
 });
 
 test.describe('frame announcement', () => {
@@ -376,6 +728,51 @@ test.describe('frame announcement', () => {
 // watchClean can rely on the gesture to start playback; resume has no gesture
 // and no page the user is looking at, so it has to do both jobs itself.
 test.describe('resuming theater after an episode change', () => {
+  test('distinguishes stale playback from a same-frame episode source change',
+    async ({ page }) => {
+      await serve(page, `${HEAD}<video id="v" src="/episode-1.mp4"></video>`);
+      await page.evaluate(() => {
+        const video = document.querySelector('video')!;
+        __cp.enterTheater(video);
+        __cp.armEpisodeTransition();
+        video.dispatchEvent(new Event('play'));
+      });
+      expect((await posted(page)).filter((m: any) => m.type === 'episodeSourceChanged'))
+        .toHaveLength(0);
+      // Native cannot compare frames, so the armed frame labels its own playback.
+      expect(await posted(page)).toContainEqual(
+        expect.objectContaining({ type: 'playback', armed: true }));
+
+      await page.evaluate(() => {
+        const video = document.querySelector('video')!;
+        video.src = '/episode-2.mp4';
+        video.dispatchEvent(new Event('loadstart'));
+      });
+      expect((await posted(page)).filter((m: any) => m.type === 'episodeSourceChanged'))
+        .toHaveLength(1);
+      // Once the source changed, the frame is no longer the outgoing one.
+      await page.evaluate(() => document.querySelector('video')!.dispatchEvent(new Event('play')));
+      expect((await posted(page)).filter((m: any) => m.type === 'playback').slice(-1)[0])
+        .toEqual({ type: 'playback', playing: false });
+    });
+
+  test('waits for a video inserted by a delayed AJAX player lifecycle',
+    async ({ page }) => {
+      await serve(page, `${HEAD}<div id="player"></div>`);
+      const resumed = page.evaluate(() => __cp.autoTheater(2000));
+      await page.waitForTimeout(250);
+      await page.evaluate(() => {
+        const video = document.createElement('video');
+        video.id = 'ajax-video';
+        video.src = '/episode-2.mp4';
+        video.style.cssText = 'width:640px;height:360px';
+        (video as any).play = () => Promise.resolve();
+        document.querySelector('#player')!.replaceChildren(video);
+      });
+      expect(await resumed).toBe(true);
+      expect(await page.evaluate(() => __cp.isTheater())).toBe(true);
+    });
+
   test('starts playback, so the next episode does not land paused',
     async ({ page }) => {
       await serve(page, PLAYER);
@@ -434,6 +831,64 @@ test.describe('resuming theater after an episode change', () => {
   test('never accepts a video with nothing to play', async ({ page }) => {
     await serve(page, `${HEAD}<video id="empty" style="width:0;height:0"></video>`);
     expect(await page.evaluate(() => __cp.resumeCandidate(9999))).toBe(null);
+  });
+});
+
+// A single-page app rebuilds its player between items instead of loading a
+// page, so nothing announces the change to native. The staged element simply
+// leaves the DOM. Theater used to stay up over nothing — black, with a set of
+// controls wired to an element that no longer existed.
+test.describe('a player that leaves the document', () => {
+  const swap = (page: Page) => page.evaluate(() => {
+    document.getElementById('v')!.remove();
+    const next = document.createElement('video');
+    next.id = 'v2';
+    next.setAttribute('playsinline', '');
+    next.src = '/b.mp4';
+    document.getElementById('trap')!.appendChild(next);
+  });
+
+  test('follows the replacement into theater', async ({ page }) => {
+    await serve(page, PLAYER);
+    await watchClean(page).click();
+    await swap(page);
+    await expect.poll(() => page.evaluate(
+      () => document.getElementById('v2')!.dataset.cpStage)).toBe('1');
+    expect(await page.evaluate(() => __cp.isTheater())).toBe(true);
+    const kinds = (await posted(page)).map((m: any) => m.type)
+      .filter((k: string) => k === 'theater' || k === 'theaterEnded');
+    // Ended for the old element, then theater for the new: native banks the
+    // old position and re-syncs its chrome, in that order.
+    expect(kinds).toEqual(['theater', 'theaterEnded', 'theater']);
+  });
+
+  test('gives the page back when nothing replaces it', async ({ page }) => {
+    await serve(page, PLAYER);
+    await watchClean(page).click();
+    await page.evaluate(() => document.getElementById('v')!.remove());
+    await page.evaluate(() => __cp.checkStaged(150));
+    await expect.poll(() => page.evaluate(() => __cp.isTheater())).toBe(false);
+    expect((await posted(page)).filter((m: any) => m.type === 'theaterEnded'))
+      .toHaveLength(1);
+    // Nothing is left hidden: the page is usable again.
+    expect(await page.evaluate(
+      () => document.querySelectorAll('[data-cp-hidden]').length)).toBe(0);
+  });
+
+  test('waits while the player is only briefly gone', async ({ page }) => {
+    await serve(page, PLAYER);
+    await watchClean(page).click();
+    await page.evaluate(() => document.getElementById('v')!.remove());
+    await page.waitForTimeout(400);
+    expect(await page.evaluate(() => __cp.isTheater())).toBe(true);
+    await page.evaluate(() => {
+      const next = document.createElement('video');
+      next.id = 'v2';
+      next.src = '/b.mp4';
+      document.getElementById('trap')!.appendChild(next);
+    });
+    await expect.poll(() => page.evaluate(
+      () => document.getElementById('v2')!.dataset.cpStage)).toBe('1');
   });
 });
 
@@ -692,6 +1147,143 @@ test.describe('episode neighbours', () => {
     expect(found.next).toBeNull();
     expect(found.prev).toBeNull();
   });
+
+  // The shape aniwave actually renders, measured on the live site. Every entry
+  // is "<number> <title>" linking to /watch/<slug>/ep-<n>; the site's own Prev
+  // and Next are script-driven and have no href. The old bare-number fixture
+  // above never matched this, which is why the buttons stayed empty there.
+  const TITLES = ['Fortune Is Unpredictable and Mutable', 'A Certain Bomb',
+    'Yokohama Gangster Paradise', 'The Tragedy of the Fatalist'];
+  const SHOW = `${ORIGIN}/watch/bungou-stray-dogs-80525`;
+  const ANIWAVE = (current: number, order = [1, 2, 3, 4]) => `${HEAD}
+    <video id="v" playsinline style="width:360px;height:200px"></video>
+    <div class="ctrl"><span>Prev</span><span>Next</span></div>
+    <ul>${order.map(n => `<li><a href="/watch/bungou-stray-dogs-80525/ep-${n}"
+      data-num="${n}"><b>${n}</b> <span>${TITLES[n - 1]}</span></a></li>`).join('')}</ul>
+    <script>history.replaceState(null, '', '${SHOW}/ep-${current}');<\/script>`;
+
+  test('reads a "number title" list, as aniwave renders it', async ({ page }) => {
+    await serve(page, ANIWAVE(2), `${SHOW}/ep-2`);
+    const found = await page.evaluate(() => __cp.findEpisodes());
+    expect(found.prev).toBe(`${SHOW}/ep-1`);
+    expect(found.next).toBe(`${SHOW}/ep-3`);
+
+    const list = await page.evaluate(() => __cp.episodeList());
+    expect(list.map((e: any) => e.label)).toEqual([
+      '1 Fortune Is Unpredictable and Mutable', '2 A Certain Bomb',
+      '3 Yokohama Gangster Paradise', '4 The Tragedy of the Fatalist']);
+    expect(list.map((e: any) => e.number)).toEqual([1, 2, 3, 4]);
+    expect(list.filter((e: any) => e.current).map((e: any) => e.number)).toEqual([2]);
+  });
+
+  test('orders "number title" entries by number when listed newest-first', async ({ page }) => {
+    await serve(page, ANIWAVE(2, [4, 3, 2, 1]), `${SHOW}/ep-2`);
+    const found = await page.evaluate(() => __cp.findEpisodes());
+    expect(found.prev).toBe(`${SHOW}/ep-1`);
+    expect(found.next).toBe(`${SHOW}/ep-3`);
+  });
+
+  // Episode 11 of the same show: an 81-character title. The list used to
+  // reject any name over 60 characters, which left a hole where it should be.
+  test('keeps an episode with a long title, truncating the label', async ({ page }) => {
+    const long = 'First, an Unsuitable Profession for Her. Second, an Ecstatic Detective Agency';
+    await serve(page, `${HEAD}
+      <video id="v" playsinline style="width:360px;height:200px"></video>
+      <a href="${SHOW}/ep-10">10 Rashomon and the Tiger</a>
+      <a href="${SHOW}/ep-11">11 ${long}</a>
+      <a href="${SHOW}/ep-12">12 Borne Back Ceaselessly into the Past</a>`, `${SHOW}/ep-10`);
+    const list = await page.evaluate(() => __cp.episodeList());
+    expect(list.map((e: any) => e.number)).toEqual([10, 11, 12]);
+    expect(list[1].label.length).toBeLessThanOrEqual(60);
+    expect(list[1].label.startsWith('11 First, an Unsuitable')).toBe(true);
+    expect(await page.evaluate(() => __cp.findEpisodes().next)).toBe(`${SHOW}/ep-11`);
+  });
+
+  // Title-only labels are enough when the URL carries the number.
+  test('takes the number from the URL when the text has none', async ({ page }) => {
+    await serve(page, `${HEAD}
+      <video id="v" playsinline style="width:360px;height:200px"></video>
+      <a href="${ORIGIN}/show?ep=3">The Azure Messenger</a>
+      <a href="${ORIGIN}/show?ep=1">Fortune Is Unpredictable</a>
+      <a href="${ORIGIN}/show?ep=2">A Certain Bomb</a>`, `${ORIGIN}/show?ep=2`);
+    const found = await page.evaluate(() => __cp.findEpisodes());
+    expect(found.prev).toBe(`${ORIGIN}/show?ep=1`);
+    expect(found.next).toBe(`${ORIGIN}/show?ep=3`);
+  });
+
+  // A "Next" link that is a real anchor must not enter the list as an entry
+  // labelled "Next" — it is navigation, and findEpisodes already uses it.
+  test('does not list the site\'s own Next link as an episode', async ({ page }) => {
+    await serve(page, `${HEAD}
+      <video id="v" playsinline style="width:360px;height:200px"></video>
+      <a href="${SHOW}/ep-3">Next</a>
+      ${[1, 2, 3].map(n => `<a href="${SHOW}/ep-${n}">${n} ${TITLES[n - 1]}</a>`).join('')}`,
+      `${SHOW}/ep-2`);
+    const list = await page.evaluate(() => __cp.episodeList());
+    expect(list.map((e: any) => e.label)).toEqual([
+      '1 Fortune Is Unpredictable and Mutable', '2 A Certain Bomb',
+      '3 Yokohama Gangster Paradise']);
+  });
+
+  // Ordinary numbered links that are not episodes stay out.
+  test('ignores pagination and comment counts', async ({ page }) => {
+    await serve(page, `${HEAD}
+      <video id="v" playsinline style="width:360px;height:200px"></video>
+      <a href="${ORIGIN}/comments/80525">12 comments</a>
+      <a href="${ORIGIN}/list?page=2">Page 2 of 9</a>
+      <a href="${ORIGIN}/sleepy-hollow-1999">Sleepy Hollow (1999)</a>`, `${SHOW}/ep-2`);
+    expect(await page.evaluate(() => __cp.episodeList())).toEqual([]);
+  });
+
+  // Measured live: the episode page carried "#request", "#sign" and "#"
+  // anchors — in-page links that resolve to the episode URL, match its shape,
+  // and are all "current". Next then pointed at the page the user was on.
+  test('ignores in-page anchors on the episode page', async ({ page }) => {
+    await serve(page, `${HEAD}
+      <video id="v" playsinline style="width:360px;height:200px"></video>
+      <a href="#request">Request</a> <a href="#">View all</a> <a href="#sign">Sign in</a>
+      ${[1, 2, 3].map(n => `<a href="${SHOW}/ep-${n}">${n} ${TITLES[n - 1]}</a>`).join('')}`,
+      `${SHOW}/ep-1`);
+    const list = await page.evaluate(() => __cp.episodeList());
+    expect(list.map((e: any) => e.label)).toEqual([
+      '1 Fortune Is Unpredictable and Mutable', '2 A Certain Bomb',
+      '3 Yokohama Gangster Paradise']);
+    const found = await page.evaluate(() => __cp.findEpisodes());
+    expect(found.next).toBe(`${SHOW}/ep-2`);
+    expect(found.prev).toBeNull();
+  });
+
+  // A "Watch now" button links to the same episode as the list entry. The
+  // list should carry the entry's label, whichever came first in the DOM.
+  test('prefers the link whose text names the episode when a page is linked twice', async ({ page }) => {
+    await serve(page, `${HEAD}
+      <video id="v" playsinline style="width:360px;height:200px"></video>
+      <a href="${SHOW}/ep-2">Watch now</a>
+      ${[1, 2, 3].map(n => `<a href="${SHOW}/ep-${n}">${n} ${TITLES[n - 1]}</a>`).join('')}`,
+      `${SHOW}/ep-1`);
+    const list = await page.evaluate(() => __cp.episodeList());
+    expect(list.map((e: any) => e.label)).toEqual([
+      '2 A Certain Bomb', '1 Fortune Is Unpredictable and Mutable',
+      '3 Yokohama Gangster Paradise']);
+    expect(await page.evaluate(() => __cp.findEpisodes().next)).toBe(`${SHOW}/ep-2`);
+  });
+
+  // Live markup is <b>1</b> newline <span>Title</span>; the label read "1\nTitle".
+  test('collapses whitespace inside a label', async ({ page }) => {
+    await serve(page, ANIWAVE(1), `${SHOW}/ep-1`);
+    const list = await page.evaluate(() => __cp.episodeList());
+    expect(list[0].label).toBe('1 Fortune Is Unpredictable and Mutable');
+    expect(list.some((e: any) => /\s\s|\n/.test(e.label))).toBe(false);
+  });
+
+  // A hash or trailing slash on the address must not unmark the current entry.
+  test('marks the current episode through a hash and trailing slash', async ({ page }) => {
+    await serve(page, ANIWAVE(3), `${SHOW}/ep-3`);
+    await page.evaluate((show) => history.replaceState(null, '', show + '/ep-3/#player'), SHOW);
+    const list = await page.evaluate(() => __cp.episodeList());
+    expect(list.filter((e: any) => e.current).map((e: any) => e.number)).toEqual([3]);
+    expect(await page.evaluate(() => __cp.findEpisodes().next)).toBe(`${SHOW}/ep-4`);
+  });
 });
 
 test.describe('page-initiated fullscreen', () => {
@@ -830,6 +1422,114 @@ test.describe('players in shadow DOM', () => {
       __cp.scan();
       return document.getElementById('plain')!.style.position;
     })).toBe('');
+  });
+
+  // Leaving theater has to undo what entering it did, and `stage()` walks up
+  // from the video — so on a shadow-DOM player it marks nodes inside that root.
+  // `unstage()` used to query the document alone, which cannot cross the
+  // boundary, so every mark survived: the video kept position:fixed, inset:0
+  // and a black background while its siblings kept display:none, and native had
+  // already dropped the overlay. That is a full-screen black rectangle with no
+  // controls and no page — on archive.org, a bundled shortcut.
+  const SHADOW_WITH_SIBLING = `${HEAD}
+    <div id="page">site chrome</div>
+    <player-host id="host"></player-host>
+    <script>
+      class PlayerHost extends HTMLElement {
+        connectedCallback() {
+          const root = this.attachShadow({ mode: 'open' });
+          root.innerHTML =
+            '<div class="wrap"><div id="sib">player chrome</div>' +
+            '<video id="inner" playsinline ' +
+            'style="width:360px;height:200px"></video></div>';
+        }
+      }
+      customElements.define('player-host', PlayerHost);
+    <\/script>`;
+
+  const shadowState = (page: Page) => page.evaluate(() => {
+    const root = document.getElementById('host')!.shadowRoot!;
+    const sibling = root.querySelector('#sib') as HTMLElement;
+    const video = root.querySelector('#inner') as HTMLElement;
+    return {
+      siblingHidden: sibling.hasAttribute('data-cp-hidden'),
+      siblingDisplay: getComputedStyle(sibling).display,
+      videoStaged: video.hasAttribute('data-cp-stage'),
+      videoPosition: getComputedStyle(video).position,
+    };
+  });
+
+  test('stages a video that lives inside a shadow root', async ({ page }) => {
+    await serve(page, SHADOW_WITH_SIBLING);
+    await page.evaluate(() => {
+      const root = document.getElementById('host')!.shadowRoot!;
+      __cp.enterTheater(root.querySelector('video')!);
+    });
+
+    const state = await shadowState(page);
+    expect(state.videoStaged).toBe(true);
+    expect(state.siblingHidden).toBe(true);
+    expect(state.siblingDisplay).toBe('none');
+  });
+
+  test('gives the page back when theater ends inside a shadow root',
+    async ({ page }) => {
+      await serve(page, SHADOW_WITH_SIBLING);
+      await page.evaluate(() => {
+        const root = document.getElementById('host')!.shadowRoot!;
+        __cp.enterTheater(root.querySelector('video')!);
+      });
+      await page.evaluate(() => __cp.exitTheater());
+
+      const state = await shadowState(page);
+      expect(state.videoStaged).toBe(false);
+      expect(state.videoPosition).not.toBe('fixed');
+      expect(state.siblingHidden).toBe(false);
+      expect(state.siblingDisplay).not.toBe('none');
+    });
+
+  // Entering theater on a second video has to clear the first one's marks, and
+  // `stage()` calls `unstage()` to do it. With the shadow root unreachable the
+  // first player stayed staged underneath the second.
+  test('re-staging clears the marks left in a shadow root', async ({ page }) => {
+    await serve(page, `${SHADOW_WITH_SIBLING}
+      <video id="outer" playsinline style="width:400px;height:220px"></video>`);
+
+    await page.evaluate(() => {
+      const root = document.getElementById('host')!.shadowRoot!;
+      __cp.enterTheater(root.querySelector('video')!);
+      __cp.enterTheater(document.getElementById('outer') as HTMLVideoElement);
+    });
+
+    const state = await shadowState(page);
+    expect(state.videoStaged).toBe(false);
+    expect(state.siblingHidden).toBe(false);
+  });
+
+  // A shadow host is opaque to querySelector('video'), so the "never hide the
+  // thing the user came to watch" guard could not see the player inside it. An
+  // absolutely-positioned host over its own video therefore matched every test
+  // for an interstitial.
+  test('never hides a shadow host holding the video', async ({ page }) => {
+    await serve(page, `${HEAD}
+      <style>
+        #host { position: absolute; inset: 0; background: #000; }
+      </style>
+      <player-host id="host"></player-host>
+      <script>
+        class PlayerHost extends HTMLElement {
+          connectedCallback() {
+            const root = this.attachShadow({ mode: 'open' });
+            root.innerHTML = '<video id="inner" playsinline ' +
+              'style="width:400px;height:300px"></video>';
+          }
+        }
+        customElements.define('player-host', PlayerHost);
+      <\/script>`);
+
+    await page.evaluate(() => __cp.blockOverlays());
+    expect(await page.evaluate(() =>
+      document.getElementById('host')!.hasAttribute('data-cp-blocked'))).toBe(false);
   });
 });
 
@@ -1154,6 +1854,57 @@ test.describe('interstitial blocking', () => {
       await expect(page.locator('#player')).toBeVisible();
     });
 
+  // Measured on aniwave in the Simulator: <div id="player"> is an absolutely
+  // positioned black box that stays EMPTY until a server is picked. The frame
+  // guard above had nothing to find yet, the box was hidden as a gate, and the
+  // iframe then landed inside display:none — a black player, forever.
+  test('spares an empty player placeholder before its iframe arrives', async ({ page }) => {
+    await serve(page, `${HEAD}
+      <div style="position:relative;padding-bottom:56.25%">
+        <div id="player" style="position:absolute;inset:0;background:#000"></div>
+      </div>`);
+    await expect(page.locator('#player')).toBeVisible();
+    // The iframe the site adds later must show.
+    await page.evaluate(() => {
+      const f = document.createElement('iframe'); f.src = 'about:blank';
+      f.style.cssText = 'width:100%;height:100%;border:0';
+      document.getElementById('player')!.appendChild(f);
+    });
+    await expect(page.locator('#player iframe')).toBeVisible();
+  });
+
+  // A placeholder WITH text ("Loading player…") is indistinguishable from a
+  // gate up front. Once the frame lands in it the guess was wrong; let go.
+  test('releases a hidden container once a player iframe lands in it', async ({ page }) => {
+    await serve(page, `${HEAD}
+      <div style="position:relative;padding-bottom:56.25%">
+        <div id="player" style="position:absolute;inset:0;background:#000;color:#fff">
+          Loading player, please wait…
+        </div>
+      </div>`);
+    await expect(page.locator('#player')).toBeHidden();
+    await page.evaluate(() => {
+      const f = document.createElement('iframe'); f.src = 'about:blank';
+      f.style.cssText = 'width:100%;height:100%;border:0';
+      document.getElementById('player')!.appendChild(f);
+    });
+    await expect(page.locator('#player')).toBeVisible();
+    await expect(page.locator('#player iframe')).toBeVisible();
+  });
+
+  // The release is scoped like the frame guard: with a real <video> present,
+  // an ad frame arriving inside a hidden interstitial does not free it.
+  test('keeps an interstitial hidden when an ad iframe lands in it over a real video', async ({ page }) => {
+    await serve(page, MODAL);
+    await expect(page.locator('#backdrop')).toBeHidden();
+    await page.evaluate(() => {
+      const f = document.createElement('iframe'); f.src = 'about:blank';
+      document.getElementById('card')!.appendChild(f);
+    });
+    await page.waitForTimeout(300);
+    await expect(page.locator('#card')).toBeHidden();
+  });
+
   // The other half of the iframe rule. Sparing frames applies only where this
   // document has no video of its own; an ad frame painted over a real player
   // must still go, or the fix above would have traded one hole for a bigger one.
@@ -1209,6 +1960,22 @@ test.describe('interstitial blocking', () => {
         <input type="email"><button>Sign in</button>
       </div>`);
     await expect(page.locator('#signin')).toBeVisible();
+  });
+
+  // Measured on a real Jellyfin server: its login view is a full-viewport
+  // positioned element over a poster backdrop — exactly the shape the no-video
+  // gate check matches — so the sign-in form was hidden and the page looked
+  // broken. A consent gate never asks for a password; a login does.
+  test('never hides a sign-in form', async ({ page }) => {
+    await serve(page, `${HEAD}
+      <div id="login" style="position:absolute;inset:0;background:#222;color:#fff">
+        <h1>Please sign in</h1>
+        <input type="text" name="user">
+        <input type="password" name="pass">
+        <button>Sign In</button>
+      </div>`);
+    await expect(page.locator('#login')).toBeVisible();
+    await expect(page.locator('input[type=password]')).toBeVisible();
   });
 
   test('still catches a full-page gate before any video exists', async ({ page }) => {

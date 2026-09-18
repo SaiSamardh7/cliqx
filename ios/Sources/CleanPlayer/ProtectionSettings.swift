@@ -16,51 +16,78 @@ public enum HostKey {
         while host.hasSuffix(".") { host.removeLast() }
         while host.hasPrefix(".") { host.removeFirst() }
         if host.hasPrefix("www.") { host.removeFirst(4) }
-        guard !host.isEmpty, host.contains("."), !host.contains("/"),
-              !host.contains(" ")
+        let isIPv6 = host.contains(":")
+            && host.allSatisfy { $0.isHexDigit || $0 == ":" }
+        guard !host.isEmpty, !host.contains("/"), !host.contains(" "),
+              !host.contains(":") || isIPv6,
+              host == "localhost" || host.contains(".") || isIPv6
         else { return nil }
         return host
     }
 
-    /// Second-level labels that are part of the suffix rather than a site:
-    /// the `com` in `com.pl`, the `co` in `co.uk`.
-    ///
-    /// This replaced a hardcoded list of 21 known suffixes. That list was
-    /// written when `registrableDomain` only resolved user exceptions, where
-    /// over-reducing was cosmetic. It stopped being cosmetic when
-    /// `isSameSite` became a security predicate: every ccTLD second level the
-    /// list omitted — `com.pl`, `co.il`, `com.ua`, `com.ar` and most others —
-    /// reduced `evil.com.pl` and `victim.com.pl` both to `com.pl`, so they
-    /// compared equal and a cross-site redirect was let straight through.
-    ///
-    /// Matching the shape instead of enumerating instances covers all of them,
-    /// and errs the safe way: an unknown suffix yields a *more* specific
-    /// domain, so two different sites never collide.
-    private static let suffixSecondLevels: Set<String> = [
-        "com", "co", "net", "org", "gov", "edu", "ac", "or", "ne", "go",
-        "mil", "int", "info", "biz", "name", "web", "in",
-    ]
+    private struct PublicSuffixRules {
+        var exact: Set<String> = []
+        var wildcard: Set<String> = []
+        var exceptions: Set<String> = []
+
+        init() {
+            guard let url = Bundle.module.url(forResource: "public_suffix_list.dat",
+                                              withExtension: "txt"),
+                  let contents = try? String(contentsOf: url, encoding: .utf8)
+            else { return }
+
+            for rawLine in contents.split(whereSeparator: \Character.isNewline) {
+                let line = rawLine.trimmingCharacters(in: .whitespaces)
+                guard !line.isEmpty, !line.hasPrefix("//") else { continue }
+                if line.hasPrefix("!") {
+                    exceptions.insert(String(line.dropFirst()).lowercased())
+                } else if line.hasPrefix("*.") {
+                    wildcard.insert(String(line.dropFirst(2)).lowercased())
+                } else {
+                    exact.insert(line.lowercased())
+                }
+            }
+        }
+
+        func publicSuffixLabelCount(for labels: [String]) -> Int {
+            var best = 1 // The PSL's implicit `*` rule.
+            for index in labels.indices {
+                let candidate = labels[index...].joined(separator: ".")
+                if exceptions.contains(candidate) {
+                    return max(labels.count - index - 1, 1)
+                }
+                if exact.contains(candidate) {
+                    best = max(best, labels.count - index)
+                }
+                if index > labels.startIndex {
+                    let wildcardBase = labels[index...].joined(separator: ".")
+                    if wildcard.contains(wildcardBase) {
+                        best = max(best, labels.count - index + 1)
+                    }
+                }
+            }
+            return best
+        }
+    }
+
+    private static let publicSuffixRules = PublicSuffixRules()
 
     /// The registrable part of a host: `cdn.player.example.com` -> `example.com`.
     ///
-    /// ponytail: shape-matching, not the real Public Suffix List. Ceiling — a
-    /// suffix whose second level is an ordinary word (`blogspot.com`, where the
-    /// PSL makes each subdomain its own site) still reduces one label too far,
-    /// so two subdomains of it compare equal. Upgrade path: bundle the PSL and
-    /// match against it here; `isSameSite` and its tests do not change.
+    /// Uses the complete Public Suffix List, including its private section.
+    /// The private rules matter here: `victim.github.io` and `evil.github.io`
+    /// are controlled by different people and must never be treated as one
+    /// site just because they share a hosting provider.
     public static func registrableDomain(_ raw: String) -> String? {
         guard let host = canonical(raw) else { return nil }
-        let labels = host.split(separator: ".").map(String.init)
-        guard labels.count >= 2 else { return nil }
-
-        // A two-letter TLD with a generic second level is a country-code
-        // suffix: take one more label so the site itself is included.
-        let tld = labels[labels.count - 1]
-        let second = labels[labels.count - 2]
-        if labels.count >= 3, tld.count == 2, suffixSecondLevels.contains(second) {
-            return labels.suffix(3).joined(separator: ".")
+        if host == "localhost" || host.contains(":") || host.allSatisfy({ $0.isNumber || $0 == "." }) {
+            return host
         }
-        return labels.suffix(2).joined(separator: ".")
+        let labels = host.split(separator: ".").map(String.init)
+        guard !labels.isEmpty else { return nil }
+        let suffixCount = publicSuffixRules.publicSuffixLabelCount(for: labels)
+        let registrableCount = min(suffixCount + 1, labels.count)
+        return labels.suffix(registrableCount).joined(separator: ".")
     }
 
     /// Whether a destination belongs to the same site the user is already on.

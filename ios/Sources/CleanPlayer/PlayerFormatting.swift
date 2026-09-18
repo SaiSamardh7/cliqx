@@ -11,7 +11,7 @@ public enum PlayerFormatting {
 
     public static func rateText(_ rate: Double) -> String {
         rate == rate.rounded() ? String(Int(rate)) : String(format: "%.2g", rate)
-}
+    }
 
     /// h:mm:ss only when there is an hour to show.
     public static func timecode(_ seconds: Double) -> String {
@@ -20,7 +20,7 @@ public enum PlayerFormatting {
         let s = total % 60, m = (total / 60) % 60, h = total / 3600
         return h > 0 ? String(format: "%d:%02d:%02d", h, m, s)
                      : String(format: "%d:%02d", m, s)
-}
+    }
 
     /// VoiceOver reads "one minute five seconds", not "1:05".
     public static func spoken(_ seconds: Double) -> String {
@@ -29,7 +29,7 @@ public enum PlayerFormatting {
         f.allowedUnits = seconds >= 3600 ? [.hour, .minute, .second] : [.minute, .second]
         f.unitsStyle = .spellOut
         return f.string(from: seconds) ?? "\(Int(seconds)) seconds"
-}
+    }
 
     /// Page titles are built for search engines, not for players:
     /// "Aniwave - Hunter x Hunter (2011) — Episode 112: Monster", or
@@ -66,7 +66,7 @@ public enum PlayerFormatting {
             return true
         }
         return kept.first ?? segments[0]
-}
+    }
 
     /// Episode links are often labelled with a bare number. "112" alone reads
     /// as noise in a list; "Episode 112" reads as an episode.
@@ -75,7 +75,7 @@ public enum PlayerFormatting {
         guard !trimmed.isEmpty,
               trimmed.allSatisfy(\.isNumber) else { return trimmed }
         return "Episode \(trimmed)"
-}
+    }
 
     /// "Episode 110" pulled out of the page title, when it is there to find.
     public static func episodeLabel(_ raw: String) -> String? {
@@ -86,5 +86,63 @@ public enum PlayerFormatting {
         guard let number = text.range(of: #"\d{1,4}"#, options: .regularExpression)
         else { return nil }
         return "Episode \(text[number])"
-}
+    }
+
+    /// A stable, human-readable series name for collapsing episode pages into
+    /// one Recent card. Returns nil rather than guessing when the title only
+    /// says "Episode 5"; callers can then fall back to a URL-based identity.
+    public static func seriesTitle(_ raw: String, host: String = "") -> String? {
+        let branded = showTitle(raw, host: host)
+        let episode = #"(?i)\b(?:episode|ep\.?)\s*\d{1,4}(?:\.\d+)?\b"#
+        guard let range = branded.range(of: episode, options: .regularExpression) else {
+            let clean = branded.trimmingCharacters(in: .whitespacesAndNewlines)
+            return clean.isEmpty ? nil : clean
+        }
+
+        let before = branded[..<range.lowerBound]
+            .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines
+                .union(CharacterSet(charactersIn: "-–—:|·")))
+        if !before.isEmpty { return before }
+
+        let after = branded[range.upperBound...]
+            .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines
+                .union(CharacterSet(charactersIn: "-–—:|·")))
+        if !after.isEmpty { return after }
+
+        // `showTitle` deliberately returns the first useful title segment.
+        // When the page is "Episode 8 - Naruto", inspect the raw suffix too.
+        if let rawRange = raw.range(of: episode, options: .regularExpression) {
+            let rawAfter = raw[rawRange.upperBound...]
+                .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines
+                    .union(CharacterSet(charactersIn: "-–—:|·")))
+            if !rawAfter.isEmpty { return rawAfter }
+        }
+        return nil
+    }
+
+    /// Same show on the same site, independent of episode number. The title is
+    /// preferred because sites change URL shapes; the path fallback covers
+    /// pages whose title is only "Episode 5".
+    public static func seriesIdentity(title: String, url: URL) -> String {
+        let host = HostKey.canonical(url.host() ?? "") ?? (url.host() ?? "")
+        if let series = seriesTitle(title, host: host),
+           series.range(of: #"(?i)^episode\s*\d+$"#, options: .regularExpression) == nil {
+            let folded = series.folding(options: [.caseInsensitive, .diacriticInsensitive],
+                                        locale: .current)
+                .lowercased()
+                .replacingOccurrences(of: #"[^a-z0-9]+"#, with: "-",
+                                      options: .regularExpression)
+                .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+            if !folded.isEmpty { return "\(host)|title|\(folded)" }
+        }
+
+        var path = url.path.lowercased()
+        path = path.replacingOccurrences(
+            of: #"(?i)(?:episode|ep|e)[-_/. ]*\d{1,4}(?:\.\d+)?"#,
+            with: "episode", options: .regularExpression)
+        path = path.replacingOccurrences(
+            of: #"(?i)(?<=/)(?:\d{1,4})(?=/?$)"#,
+            with: "episode", options: .regularExpression)
+        return "\(host)|path|\(path)"
+    }
 }

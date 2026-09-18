@@ -6,8 +6,10 @@ struct BrowserView: View {
     @ObservedObject var model: BrowserModel
     @ObservedObject var rules: RuleListController
     @ObservedObject var settings: ProtectionSettings
+    @ObservedObject var gestureSettings: PlayerGestureSettings
     @StateObject private var page = PageState()
     @State private var showingSettings = false
+    @State private var loadedDuringRulePreparation = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -34,7 +36,8 @@ struct BrowserView: View {
                 // Native chrome, not injected DOM: nothing the page draws
                 // appears above a staged video on iOS WebKit.
                 if page.isTheater {
-                    PlayerOverlay(page: page, rules: rules)
+                    PlayerOverlay(page: page, rules: rules,
+                                  gestureSettings: gestureSettings)
                 }
 
                 // Over everything, including the error panel: while this is up
@@ -53,9 +56,22 @@ struct BrowserView: View {
         }
         .background(Color(.systemBackground))
         .animation(.easeInOut(duration: 0.2), value: immersive)
+        .onAppear {
+            loadedDuringRulePreparation = rules.status.isPreparing
+        }
+        .onChange(of: rules.completedActivationCount) { _, _ in
+            guard loadedDuringRulePreparation, !rules.isSuspended else { return }
+            loadedDuringRulePreparation = false
+            page.reload()
+        }
         .sheet(isPresented: $showingSettings) {
             SettingsView(model: model, rules: rules, settings: settings,
-                         currentHost: page.host.isEmpty ? url.host() : page.host)
+                         gestureSettings: gestureSettings,
+                         currentHost: page.host.isEmpty ? url.host() : page.host,
+                         // Rules apply at navigation time, so a level change
+                         // leaves the page in front of the user exactly as it
+                         // was. Without this the setting looks broken.
+                         onProtectionChanged: { page.reload() })
         }
     }
 
@@ -72,7 +88,7 @@ struct BrowserView: View {
             Color.black.ignoresSafeArea()
             VStack(spacing: 16) {
                 ProgressView().controlSize(.large).tint(.white)
-                Text("Loading next episode")
+                Text(page.episodeTransitionMessage)
                     .font(.subheadline.weight(.medium))
                     .foregroundStyle(.white.opacity(0.9))
                 // An escape hatch, because a site that never resumes would
@@ -85,7 +101,7 @@ struct BrowserView: View {
         }
         .transition(.opacity)
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("Loading the next episode")
+        .accessibilityLabel(page.episodeTransitionMessage)
     }
 
     private var host: String { page.host.isEmpty ? (url.host() ?? "") : page.host }
@@ -105,20 +121,20 @@ struct BrowserView: View {
     /// A cross-site window the page tried to open on its own. Offered rather
     /// than followed: on a video page this is nearly always an ad, but it is
     /// occasionally a real outbound link, and the user can tell them apart.
-    private func popupBar(_ destination: URL) -> some View {
-        HStack(spacing: 12) {
+    private func popupBar(_ request: URLRequest) -> some View {
+        let destination = request.url
+        return HStack(spacing: 12) {
             Image(systemName: "hand.raised.fill")
                 .foregroundStyle(.secondary)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 1) {
                 Text("Blocked a popup").font(.footnote.weight(.medium))
-                Text(destination.host() ?? destination.absoluteString)
+                Text(destination?.host() ?? destination?.absoluteString ?? "Unknown destination")
                     .font(.caption).foregroundStyle(.secondary).lineLimit(1)
             }
             Spacer()
             Button("Open") {
-                page.blockedExternal = nil
-                model.open(destination)
+                page.actions.openBlockedRequest(request)
             }
             .font(.footnote.weight(.semibold))
             Button {
@@ -149,18 +165,6 @@ struct BrowserView: View {
         .padding(.horizontal, 16)
         .padding(.bottom, 8)
         .accessibilityElement(children: .combine)
-    }
-
-    // MARK: Player controls
-
-    private func control(_ symbol: String, label: String,
-                         action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: symbol)
-                .font(.title3)
-                .frame(width: 44, height: 44)   // touch target floor
-        }
-        .accessibilityLabel(label)
     }
 
     // MARK: Chrome
@@ -214,6 +218,20 @@ struct BrowserView: View {
                           : "Turn protection off for \(host)",
                           systemImage: settings.isExempt(host)
                           ? "shield.lefthalf.filled" : "shield.slash")
+                }
+            }
+            // The only way onto the home screen for a site that never stages a
+            // video the app can see — a home media server, most often.
+            let site = page.webView?.url ?? url
+            if AddressResolver.siteRoot(of: site) != nil {
+                if model.isPinned(site) {
+                    Button { model.unpinSite(site) } label: {
+                        Label("Remove from Home", systemImage: "pin.slash")
+                    }
+                } else {
+                    Button { model.pinSite(site, title: page.title) } label: {
+                        Label("Add to Home", systemImage: "pin")
+                    }
                 }
             }
             Button { showingSettings = true } label: {
@@ -298,7 +316,7 @@ struct BrowserView: View {
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
             HStack(spacing: 12) {
-                Button("Try again") { page.loadError = nil; page.reload() }
+                Button("Try again") { page.actions.retryFailedNavigation() }
                     .buttonStyle(.borderedProminent)
                 Button("Home") { model.goHome() }
                     .buttonStyle(.bordered)

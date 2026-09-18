@@ -30,6 +30,10 @@ public final class RuleListController: ObservableObject {
     @Published public private(set) var status: Status = .idle
     /// Rules currently in force. Drives the Settings readout.
     @Published public private(set) var activeRuleCount = 0
+    /// Advances after an activation reaches a terminal state. A browser page
+    /// that loaded while status was `preparing` observes this and reloads once,
+    /// so requests made during the fallback-only window get full protection.
+    @Published public private(set) var completedActivationCount = 0
 
     /// False only in the window between launch and the first list being
     /// attached — a few milliseconds, since the smallest list goes on first.
@@ -122,6 +126,7 @@ public final class RuleListController: ObservableObject {
     private func performActivation(_ level: ProtectionLevel) async {
         guard level != .off else {
             apply([], rules: 0, status: .off, allowEmpty: true)
+            completedActivationCount += 1
             return
         }
 
@@ -133,6 +138,7 @@ public final class RuleListController: ObservableObject {
             apply([], rules: 0,
                   status: .degraded(failed: ["no rules bundled"], rules: 0),
                   allowEmpty: true)
+            completedActivationCount += 1
             return
         }
         let total = wanted.reduce(0) { $0 + $1.ruleCount }
@@ -146,6 +152,7 @@ public final class RuleListController: ObservableObject {
         if Task.isCancelled { return }
         if let cached {
             apply(cached, rules: total, status: .ready(rules: total))
+            completedActivationCount += 1
             await purgeStaleCompilations(keeping: catalog.lists)
             return
         }
@@ -177,6 +184,7 @@ public final class RuleListController: ObservableObject {
 
         status = failed.isEmpty ? .ready(rules: rules)
                                 : .degraded(failed: failed, rules: rules)
+        completedActivationCount += 1
         // Even if every list failed, stop holding navigation: the user is then
         // told protection is unavailable rather than left staring at a spinner.
         isArmed = true

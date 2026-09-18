@@ -48,15 +48,41 @@ final class PlayerGestureTests: XCTestCase {
         )
     }
 
-    func testSmallAndDiagonalDragsStayUnclaimed() {
+    func testSmallDragStaysUnclaimedAndDiagonalUsesWholeSideZone() {
         XCTAssertNil(PlayerGestureClassifier.classify(dx: 9, dy: 8, startXFraction: 0.2))
-        XCTAssertNil(PlayerGestureClassifier.classify(dx: 50, dy: 45, startXFraction: 0.2))
+        XCTAssertEqual(
+            PlayerGestureClassifier.classify(dx: 50, dy: 45, startXFraction: 0.2),
+            .brightness
+        )
+        XCTAssertEqual(
+            PlayerGestureClassifier.classify(dx: -45, dy: 50, startXFraction: 0.8),
+            .volume
+        )
     }
 
     func testDownwardDragCanDismissButUpwardCannot() {
         XCTAssertTrue(PlayerGestureClassifier.shouldDismiss(dx: 20, dy: 130))
         XCTAssertFalse(PlayerGestureClassifier.shouldDismiss(dx: 20, dy: -130))
         XCTAssertFalse(PlayerGestureClassifier.shouldDismiss(dx: 100, dy: 100))
+    }
+
+    func testLongDownwardSideGesturesNeverBecomeDismissals() {
+        let oneInchOnIPhone15Pro = 180.0
+        XCTAssertEqual(
+            PlayerGestureClassifier.classify(
+                dx: 4, dy: oneInchOnIPhone15Pro, startXFraction: 0.2),
+            .brightness
+        )
+        XCTAssertEqual(
+            PlayerGestureClassifier.classify(
+                dx: 4, dy: oneInchOnIPhone15Pro, startXFraction: 0.8),
+            .volume
+        )
+        XCTAssertEqual(
+            PlayerGestureClassifier.classify(
+                dx: 4, dy: oneInchOnIPhone15Pro, startXFraction: 0.5),
+            .dismiss
+        )
     }
 
     func testSeekDeltaIsBounded() {

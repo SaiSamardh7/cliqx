@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		AA00000000000000000001 /* CleanPlayer in Frameworks */ = {isa = PBXBuildFile; productRef = AA00000000000000000002 /* CleanPlayer */; };
+		AA00000000000000000003 /* VLCKitSPM in Frameworks */ = {isa = PBXBuildFile; productRef = AA00000000000000000004 /* VLCKitSPM */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -44,6 +45,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				AA00000000000000000001 /* CleanPlayer in Frameworks */,
+				AA00000000000000000003 /* VLCKitSPM in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -104,6 +106,7 @@
 			name = CleanPlayerApp;
 			packageProductDependencies = (
 				AA00000000000000000002 /* CleanPlayer */,
+				AA00000000000000000004 /* VLCKitSPM */,
 			);
 			productName = CleanPlayerApp;
 			productReference = AA00000000000000000010 /* CleanPlayerApp.app */;
@@ -156,6 +159,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				AA00000000000000000070 /* XCLocalSwiftPackageReference ".." */,
+				AA00000000000000000071 /* XCRemoteSwiftPackageReference "vlckit-spm" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = AA00000000000000000041 /* Products */;
@@ -219,9 +223,10 @@
 				"CODE_SIGNING_ALLOWED[sdk=iphonesimulator*]" = NO;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = 7V4YHP87UQ;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "CleanPlayerApp-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = Cliqx;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
@@ -249,9 +254,10 @@
 				"CODE_SIGNING_ALLOWED[sdk=iphonesimulator*]" = NO;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = 7V4YHP87UQ;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "CleanPlayerApp-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = Cliqx;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
@@ -397,10 +403,26 @@
 		};
 /* End XCLocalSwiftPackageReference section */
 
+/* Begin XCRemoteSwiftPackageReference section */
+		AA00000000000000000071 /* XCRemoteSwiftPackageReference "vlckit-spm" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/tylerjonesio/vlckit-spm";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 3.6.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
 /* Begin XCSwiftPackageProductDependency section */
 		AA00000000000000000002 /* CleanPlayer */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = CleanPlayer;
+		};
+		AA00000000000000000004 /* VLCKitSPM */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AA00000000000000000071 /* XCRemoteSwiftPackageReference "vlckit-spm" */;
+			productName = VLCKitSPM;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

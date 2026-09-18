@@ -8,6 +8,7 @@ struct SettingsView: View {
     @ObservedObject var model: BrowserModel
     @ObservedObject var rules: RuleListController
     @ObservedObject var settings: ProtectionSettings
+    @ObservedObject var gestureSettings: PlayerGestureSettings
 
     /// The site the user was on when they opened Settings, if any. Per-site
     /// controls only make sense with one.
@@ -16,7 +17,12 @@ struct SettingsView: View {
     /// Called after a change that only takes effect on the next load. Rules
     /// apply at navigation time, so without this the user changes a setting,
     /// sees the page in front of them keep its ads, and concludes it is broken.
-    var onProtectionChanged: (() -> Void)?
+    ///
+    /// Required, with no default. It was optional, both call sites quietly
+    /// omitted it, and the reload this section's footer promises never
+    /// happened — for as long as the parameter existed. A caller with nothing
+    /// to reload now has to say so.
+    let onProtectionChanged: () -> Void
 
     @Environment(\.dismiss) private var dismiss
     @State private var clearedData = false
@@ -27,6 +33,7 @@ struct SettingsView: View {
                 protectionSection
                 if !settings.exemptHosts.isEmpty { exceptionsSection }
                 privacySection
+                browserPlayerSection
                 listsSection
                 aboutSection
             }
@@ -53,7 +60,7 @@ struct SettingsView: View {
             .onChange(of: settings.level) { _, level in
                 Task {
                     await rules.activate(level)
-                    onProtectionChanged?()
+                    onProtectionChanged()
                 }
             }
 
@@ -121,7 +128,7 @@ struct SettingsView: View {
                 }
                 if let host = currentHost {
                     rules.setSuspended(settings.isExempt(host))
-                    onProtectionChanged?()
+                    onProtectionChanged()
                 }
             }
         } header: {
@@ -154,6 +161,16 @@ struct SettingsView: View {
             Text("Private browsing keeps cookies, cache and site storage in "
                  + "memory only. Turning it on or off reloads the page you "
                  + "are on.")
+        }
+    }
+
+    // MARK: Browser player preferences
+
+    private var browserPlayerSection: some View {
+        Section("Browser player") {
+            NavigationLink("Gestures") {
+                PlayerGesturePreferencesView(settings: gestureSettings)
+            }
         }
     }
 
@@ -225,5 +242,24 @@ struct SettingsView: View {
         let short = info?["CFBundleShortVersionString"] as? String ?? "?"
         let build = info?["CFBundleVersion"] as? String ?? "?"
         return "\(short) (\(build))"
+    }
+}
+
+// MARK: - Browser setting screens
+
+/// Only settings something reads live here. A previous version listed 84
+/// stored toggles nothing consulted — "Camera: Block" that blocked nothing.
+private struct PlayerGesturePreferencesView: View {
+    @ObservedObject var settings: PlayerGestureSettings
+    var body: some View {
+        Form {
+            Section("Gestures") {
+                Toggle("Double-tap centre to play or pause", isOn: $settings.doubleTapPlayPause)
+                Toggle("Swipe horizontally to seek", isOn: $settings.swipeSeeking)
+                Toggle("Swipe for brightness and volume", isOn: $settings.brightnessAndVolume)
+                Toggle("Hold for temporary 2× speed", isOn: $settings.temporaryFastForward)
+                Toggle("Swipe down in centre to close", isOn: $settings.swipeToDismiss)
+            }
+        }.navigationTitle("Gestures")
     }
 }

@@ -44,6 +44,7 @@ public enum PlayerDragAction: Equatable {
     case seek
     case brightness
     case volume
+    case dismiss
 }
 
 /// Pure gesture arbitration kept outside SwiftUI so edge cases are testable.
@@ -52,13 +53,17 @@ public enum PlayerGestureClassifier {
                                 startXFraction: Double) -> PlayerDragAction? {
         let horizontal = abs(dx)
         let vertical = abs(dy)
-        guard max(horizontal, vertical) >= 18 else { return nil }
+        guard max(horizontal, vertical) >= 12 else { return nil }
 
+        // Keep clearly horizontal movement for seeking. Every other deliberate
+        // drag belongs to the full-height side zone, making brightness/volume
+        // much easier to acquire with a thumb and tolerant of diagonal motion.
         if horizontal >= vertical * 1.35 { return .seek }
-        if vertical >= horizontal * 1.35 {
-            return startXFraction < 0.5 ? .brightness : .volume
-        }
-        return nil
+        // Dismissal owns only a slim centre lane. A long downward swipe in
+        // either side zone must remain brightness/volume all the way through
+        // gesture completion instead of unexpectedly closing the player.
+        if (0.45...0.55).contains(startXFraction) { return .dismiss }
+        return startXFraction < 0.5 ? .brightness : .volume
     }
 
     public static func shouldDismiss(dx: Double, dy: Double) -> Bool {

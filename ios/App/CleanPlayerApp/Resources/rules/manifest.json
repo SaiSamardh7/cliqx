@@ -1,33 +1,33 @@
 {
-  "convertedAt": "2026-09-03T12:46:37.696572+00:00",
+  "convertedAt": "2026-09-14T23:08:38.320879+00:00",
   "converter": "cargo 1.98.0 (797e8a9bc 2026-08-05) (Homebrew)",
   "sources": {
     "easylist": {
-      "version": "202609031223",
-      "sourceSha256": "f89e2a256c4632cf4f7264248829425cc52c5f1e221db2452022964a5304f980",
+      "version": "202609142300",
+      "sourceSha256": "1d172c6149a4bf352dba9decdffc9a993ec2a99505af3c1fbf4b2db2fcd3ce34",
       "generated": "ads.json",
-      "ruleCount": 77963,
-      "generatedSha256": "75aef088eb497f5ec0afb2eef7b7a0fed8b6c101e051835197b28ce319e69ee2",
-      "bytes": 8381242,
-      "compressedBytes": 787103
+      "ruleCount": 77670,
+      "generatedSha256": "fc544b5ef832a6dc51f5ef7760b56a579e81cc73ae24f0e5022dc59796049436",
+      "bytes": 8363021,
+      "compressedBytes": 789138
     },
     "easyprivacy": {
-      "version": "202609031233",
-      "sourceSha256": "352d11830f62d7dc2110836a5dd4d338e70ddbc2ad85a40aa9045dff69ae7aa8",
+      "version": "202609142302",
+      "sourceSha256": "8765d08112e15a69bb4a54b370a583ba31630356876a6100fe4d72315a3d8f09",
       "generated": "privacy.json",
-      "ruleCount": 56364,
-      "generatedSha256": "8ab6a630bf339ac0d60a075607339a2f1ee179d8ee636552ef055d0c05984411",
-      "bytes": 6000396,
-      "compressedBytes": 498216
+      "ruleCount": 56426,
+      "generatedSha256": "d6b0093ccac0d3fbd1fa69d8afc3a9485d377cb0e3a5dfc0a5dd0e777113294c",
+      "bytes": 6006680,
+      "compressedBytes": 498867
     },
     "annoyances": {
-      "version": "202609031223",
-      "sourceSha256": "aaf3036fd1c9d5c162d669517fb42800da49a5b7de7ae309112e6014d15353aa",
+      "version": "202609142302",
+      "sourceSha256": "d5abffc56994bd24e2600f865ca67227455df68973cc2356e9c47e40ee2ddee6",
       "generated": "annoyances.json",
-      "ruleCount": 49553,
-      "generatedSha256": "a0bd9405f324bc6bcbf2bbbe77b0b1ec43ced130858c70cceebadcdd5257dd3f",
-      "bytes": 6024197,
-      "compressedBytes": 638009
+      "ruleCount": 49566,
+      "generatedSha256": "507b0afee6cdcc351cb0f651771832472d1f6d3ec4aea71f8d17a72d8c725ad0",
+      "bytes": 6028923,
+      "compressedBytes": 639293
     }
   }
 }

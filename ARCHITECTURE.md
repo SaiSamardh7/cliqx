@@ -566,15 +566,41 @@ Including the exact bridge payloads the native chrome depends on (`theater`,
 same-origin refusal, self-link refusal, orphaned-button sweeping, and recovery
 when a player swaps its `<video>` out.
 
+### AirPlay and MSE — measured on device
+
+Answered on an iPhone 15 Pro against a live receiver, which the Simulator
+cannot do. The gesture worry was unfounded: `webkitShowPlaybackTargetPicker()`
+returns true and opens the picker from a native `evaluateJavaScript` call, with
+no user gesture. WebKit exposes the whole API in a `WKWebView`
+(`picker=function`, `x-webkit-airplay=allow`).
+
+What does not work is offload, and the reason is the stream, not the call.
+`webkitplaybacktargetavailabilitychanged` never fires and
+`webkitcurrentplaybacktargetiswirelesschanged` never fires, because the site
+plays through Media Source Extensions. **MSE and AirPlay are incompatible by
+construction**: a receiver needs a URL it can fetch, and a `blob:` handle to a
+`SourceBuffer` means nothing outside this process. The audio session still
+routes, which is why the symptom is sound on the TV and picture on the phone.
+
+WebKit's own answer is a second `<source>` carrying an AirPlay-capable URL,
+which it switches to when a route is picked — see
+[How to use Media Source Extensions with AirPlay][mse-airplay]. That guidance
+addresses the page author, who knows the URL. A browser has to discover it, so
+the agent reads it out of resource timing rather than patching the page's fetch
+stack, and appends it as a second `<source>`.
+
+This works only where the page put the blob in a `<source>` child. A `src`
+attribute makes WebKit ignore `<source>` children outright, and moving the blob
+into a child requires `load()`, which tears down the page's MediaSource session
+mid-playback — so that case is refused rather than fixed, and reported as
+`src-attribute`. Sites in that shape need Mode A, a real `AVPlayer` holding a
+direct URL, which is the only path to true offload for them.
+
+[mse-airplay]: https://webkit.org/blog/15036/how-to-use-media-source-extensions-with-airplay/
+
 ### Not verified on device
 
-The native control bar has **not** been seen working on a real page yet. AirPlay
-cannot be verified on the Simulator at all — it never reports an available
-route — and there is a real risk that WebKit requires a user gesture for
-`webkitShowPlaybackTargetPicker()`, which a native `evaluateJavaScript` call
-does not carry. If that proves true, AirPlay has to come from Control Center or
-from Mode B's native fullscreen controls instead. Marked with a `ponytail:`
-comment in the agent.
+The native control bar has **not** been seen working on a real page yet.
 
 ---
 

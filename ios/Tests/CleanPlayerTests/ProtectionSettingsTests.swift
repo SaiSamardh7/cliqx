@@ -31,10 +31,17 @@ final class ProtectionSettingsTests: XCTestCase {
     }
 
     func testCanonicalRejectsThingsThatAreNotHosts() {
-        for junk in ["", "   ", "localhost", "not a host", "example",
+        for junk in ["", "   ", "not a host", "example", "example.com:8080",
                      "example.com/path"] {
             XCTAssertNil(HostKey.canonical(junk), junk)
         }
+    }
+
+    func testCanonicalAcceptsLocalDevelopmentHosts() {
+        XCTAssertEqual(HostKey.canonical("localhost"), "localhost")
+        XCTAssertEqual(HostKey.canonical("127.0.0.1"), "127.0.0.1")
+        XCTAssertEqual(HostKey.canonical("::1"), "::1")
+        XCTAssertTrue(HostKey.matches(stored: "localhost", host: "localhost"))
     }
 
     func testExceptionCoversSubdomainsButNotSuffixNeighbours() {
@@ -88,6 +95,22 @@ final class ProtectionSettingsTests: XCTestCase {
         }
     }
 
+    func testPrivateHostingSuffixesKeepTenantsSeparate() {
+        for suffix in ["github.io", "blogspot.com", "pages.dev", "appspot.com",
+                       "vercel.app", "cloudfront.net"] {
+            let victim = URL(string: "https://victim.\(suffix)/watch")!
+            let evil = URL(string: "https://evil.\(suffix)/ad")!
+            XCTAssertFalse(HostKey.isSameSite(evil, as: victim), suffix)
+            XCTAssertEqual(HostKey.registrableDomain("cdn.victim.\(suffix)"),
+                           "victim.\(suffix)")
+        }
+    }
+
+    func testPublicSuffixWildcardAndExceptionRules() {
+        XCTAssertEqual(HostKey.registrableDomain("a.b.test.ck"), "b.test.ck")
+        XCTAssertEqual(HostKey.registrableDomain("a.www.ck"), "www.ck")
+    }
+
     /// And the same suffixes still resolve subdomains of ONE site together, or
     /// the fix would just break every per-site exception.
     func testSubdomainsUnderACcTLDSuffixStillMatch() {
@@ -105,7 +128,7 @@ final class ProtectionSettingsTests: XCTestCase {
         // Without this, every .co.uk site would count as the same site.
         XCTAssertEqual(HostKey.registrableDomain("www.bbc.co.uk"), "bbc.co.uk")
         XCTAssertEqual(HostKey.registrableDomain("bbc.co.uk"), "bbc.co.uk")
-        XCTAssertNil(HostKey.registrableDomain("localhost"))
+        XCTAssertEqual(HostKey.registrableDomain("localhost"), "localhost")
     }
 
     func testDifferentSitesUnderAMultiPartSuffixAreNotSameSite() {

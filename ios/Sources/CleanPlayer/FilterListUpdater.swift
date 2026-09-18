@@ -147,17 +147,30 @@ public final class FilterListUpdater {
     /// a `!` comment header; an HTML error page or a captive-portal redirect
     /// does not.
     static func looksLikeFilterList(_ data: Data) -> Bool {
-        guard let head = String(data: data.prefix(512), encoding: .utf8) else {
-            return false
-        }
+        guard let head = head(of: data, bytes: 512) else { return false }
         let trimmed = head.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.hasPrefix("[Adblock") || trimmed.hasPrefix("!")
     }
 
-    static func version(in data: Data) -> String? {
-        guard let head = String(data: data.prefix(2048), encoding: .utf8) else {
-            return nil
+    /// Decodes a prefix without letting the cut decide the answer.
+    ///
+    /// `String(data:encoding:.utf8)` returns nil when the last byte falls
+    /// inside a multi-byte sequence, so a perfectly good list whose 512th byte
+    /// landed mid-character was rejected as "not a filter list" — and the same
+    /// cut silently hid the `! Version:` line.
+    static func head(of data: Data, bytes: Int) -> String? {
+        var slice = data.prefix(bytes)
+        // At most three bytes can be pending in a UTF-8 sequence.
+        for _ in 0..<4 {
+            if let text = String(data: slice, encoding: .utf8) { return text }
+            guard !slice.isEmpty else { return nil }
+            slice = slice.dropLast()
         }
+        return nil
+    }
+
+    static func version(in data: Data) -> String? {
+        guard let head = head(of: data, bytes: 2048) else { return nil }
         for line in head.split(separator: "\n", omittingEmptySubsequences: true) {
             let text = line.trimmingCharacters(in: .whitespaces)
             guard text.hasPrefix("!") else { continue }

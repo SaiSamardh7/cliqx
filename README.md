@@ -16,8 +16,8 @@ No account, no server, no analytics, no third-party SDKs.
 ## Status
 
 Pre-release, and not on the App Store yet. The engineering is in place and
-covered by tests — 190 Playwright specs across Chromium and WebKit, 58 XCTest
-cases and 5 UI tests, all green in CI — but see [`docs/ROADMAP.md`](docs/ROADMAP.md) for what is still
+covered by tests — 198 Playwright specs across Chromium and WebKit, 66 XCTest
+cases and 8 UI tests, all green in CI — but see [`docs/ROADMAP.md`](docs/ROADMAP.md) for what is still
 open before submission.
 
 - [`ARCHITECTURE.md`](ARCHITECTURE.md) — how it works and why
@@ -59,16 +59,30 @@ npm ci && npx playwright install chromium webkit && npx playwright test
 Build somewhere outside `~/Desktop`, `~/Documents` or `~/Downloads`. macOS
 stamps files under those with a `com.apple.provenance` attribute that `codesign`
 rejects as "resource fork, Finder information, or similar detritus", and
-`xattr -c` cannot remove it:
+`xattr -c` cannot remove it. The `-derivedDataPath /tmp/dd` below is what keeps
+the build products out of such a directory, so the repo itself can live anywhere.
+
+The two commands want **different ids for the same phone**, and passing one
+where the other belongs is the usual reason an install stops working:
+
+- `xcodebuild -destination` wants the *hardware* id (looks like
+  `00008130-000C203E1E90001C`), from `xcodebuild -scheme CleanPlayerApp
+  -showdestinations`.
+- `devicectl` wants the *CoreDevice* id (a plain UUID, e.g.
+  `FE3646BF-9AB2-587F-AAC7-C7785C465700`), from `xcrun devicectl list devices`.
+
+Handing the CoreDevice UUID to `xcodebuild` fails with "Unable to find a device
+matching the provided destination specifier", even with the phone plugged in.
 
 ```bash
-cd ios/App && xcodebuild -scheme CleanPlayerApp -destination 'platform=iOS,id=<device-id>' -derivedDataPath /tmp/dd -allowProvisioningUpdates build
+cd ios/App && xcodebuild -scheme CleanPlayerApp -destination 'platform=iOS,id=<hardware-id>' -derivedDataPath /tmp/dd -allowProvisioningUpdates build
+xcrun devicectl device install app --device <coredevice-uuid> /tmp/dd/Build/Products/Debug-iphoneos/CleanPlayerApp.app
 ```
 
-`xcrun devicectl list devices` gives the id; `xcrun devicectl device install app
---device <id> /tmp/dd/Build/Products/Debug-iphoneos/CleanPlayerApp.app` installs
-it. Simulator builds are unsigned (`CODE_SIGNING_ALLOWED[sdk=iphonesimulator*]`)
-and are unaffected.
+Device builds also need `DEVELOPMENT_TEAM` set in `project.pbxproj`; it is
+committed as `""` so that CI signs nothing, so keep your team id as a local
+change rather than committing it. Simulator builds are unsigned
+(`CODE_SIGNING_ALLOWED[sdk=iphonesimulator*]`) and are unaffected by both.
 
 ## Building and running the app
 

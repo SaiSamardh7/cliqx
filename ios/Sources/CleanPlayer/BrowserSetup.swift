@@ -1,3 +1,4 @@
+import Foundation
 import WebKit
 
 /// Forwards script messages without retaining the target.
@@ -21,6 +22,19 @@ public enum BrowserSetup {
     /// monkey-patch.
     public static let world = WKContentWorld.world(name: "CleanPlayer")
 
+    /// A local-network permission probe must not become browser state. An
+    /// ephemeral session keeps its HEAD request out of shared cookies, cache,
+    /// credentials and URL history, including while private browsing is on.
+    public static func makeLocalNetworkProbeConfiguration() -> URLSessionConfiguration {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        configuration.urlCache = nil
+        configuration.httpCookieStorage = nil
+        configuration.httpShouldSetCookies = false
+        configuration.urlCredentialStorage = nil
+        return configuration
+    }
+
     /// `popupGuardJS` is injected into the page's own world, not ours: it
     /// replaces `window.open`, which an isolated world cannot reach.
     /// `privateBrowsing` swaps in a non-persistent data store: cookies, cache,
@@ -35,6 +49,11 @@ public enum BrowserSetup {
         cfg.allowsInlineMediaPlayback = true
         cfg.mediaTypesRequiringUserActionForPlayback = []
         cfg.allowsPictureInPictureMediaPlayback = true
+        // Already the framework default, and set anyway: it is a product
+        // requirement rather than something to inherit. A default that changes
+        // under us would take AirPlay out silently, and there was nothing to
+        // write a regression test against.
+        cfg.allowsAirPlayForMediaPlayback = true
         cfg.userContentController.addUserScript(
             WKUserScript(source: agentJS,
                          injectionTime: .atDocumentStart,

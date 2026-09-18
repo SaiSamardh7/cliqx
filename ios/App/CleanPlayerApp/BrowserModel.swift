@@ -1,3 +1,4 @@
+import CleanPlayer
 import Foundation
 import SwiftUI
 import WebKit
@@ -5,12 +6,43 @@ import WebKit
 struct Site: Codable, Hashable, Identifiable {
     var url: URL
     var title: String
+    /// Where playback stopped, and how long the video was. Optional so old
+    /// saved data (and shortcuts) decode without them; a fraction drives the
+    /// resume bar on the card and the seek on re-entry.
+    var resumeAt: Double?
+    var resumeDuration: Double?
+    /// When this was last watched. Ordering reads from here rather than from
+    /// array position, so replaying something old moves it to the front no
+    /// matter what pinning or removal did to the list.
+    var lastPlayed: Date?
+    /// Visible grouping metadata. Optional so the existing recents.v1 payload
+    /// migrates without a decoding break.
+    var seriesKey: String?
+    var seriesTitle: String?
+    var episodeLabel: String?
     var id: URL { url }
 
-    var host: String { url.host()?.replacingOccurrences(of: "www.", with: "") ?? url.absoluteString }
+    /// 0…1 through the video, or nil when there is nothing to resume.
+    var progress: Double? {
+        guard let at = resumeAt, let dur = resumeDuration, dur > 0, at > 3 else { return nil }
+        return min(at / dur, 1)
+    }
+
+    /// `HostKey.canonical`, not a bare "www." replacement: that one stripped
+    /// the sequence wherever it appeared, including out of the middle of a
+    /// host. Falls back to the raw host for anything canonical rejects.
+    var host: String {
+        guard let raw = url.host() else { return url.absoluteString }
+        return HostKey.canonical(raw) ?? raw
+    }
     /// Monogram for the tile — no third-party marks are bundled. Taken from
     /// the title, not the host: "developer.mozilla.org" would read as "D".
     var initials: String { String(title.prefix(1)).uppercased() }
+}
+
+private struct EpisodeProgress: Codable {
+    var position: Double
+    var duration: Double
 }
 
 @MainActor
@@ -19,6 +51,10 @@ final class BrowserModel: ObservableObject {
     @Published var current: URL?
     @Published var address: String = ""
     @Published private(set) var recents: [Site] = []
+    /// Kept on their own: pinned items survive the recents cap and "Clear", and
+    /// show above the rest. A separate list, not a flag, so eviction never
+    /// touches them.
+    @Published private(set) var pinned: [Site] = []
 
     /// Neutral, openly licensed sources — useful for exercising the player
     /// without bundling anyone's catalogue or branding.
@@ -31,38 +67,60 @@ final class BrowserModel: ObservableObject {
 
     private let store = UserDefaults.standard
     private let recentsKey = "recents.v1"
+    private let pinnedKey = "pinned.v1"
+    private let episodeProgressKey = "episode-progress.v1"
+    private var episodeProgress: [String: EpisodeProgress] = [:]
 
     init() {
         if let data = store.data(forKey: recentsKey),
            let saved = try? JSONDecoder().decode([Site].self, from: data) {
             recents = saved
         }
+        if let data = store.data(forKey: episodeProgressKey),
+           let saved = try? JSONDecoder().decode([String: EpisodeProgress].self, from: data) {
+            episodeProgress = saved
+        }
+        if let data = store.data(forKey: pinnedKey),
+           let saved = try? JSONDecoder().decode([Site].self, from: data) {
+            pinned = saved
+        }
+        migrateAndCollapseRecents()
+    }
+
+    /// Recents minus anything pinned — the pinned copy is shown in its own
+    /// section, so it should not appear twice.
+    var unpinnedRecents: [Site] {
+        recents.filter { site in !pinned.contains { $0.url == site.url } }
+    }
+
+    func isPinned(_ site: Site) -> Bool {
+        pinned.contains { $0.url == site.url }
     }
 
     // MARK: - Navigation
 
     /// Turns whatever is in the field into a URL: a bare host becomes https,
     /// anything else becomes a search. Never trusts the string as-is.
+    ///
+    /// The rule itself lives in `AddressResolver`, in the package, because the
+    /// app target has no unit tests and this is worth testing.
     static func resolve(_ raw: String) -> URL? {
-        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return nil }
-
-        if let url = URL(string: text), let scheme = url.scheme?.lowercased() {
-            return (scheme == "https" || scheme == "http") ? url : nil
-        }
-        // Looks like a hostname: no spaces, has a dot, and a plausible TLD.
-        if !text.contains(" "), let dot = text.lastIndex(of: "."),
-           text.distance(from: dot, to: text.endIndex) > 2 {
-            return URL(string: "https://\(text)")
-        }
-        var q = URLComponents(string: "https://duckduckgo.com/")
-        q?.queryItems = [URLQueryItem(name: "q", value: text)]
-        return q?.url
+        AddressResolver.resolve(raw)
     }
 
     func open(_ url: URL) {
         current = url
         address = url.absoluteString
+    }
+
+    /// WebKit can navigate without going through `open` (links, redirects,
+    /// forms and hash routes). Keep the SwiftUI source of truth on the page
+    /// that is actually visible so rebuilding the web view, especially when
+    /// private browsing changes, cannot jump back to an older URL.
+    func synchronizeCurrent(_ url: URL) {
+        guard url.scheme == "http" || url.scheme == "https" else { return }
+        if current != url { current = url }
+        if address != url.absoluteString { address = url.absoluteString }
     }
 
     func submitAddress() {
@@ -75,23 +133,155 @@ final class BrowserModel: ObservableObject {
         address = ""
     }
 
-    func record(_ url: URL, title: String?) {
+    /// A page becomes a "recent" only when it is actually watched — the browser
+    /// records nothing on plain navigation, so the library is videos, not
+    /// history. Preserves any resume position already saved for this URL.
+    func recordWatched(_ url: URL, title: String?) {
         guard url.scheme?.hasPrefix("http") == true else { return }
-        let site = Site(url: url, title: (title?.isEmpty == false ? title! : url.host() ?? url.absoluteString))
-        recents.removeAll { $0.url == site.url }
+        let name = (title?.isEmpty == false) ? title! : (url.host() ?? url.absoluteString)
+        let key = PlayerFormatting.seriesIdentity(title: name, url: url)
+        let show = PlayerFormatting.seriesTitle(name, host: url.host() ?? "")
+        let existing = recents.first { $0.url == url } ?? pinned.first { $0.url == url }
+        let saved = episodeProgress[url.absoluteString]
+        let site = Site(url: url, title: name,
+                        resumeAt: saved?.position ?? existing?.resumeAt,
+                        resumeDuration: saved?.duration ?? existing?.resumeDuration,
+                        lastPlayed: Date(), seriesKey: key,
+                        seriesTitle: show,
+                        episodeLabel: PlayerFormatting.episodeLabel(name))
+        // One visible card per series. Episode progress is retained separately.
+        recents.removeAll { ($0.seriesKey ?? seriesIdentity(for: $0)) == key }
         recents.insert(site, at: 0)
+        // Newest play first. Anything saved before this field existed has no
+        // date, so it sorts after the dated entries rather than jumping around.
+        recents.sort { ($0.lastPlayed ?? .distantPast) > ($1.lastPlayed ?? .distantPast) }
         if recents.count > 12 { recents.removeLast(recents.count - 12) }
         persist()
+        // Keep the pinned copy's title fresh too.
+        if let index = pinned.firstIndex(where: { $0.url == url }) {
+            pinned[index].title = name
+            persistPinned()
+        }
     }
 
+    /// Remember where playback stopped, in both lists so the bar shows wherever
+    /// the card lives.
+    func saveResume(_ url: URL, at seconds: Double, duration: Double) {
+        guard duration > 0 else { return }
+        episodeProgress[url.absoluteString] = EpisodeProgress(position: seconds,
+                                                              duration: duration)
+        for index in recents.indices where recents[index].url == url {
+            recents[index].resumeAt = seconds
+            recents[index].resumeDuration = duration
+        }
+        for index in pinned.indices where pinned[index].url == url {
+            pinned[index].resumeAt = seconds
+            pinned[index].resumeDuration = duration
+        }
+        persist()
+        persistPinned()
+        persistEpisodeProgress()
+    }
+
+    /// Saved position for a URL, or 0.
+    func resume(for url: URL) -> Double {
+        episodeProgress[url.absoluteString]?.position
+            ?? (recents.first { $0.url == url } ?? pinned.first { $0.url == url })?.resumeAt
+            ?? 0
+    }
+
+    /// Clears the Recent list. Pinned items are deliberately kept — pinning is
+    /// how you say "not this".
     func clearRecents() {
         recents.removeAll()
         persist()
     }
 
+    /// Remove one item entirely: out of Recent and unpinned.
+    func remove(_ site: Site) {
+        recents.removeAll { $0.url == site.url }
+        pinned.removeAll { $0.url == site.url }
+        persist()
+        persistPinned()
+    }
+
+    /// Pin a site from the browser, by its root. This is how a server of your
+    /// own gets onto the home screen: Recent only fills when a video is
+    /// actually watched, and a media server's watch page is a hash route that
+    /// opens to nothing on its own, so neither path ever produced a usable
+    /// tile for one. Titled by the page when it has a title, else by the host.
+    func pinSite(_ url: URL, title: String?) {
+        guard let root = AddressResolver.siteRoot(of: url), !isPinned(root) else { return }
+        let name = (title?.isEmpty == false) ? title! : (root.host() ?? root.absoluteString)
+        let existing = recents.first { $0.url == root }
+        pinned.insert(existing ?? Site(url: root, title: name), at: 0)
+        persistPinned()
+    }
+
+    func isPinned(_ url: URL) -> Bool {
+        guard let root = AddressResolver.siteRoot(of: url) else { return false }
+        return pinned.contains { $0.url == root }
+    }
+
+    func unpinSite(_ url: URL) {
+        guard let root = AddressResolver.siteRoot(of: url) else { return }
+        pinned.removeAll { $0.url == root }
+        persistPinned()
+    }
+
+    func togglePin(_ site: Site) {
+        if let index = pinned.firstIndex(where: { $0.url == site.url }) {
+            pinned.remove(at: index)
+        } else {
+            pinned.insert(site, at: 0)
+        }
+        persistPinned()
+    }
+
     private func persist() {
         guard let data = try? JSONEncoder().encode(recents) else { return }
         store.set(data, forKey: recentsKey)
+    }
+
+    private func persistPinned() {
+        guard let data = try? JSONEncoder().encode(pinned) else { return }
+        store.set(data, forKey: pinnedKey)
+    }
+
+    private func persistEpisodeProgress() {
+        guard let data = try? JSONEncoder().encode(episodeProgress) else { return }
+        store.set(data, forKey: episodeProgressKey)
+    }
+
+    private func seriesIdentity(for site: Site) -> String {
+        PlayerFormatting.seriesIdentity(title: site.title, url: site.url)
+    }
+
+    /// Upgrade existing per-episode cards in place. The newest card wins, but
+    /// every old card first contributes its resume point to hidden history.
+    private func migrateAndCollapseRecents() {
+        var seen = Set<String>()
+        var collapsed: [Site] = []
+        for var site in recents.sorted(by: {
+            ($0.lastPlayed ?? .distantPast) > ($1.lastPlayed ?? .distantPast)
+        }) {
+            if let at = site.resumeAt, let duration = site.resumeDuration {
+                episodeProgress[site.url.absoluteString] = EpisodeProgress(position: at,
+                                                                          duration: duration)
+            }
+            let key = site.seriesKey ?? seriesIdentity(for: site)
+            guard seen.insert(key).inserted else { continue }
+            site.seriesKey = key
+            site.seriesTitle = site.seriesTitle
+                ?? PlayerFormatting.seriesTitle(site.title, host: site.url.host() ?? "")
+            site.episodeLabel = site.episodeLabel ?? PlayerFormatting.episodeLabel(site.title)
+            collapsed.append(site)
+        }
+        if collapsed != recents {
+            recents = collapsed
+            persist()
+        }
+        persistEpisodeProgress()
     }
 
     /// Cookies, caches and site storage for the persistent store. Recents are

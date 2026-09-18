@@ -102,7 +102,7 @@ jobs:
           path: playwright-report/
 
   rules:
-    name: Rule data, ad coverage and app icon
+    name: Rule data, ad coverage, icon and Info.plist
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -117,3 +117,8 @@ jobs:
       # build: a configuration with no ASSETCATALOG_COMPILER_APPICON_NAME, and
       # an icon carrying an alpha channel.
       - run: python3 tools/check-icon.py
+
+      # The background mode PiP and AirPlay need. Every way of losing it is
+      # quiet — INFOPLIST_KEY_UIBackgroundModes in particular looks correct and
+      # is ignored outright.
+      - run: python3 tools/check-plist.py

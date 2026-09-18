@@ -53,6 +53,14 @@ separate unbreak list would cancel nothing. Verified in
 > Site-compatibility exceptions from Brave Unbreak
 > (github.com/brave/adblock-lists), used under MPL-2.0.
 
+Because they are compiled in, the app **distributes this rule data** — this is
+not the build-tool case below, and the attribution obligation is live. The
+notice above is reachable at **Settings -> About -> Attribution and licences**,
+alongside the EasyList credit and a link to the MPL-2.0 text, and
+`ProtectionUITests.testCompiledInExceptionsAreAttributed` fails if it stops
+being reachable. It was missing from that screen until 6 September 2026:
+`FilterSource.all` does not include the unbreak source, so nothing rendered it.
+
 ## Brave adblock-rust — filter converter
 
 Source: https://github.com/brave/adblock-rust (crate `adblock`) — **MPL-2.0**.
@@ -79,6 +87,15 @@ licence text.
 Read for how they structure protection levels, per-site controls and list
 management. **No code from either is copied into this project.** AdGuard in
 particular is GPL-3.0, which would be incompatible with a closed distribution.
+
+## Public Suffix List — site-boundary data
+
+Source: https://publicsuffix.org/list/public_suffix_list.dat — **MPL-2.0**.
+
+The unmodified list is bundled at
+`ios/Sources/CleanPlayer/Resources/public_suffix_list.dat.txt`. It is used to
+keep unrelated tenants on shared hosting domains such as `github.io` and
+`pages.dev` in separate security boundaries.
 
 ## Hand-written rules
 

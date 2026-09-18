@@ -9,6 +9,7 @@ struct AttributionView: View {
 
     private static let ccBySA = URL(
         string: "https://creativecommons.org/licenses/by-sa/3.0/")!
+    private static let mpl2 = URL(string: "https://www.mozilla.org/MPL/2.0/")!
 
     var body: some View {
         List {
@@ -40,6 +41,34 @@ struct AttributionView: View {
                 .font(.footnote)
                 Link("Source lists on GitHub",
                      destination: URL(string: "https://github.com/easylist/easylist")!)
+            }
+
+            // Not a build tool: these exceptions are compiled INTO every list
+            // and ship in the app, so MPL-2.0's attribution obligation is
+            // live. WebKit applies `ignore-previous-rules` only within the
+            // compiled list holding it, which is why they cannot be a list of
+            // their own with a section of their own.
+            Section(FilterSource.braveUnbreak.name) {
+                Text(FilterSource.braveUnbreak.attribution)
+                    .font(.footnote)
+                Text("These site-compatibility exceptions stop filter rules "
+                     + "breaking specific sites. They are built into each of "
+                     + "the lists above rather than shipped separately.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                Link("brave/adblock-lists",
+                     destination: FilterSource.braveUnbreak.repository)
+                Link("Licence: MPL-2.0", destination: Self.mpl2)
+            }
+
+            Section("Public Suffix List") {
+                Text("Mozilla's Public Suffix List defines security boundaries "
+                     + "between sites, including separate tenants on shared "
+                     + "hosting services such as github.io and pages.dev.")
+                .font(.footnote)
+                Link("publicsuffix.org",
+                     destination: URL(string: "https://publicsuffix.org/list/")!)
+                Link("Licence: MPL-2.0", destination: Self.mpl2)
             }
 
             Section("Build tools") {

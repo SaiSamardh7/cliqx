@@ -111,6 +111,39 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     return found;
   }
 
+  /// Same walk, for any selector. `stage()` marks whatever it walks past, and
+  /// on a shadow-DOM player that includes nodes inside the root — so anything
+  /// that has to find those marks again needs to cross the boundary too.
+  function allDeep(selector, root = document) {
+    const found = [];
+    for (const el of root.querySelectorAll(selector)) found.push(el);
+    for (const el of root.querySelectorAll('*')) {
+      if (el.shadowRoot) {
+        for (const m of allDeep(selector, el.shadowRoot)) found.push(m);
+      }
+    }
+    return found;
+  }
+
+  /// The light-DOM elements that stand in for a video living inside a shadow
+  /// root: the host, and any host above that one.
+  ///
+  /// `querySelector('video')` cannot see into a shadow root, so the guard that
+  /// keeps the blocker off the player is blind to exactly the players
+  /// `allVideos` exists to find. An absolutely-positioned host over its own
+  /// video matches every test for an interstitial, so it got hidden.
+  function videoHosts() {
+    const hosts = [];
+    for (const video of allVideos()) {
+      let node = video.getRootNode();
+      while (node && node.host) {
+        hosts.push(node.host);
+        node = node.host.getRootNode();
+      }
+    }
+    return hosts;
+  }
+
   // --- Theater ------------------------------------------------------------
 
   /// Clears everything around `el` and stages it full-screen.
@@ -145,9 +178,11 @@ html[data-cp-unlock], html[data-cp-unlock] body {
   }
 
   function unstage() {
-    for (const el of document.querySelectorAll(
-      '[data-cp-hidden],[data-cp-untrap],[data-cp-stage]'
-    )) {
+    // Deep, because `stage()` walks up from the video and the video may live in
+    // a shadow root. A document-only query leaves those marks in place, and the
+    // marks are what make the video full-screen-fixed and its siblings
+    // display:none — so the page stays bricked after Close.
+    for (const el of allDeep('[data-cp-hidden],[data-cp-untrap],[data-cp-stage]')) {
       delete el.dataset.cpHidden;
       delete el.dataset.cpUntrap;
       delete el.dataset.cpStage;
@@ -189,7 +224,11 @@ html[data-cp-unlock], html[data-cp-unlock] body {
   }
 
   function reportPlayback() {
-    if (staged) post({ type: 'playback', playing: !staged.paused });
+    // `armed` marks playback from the frame native armed before an episode
+    // change. Native cannot tell frames apart itself: WKFrameInfo is a
+    // transient object with no value equality.
+    if (staged) post({ type: 'playback', playing: !staged.paused,
+                       ...(armedEpisodeSource !== null && { armed: true }) });
   }
 
   /// A live stream reports Infinity. A video that has not loaded its metadata
@@ -241,16 +280,32 @@ html[data-cp-unlock], html[data-cp-unlock] body {
   /// page would otherwise fight the thumb under their finger.
   let scrubbing = false;
 
-  function beginScrub() { scrubbing = true; return true; }
+  /// Held for as long as the drag, and no longer. `seek()` is what normally
+  /// clears it, but a drag that ends without one — the video going away, an
+  /// episode change mid-gesture — used to leave it set for good, and a stuck
+  /// flag silences every position update for the rest of that video.
+  let scrubDeadline = null;
+  function beginScrub() {
+    scrubbing = true;
+    clearTimeout(scrubDeadline);
+    scrubDeadline = setTimeout(() => { scrubbing = false; }, 10000);
+    return true;
+  }
+
+  function endScrub() {
+    scrubbing = false;
+    clearTimeout(scrubDeadline);
+    scrubDeadline = null;
+  }
 
   function seek(to) {
-    if (!staged) return false;
+    if (!staged) { endScrub(); return false; }
     const d = finiteDuration(staged);
     // Page-supplied only in the sense that the native bar computed it from a
     // duration this same element reported; clamp anyway.
     const target = Math.max(0, d > 0 ? Math.min(to, d) : to);
     staged.currentTime = target;
-    scrubbing = false;
+    endScrub();
     reportTime();
     return true;
   }
@@ -264,6 +319,103 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     if (!staged) return false;
     staged.playbackRate = rate;
     reportTime();
+    return true;
+  }
+
+  // Native arms this before it clicks the site's Next/Previous control. The
+  // old video may emit an ordinary `play` event during teardown; that is not a
+  // successful handoff. Only a real source lifecycle event with a changed URL
+  // may authorize same-frame playback to complete the transition.
+  let armedEpisodeSource = null;
+  let episodeSourceCleanup = null;
+  function armEpisodeTransition() {
+    if (!staged) return false;
+    if (episodeSourceCleanup) episodeSourceCleanup();
+    const video = staged;
+    armedEpisodeSource = video.currentSrc || video.src || '';
+
+    const changed = () => {
+      if (staged !== video) return;
+      const source = video.currentSrc || video.src || '';
+      if (!source || source === armedEpisodeSource) return;
+      if (episodeSourceCleanup) episodeSourceCleanup();
+      post({ type: 'episodeSourceChanged', playing: !video.paused });
+    };
+    const events = ['loadstart', 'loadedmetadata', 'durationchange'];
+    for (const event of events) video.addEventListener(event, changed);
+    const observer = new MutationObserver(changed);
+    observer.observe(video, { attributes: true, attributeFilter: ['src'],
+                              childList: true, subtree: true });
+    episodeSourceCleanup = () => {
+      for (const event of events) video.removeEventListener(event, changed);
+      observer.disconnect();
+      episodeSourceCleanup = null;
+      armedEpisodeSource = null;
+    };
+    return true;
+  }
+
+  // iOS ignores writes to HTMLMediaElement.volume. Route every requested level
+  // through Web Audio when the stream is CORS-safe, not only the boosted range.
+  // Creating the graph while entering theater is important: watchClean runs in
+  // the site's real click, while a later native evaluateJavaScript call has no
+  // WebKit user activation and may leave AudioContext permanently suspended.
+  const boostedAudio = new WeakMap();
+  function prepareVolume(video) {
+    const existing = boostedAudio.get(video);
+    if (existing) return existing;
+    const sourceURL = video.currentSrc || video.src || '';
+    let safeSource = sourceURL.startsWith('blob:') || sourceURL.startsWith('data:');
+    try {
+      const parsed = new URL(sourceURL, location.href);
+      safeSource = safeSource || parsed.origin === location.origin || !!video.crossOrigin;
+    } catch (_) {}
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!safeSource || !AudioContextClass) return null;
+    try {
+      const context = new AudioContextClass();
+      const source = context.createMediaElementSource(video);
+      const gain = context.createGain();
+      source.connect(gain);
+      gain.connect(context.destination);
+      const chain = { context, source, gain };
+      boostedAudio.set(video, chain);
+      // Confirm activation when a level is requested. Not every theater entry
+      // path carries a WebKit user gesture.
+      return chain;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function setVolume(percent) {
+    if (!staged) return false;
+    const wanted = Math.min(Math.max(Math.round(Number(percent) || 0), 0), 200);
+    const chain = prepareVolume(staged);
+    if (!chain) {
+      // Native owns 0...100 through MPVolumeView. Cross-origin streams without
+      // CORS cannot be routed through Web Audio, so boost honestly caps at 100.
+      if (wanted <= 100) {
+        post({ type: 'volume', percent: wanted, boosted: false });
+        return true;
+      }
+      post({ type: 'volume', percent: 100, boosted: false });
+      return false;
+    }
+    staged.volume = 1;
+    // Native already attenuates 0...100. Applying that level here too would
+    // turn 50% into 25%, so Web Audio is boost-only.
+    chain.gain.gain.value = Math.max(wanted / 100, 1);
+    Promise.resolve(chain.context.resume()).then(() => {
+      if (chain.context.state && chain.context.state !== 'running') {
+        post({ type: 'volume', percent: Math.min(wanted, 100), boosted: false });
+        return;
+      }
+      post({ type: 'volume', percent: wanted, boosted: wanted > 100 });
+    }).catch(() => {
+      chain.gain.gain.value = 1;
+      post({ type: 'volume', percent: Math.min(wanted, 100), boosted: false });
+    });
     return true;
   }
 
@@ -382,19 +534,90 @@ html[data-cp-unlock], html[data-cp-unlock] body {
 
   /// The whole episode list, not just the neighbours, so the player can offer
   /// a picker. Same-origin only, and capped: some season pages link hundreds.
+  /// Episode-shaped path or query: `/ep-2`, `/episode-12`, `?ep=3`, `/e02`
+  /// is deliberately not matched. Applied to path+query only, never the host.
+  const EPISODE_HREF_RE = /(?:^|[\/?&#=._-])ep(?:isode)?[-_=.]?(\d{1,4})(?!\d)/i;
+
+  /// Where a site's own Prev/Next are real links they would otherwise land in
+  /// the list labelled "Next", ahead of the entry that names the episode.
+  const NAV_NAME_RE = /^\s*(next|prev|previous)\b/i;
+
+  function episodeNumber(name, url) {
+    const lead = name.match(/^\s*(\d{1,4})(?!\d)/);
+    if (lead) return parseInt(lead[1], 10);
+    const worded = name.match(/\bep(?:isode)?\.?\s*(\d{1,4})(?!\d)/i);
+    if (worded) return parseInt(worded[1], 10);
+    const shaped = (url.pathname + url.search + routeFragment(url)).match(EPISODE_HREF_RE);
+    return shaped ? parseInt(shaped[1], 10) : null;
+  }
+
+  /// A fragment that is a route rather than an anchor. Jellyfin, Emby and
+  /// Plex are single pages that navigate entirely in the hash — `#/details?id=`,
+  /// `#!/item?id=` — so on those sites the fragment is the only thing that
+  /// distinguishes one episode from the next. `#top` and `#comments` are
+  /// still anchors.
+  function routeFragment(u) {
+    return /^#!?\//.test(u.hash) ? u.hash : '';
+  }
+
+  /// A trailing slash is a server's habit, and an anchor never distinguishes
+  /// episodes; a hash route does.
+  function pageKey(href) {
+    try {
+      const u = new URL(href);
+      return u.origin + u.pathname.replace(/\/+$/, '') + u.search + routeFragment(u);
+    } catch (_) { return href; }
+  }
+
   function episodeList() {
-    const seen = new Set();
+    const byPage = new Map();          // pageKey -> index into out
     const out = [];
+    const here = pageKey(location.href);
     for (const a of document.querySelectorAll('a[href]')) {
+      // "#request", "#sign", "#": in-page anchors on an episode URL resolve to
+      // the episode URL, and on the live site they outnumbered the real entry
+      // four to one — every one of them "current", so Next pointed back here.
+      // A hash *route* is not an anchor, and is kept.
+      const rawHref = (a.getAttribute('href') || '').trim();
+      if (rawHref.startsWith('#') && !/^#!?\//.test(rawHref)) continue;
       const name = accessibleName(a);
-      if (!name || name.length > 60) continue;
-      if (!EPISODE_RE.test(name)) continue;
+      if (!name || name.length > 200) continue;
+      if (NAV_NAME_RE.test(name)) continue;
       const href = sameOriginURL(a);
-      if (!href || seen.has(href)) continue;
-      seen.add(href);
-      out.push({ label: name.trim(), href, current: href === location.href });
-      if (out.length >= 200) break;
+      if (!href) continue;
+      const url = new URL(href);
+      // Text OR URL shape. aniwave labels every entry "2 A Certain Bomb" and
+      // links it to /ep-2: the text alone satisfies neither half of EPISODE_RE,
+      // and every episode on the site was being thrown away for it.
+      const shaped = EPISODE_HREF_RE.test(url.pathname + url.search + routeFragment(url));
+      if (!EPISODE_RE.test(name) && !shaped) continue;
+      // A leading number is evidence the TEXT names the episode — enough to
+      // outrank a "Watch now" link to the same page — but not enough on its own
+      // to admit "12 comments", so it only counts once the URL has qualified.
+      const byText = EPISODE_RE.test(name) || (shaped && /^\s*\d{1,4}(?!\d)/.test(name));
+
+      const key = pageKey(href);
+      const entry = {
+        // Truncated, not rejected. Episode 11 of the same show has an 81-char
+        // title, and a length cap that drops it makes a hole in the list.
+        label: name.slice(0, 60),
+        href,
+        current: key === here,
+        number: episodeNumber(name, url),
+        byText,
+      };
+      const at = byPage.get(key);
+      if (at === undefined) {
+        byPage.set(key, out.length);
+        out.push(entry);
+        if (out.length >= 200) break;
+      } else if (byText && !out[at].byText) {
+        // Same page, but this link's text names the episode and the earlier
+        // one only matched by URL — the label the user sees should be this one.
+        out[at] = entry;
+      }
     }
+    for (const e of out) delete e.byText;
     return out;
   }
 
@@ -418,6 +641,7 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     // not always bring the picture back on iOS.
     allowInline(video);
     staged = video;
+    prepareVolume(video);
     trackAirPlay(video);
     // Theater hides the page, and the page is where the player's own play
     // button lives. The native bar has to know whether it is showing play or
@@ -496,8 +720,10 @@ html[data-cp-unlock], html[data-cp-unlock] body {
       staged.removeEventListener('loadedmetadata', reportVideo);
       staged.removeEventListener('resize', reportVideo);
       staged.style.removeProperty('object-fit');
+      untrackAirPlay(staged);
+      detachAirPlaySource(staged);
       restoreInline(staged);
-      scrubbing = false;
+      endScrub();
       staged = null;
       post({ type: 'theaterEnded' });
     }
@@ -549,21 +775,200 @@ html[data-cp-unlock], html[data-cp-unlock] body {
 
   // --- AirPlay ------------------------------------------------------------
 
-  function trackAirPlay(video) {
+  /// What the element is actually playing. This decides whether AirPlay can
+  /// take the picture at all: a Media Source stream (blob: currentSrc, which
+  /// is what DASH/MSE players and most DRM sites produce) cannot be handed to
+  /// a receiver as video. WebKit offloads the audio and keeps the picture on
+  /// the phone — the "sound on the TV, no picture" symptom exactly.
+  /// Whether a URL names a manifest, judged on its PATH.
+  ///
+  /// Testing the whole URL matched the query string too, and ad-funded video
+  /// sites put `.m3u8` there on purpose: observed live on echovideo, where
+  /// `/cdn/<hash>?t.m3u8` is a 191-byte image/jpeg, not a playlist. The
+  /// candidate scan took it for a manifest and attached it to the video as an
+  /// AirPlay source — so the one diagnostic that was supposed to explain a
+  /// failed offload reported `attached` and meant nothing.
+  function isManifestURL(raw) {
+    try {
+      const url = new URL(raw, location.href);
+      if (url.protocol !== 'https:' && url.protocol !== 'http:') return false;
+      return /\.m3u8$/i.test(url.pathname);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function sourceKind(video) {
+    const src = video.currentSrc || video.src || '';
+    if (!src) return 'none';
+    if (src.startsWith('blob:')) return 'mse';
+    if (isManifestURL(src)) return 'hls';
+    if (src.startsWith('data:')) return 'data';
+    return 'file';
+  }
+
+  /// AirPlay needs a URL the receiver can fetch for itself, and a MediaSource
+  /// has none — the blob only means something in this process. WebKit's own
+  /// answer is a second <source> holding an AirPlay-capable URL, which it
+  /// switches to when a route is picked:
+  /// https://webkit.org/blog/15036/how-to-use-media-source-extensions-with-airplay/
+  ///
+  /// That guidance is written for the page author, who already knows the URL.
+  /// We are the browser, so it has to be discovered. Resource timing sees
+  /// every request the page made and needs no patching of its fetch stack —
+  /// monkey-patching fetch/XHR on an arbitrary site is how you break the site.
+  const AIRPLAY_SRC_CLASS = 'cp-airplay-source';
+
+  /// A playlist is text. The 191-byte image this scan once accepted was not
+  /// one, and neither is a multi-megabyte response.
+  ///
+  /// Cross-origin responses without `Timing-Allow-Origin` report 0 for every
+  /// size field, which is most media CDNs — so an unknown size is not held
+  /// against a candidate, only an implausible one.
+  const MIN_MANIFEST_BYTES = 200;
+  const MAX_MANIFEST_BYTES = 2 * 1024 * 1024;
+
+  function directoryOf(raw) {
+    try {
+      const url = new URL(raw, location.href);
+      return url.origin + url.pathname.replace(/[^/]*$/, '');
+    } catch (_) {
+      return '';
+    }
+  }
+
+  /// Ranked, best first, and only ever URLs the page actually requested.
+  ///
+  /// The ranking signal is siblings: a manifest with segments behind it was
+  /// fetched from a directory the player kept going back to, while a stray hit
+  /// usually was not. That orders real playlists above one-off files without
+  /// inventing anything.
+  ///
+  /// ponytail: deliberately does NOT infer a manifest URL that was never
+  /// requested — no appending `/index.m3u8` to a directory that looks
+  /// promising. Same rule as episode discovery, for the same reason: a guessed
+  /// URL fails as a 404 the user cannot see, and here it would be handed
+  /// silently to a television.
+  function streamCandidates() {
+    let entries = [];
+    try {
+      entries = performance.getEntriesByType('resource');
+    } catch (_) {
+      return [];
+    }
+
+    const siblings = new Map();
+    for (const entry of entries) {
+      const dir = directoryOf(entry.name || '');
+      if (dir) siblings.set(dir, (siblings.get(dir) || 0) + 1);
+    }
+
+    const ranked = new Map();
+    for (const entry of entries) {
+      const url = entry.name || '';
+      // Manifests only. A media segment is useless to a receiver, and .mp4
+      // here is as likely to be an init segment as a whole playable file.
+      if (!isManifestURL(url) || ranked.has(url)) continue;
+      const size = entry.encodedBodySize || entry.transferSize || 0;
+      if (size && (size < MIN_MANIFEST_BYTES || size > MAX_MANIFEST_BYTES)) continue;
+      ranked.set(url, siblings.get(directoryOf(url)) || 1);
+    }
+
+    return [...ranked.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([url]) => url);
+  }
+
+  /// Returns what it did, for the log. The interesting failure is
+  /// 'src-attribute': a src on the element makes WebKit ignore <source>
+  /// children entirely, and moving the blob into a child would need load(),
+  /// which tears down the page's MediaSource session mid-playback. Breaking
+  /// playback to maybe gain AirPlay is not a trade worth making silently.
+  function attachAirPlaySource(video) {
+    if (sourceKind(video) !== 'mse') return 'not-mse';
+    if (video.hasAttribute('src') || video.src) return 'src-attribute';
+    if (video.querySelector('source.' + AIRPLAY_SRC_CLASS)) return 'already';
+    const candidates = streamCandidates();
+    if (!candidates.length) return 'no-candidate';
+    const el = document.createElement('source');
+    el.className = AIRPLAY_SRC_CLASS;
+    el.type = 'application/x-mpegURL';
+    el.src = candidates[0];
+    video.appendChild(el);
+    return 'attached';
+  }
+
+  function detachAirPlaySource(video) {
+    for (const el of video.querySelectorAll('source.' + AIRPLAY_SRC_CLASS)) {
+      el.remove();
+    }
+  }
+
+  /// Named, and kept on the element, so they can be taken off again.
+  ///
+  /// These were anonymous closures with nothing holding a reference, which
+  /// made them unremovable: entering theater a second time on the same video
+  /// added a second pair, and `airplayAvailable` is module state — so a
+  /// listener left on a video the user had already left could overwrite the
+  /// answer for the one they were watching. Apple's own guidance is to observe
+  /// availability only while the controls that use it are on screen.
+  function untrackAirPlay(video) {
+    const handlers = video && video.__cpAirPlay;
+    if (!handlers) return;
+    video.removeEventListener('webkitplaybacktargetavailabilitychanged',
+                              handlers.availability);
+    delete video.__cpAirPlay;
     airplayAvailable = false;
-    if (typeof video.webkitShowPlaybackTargetPicker !== 'function') return;
+  }
+
+  function trackAirPlay(video) {
+    // Never stack, even if theater was left by a path that skipped the teardown.
+    untrackAirPlay(video);
+    airplayAvailable = false;
     video.setAttribute('x-webkit-airplay', 'allow');
-    video.addEventListener('webkitplaybacktargetavailabilitychanged', (e) => {
+
+    // Detecting a route and opening the picker are two different capabilities,
+    // and this used to bail out of the first when the second was missing: no
+    // webkitShowPlaybackTargetPicker meant no listener, so we never learned a
+    // route existed at all. The button then stayed hidden with nothing to say
+    // why. Listen unconditionally; showAirPlay still guards on the method.
+    const availability = (e) => {
       airplayAvailable = e.availability === 'available';
-      post({ type: 'airplay', available: airplayAvailable });
+      // `source` is the half that was missing. A route being available says
+      // nothing about whether the picture can travel down it: a MediaSource
+      // has no URL a receiver can fetch, so WebKit offloads the audio and
+      // leaves the video on the phone. Native needs both facts to decide what
+      // the AirPlay button should even do.
+      post({
+        type: 'airplay',
+        available: airplayAvailable,
+        source: sourceKind(video),
+      });
+    };
+
+    video.addEventListener('webkitplaybacktargetavailabilitychanged', availability);
+    video.__cpAirPlay = { availability };
+
+    // Give WebKit an AirPlay-capable <source> to switch to if the stream is
+    // MediaSource. Harmless on any other kind — it returns without touching
+    // the element. See attachAirPlaySource.
+    attachAirPlaySource(video);
+
+    // Two facts the availability event does not carry, needed before a route
+    // is ever seen: whether this engine exposes a picker at all (so the button
+    // can appear and say "no devices found" itself), and whether the stream is
+    // one AirPlay can actually forward the picture for.
+    post({
+      type: 'airplaySupport',
+      picker: typeof video.webkitShowPlaybackTargetPicker === 'function',
+      source: sourceKind(video),
     });
   }
 
-  /// ponytail: WebKit may require a user gesture for the route picker, and a
-  /// native evaluateJavaScript call does not carry one. Ceiling: if this proves
-  /// to need a gesture, AirPlay has to come from Control Center or from Mode B's
-  /// native fullscreen controls instead. Untestable on the Simulator, which
-  /// never reports an available route.
+  /// Measured on device against a live receiver: this returns true and opens
+  /// the picker from a native evaluateJavaScript call, with no user gesture.
+  /// The gesture worry that this comment used to carry was unfounded. Opening
+  /// the picker is not the same as offloading, though — see attachAirPlaySource.
   function showAirPlay() {
     const v = staged || largestVideo();
     if (!v || typeof v.webkitShowPlaybackTargetPicker !== 'function') return false;
@@ -579,7 +984,7 @@ html[data-cp-unlock], html[data-cp-unlock] body {
 
   function accessibleName(el) {
     return (el.getAttribute('aria-label') || el.getAttribute('title') ||
-            el.textContent || '').trim();
+            el.textContent || '').replace(/\s+/g, ' ').trim();
   }
 
   /// Resolves a link and refuses anything off-site. Keeps a link to the
@@ -599,7 +1004,35 @@ html[data-cp-unlock], html[data-cp-unlock] body {
   /// pointing at the page you are on is not a next episode.
   function sameOriginHref(el) {
     const url = sameOriginURL(el);
-    return (url && url !== location.href) ? url : null;
+    if (!url) return null;
+    // An anchor into this document — "#comments" on a hash-routed page — is
+    // not a page either, however the current route reads.
+    if (!routeFragment(new URL(url)) &&
+        pageKey(url) === pageKey(location.href.split('#')[0])) return null;
+    return pageKey(url) !== pageKey(location.href) ? url : null;
+  }
+
+  /// Activate the site's real episode link instead of loading its URL behind
+  /// the site's back. React/Vue-style players attach their in-place episode
+  /// switch to this click; a direct WKWebView load bypasses it and turns Next
+  /// into a full page navigation. Returns false when discovery came from a
+  /// non-anchor signal such as <link rel="next">, so native can use its normal
+  /// validated load as a fallback.
+  function navigateEpisode(href) {
+    let wanted;
+    try { wanted = new URL(href, location.href); } catch (_) { return false; }
+    if (wanted.origin !== location.origin) return false;
+    const key = pageKey(wanted.href);
+    if (key === pageKey(location.href)) return false;
+
+    for (const anchor of document.querySelectorAll('a[href]')) {
+      const candidate = sameOriginURL(anchor);
+      if (candidate && pageKey(candidate) === key) {
+        anchor.click();
+        return true;
+      }
+    }
+    return false;
   }
 
   /// rel=next/prev is the only standard signal, so it wins. The text match is a
@@ -657,11 +1090,11 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     if (list.length < 2) return { next: null, prev: null };
 
     // Episode lists are usually in order already, but a site that renders them
-    // newest-first would give the wrong neighbours. When every label is a plain
-    // number, trust the number over the DOM.
-    const numbered = list.every(e => /^\s*\d{1,4}\s*$/.test(e.label));
+    // newest-first would give the wrong neighbours. When every entry carries a
+    // number — from its text or its URL — trust the number over the DOM.
+    const numbered = list.every(e => e.number !== null);
     const ordered = numbered
-      ? [...list].sort((a, b) => parseInt(a.label, 10) - parseInt(b.label, 10))
+      ? [...list].sort((a, b) => a.number - b.number)
       : list;
 
     const at = ordered.findIndex(e => e.current);
@@ -682,9 +1115,28 @@ html[data-cp-unlock], html[data-cp-unlock] body {
   /// page), tolerate a player that has not been laid out yet, and say so when
   /// it gives up — native is holding a curtain over the page until it hears
   /// back, and a silent failure leaves the user staring at it.
-  function autoTheater(timeoutMs = 8000) {
+  let autoTheaterRun = null;
+
+  function autoTheater(timeoutMs = 45000) {
+    if (autoTheaterRun) return autoTheaterRun;
     const started = Date.now();
-    return new Promise((resolve) => {
+    autoTheaterRun = new Promise((resolve) => {
+      let observer = null;
+      let poll = null;
+      let deadline = null;
+      let settled = false;
+
+      const finish = (ok) => {
+        if (settled) return;
+        settled = true;
+        if (observer) observer.disconnect();
+        if (poll) clearInterval(poll);
+        if (deadline) clearTimeout(deadline);
+        autoTheaterRun = null;
+        if (!ok) post({ type: 'theaterFailed' });
+        resolve(ok);
+      };
+
       const attempt = () => {
         const elapsed = Date.now() - started;
         const video = resumeCandidate(elapsed);
@@ -695,19 +1147,30 @@ html[data-cp-unlock], html[data-cp-unlock] body {
           // next episode opened cleanly and sat there paused, which is most of
           // what "I have to press play again" was.
           if (ok && video.paused) video.play().catch(() => {});
-          if (!ok) post({ type: 'theaterFailed' });
-          resolve(ok);
-          return;
+          finish(ok);
         }
-        if (elapsed > timeoutMs) {
-          post({ type: 'theaterFailed' });
-          resolve(false);
-          return;
-        }
-        setTimeout(attempt, 200);
       };
-      attempt();
+
+      // The replacement iframe often creates its <video> only after an AJAX
+      // response. Observe that transition instead of performing a short,
+      // one-shot search. The low-rate poll covers layout/readiness changes,
+      // which do not necessarily mutate the DOM.
+      observer = new MutationObserver(attempt);
+      observer.observe(document.documentElement, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['src'],
+      });
+      poll = setInterval(attempt, 500);
+      deadline = setTimeout(() => finish(false), timeoutMs);
+      // Defer the first attempt until after `autoTheaterRun` receives this
+      // promise. An immediate success inside the Promise constructor would
+      // otherwise clear the variable and then have the assignment restore the
+      // already-resolved promise, preventing a later episode transition.
+      queueMicrotask(attempt);
     });
+    return autoTheaterRun;
   }
 
   /// `largestVideo` requires a non-zero box, which is right for attaching a
@@ -789,7 +1252,7 @@ html[data-cp-unlock], html[data-cp-unlock] body {
   /// `topAtVideo` is the element actually painted at the video's centre, which
   /// answers that exactly — no z-index guesswork — and naturally spares the
   /// player's own control bar, which does not cover the centre.
-  function looksLikeInterstitial(el, videoRect, topAtVideo) {
+  function looksLikeInterstitial(el, videoRect, topAtVideo, hosts = []) {
     if (el === document.body || el === document.documentElement) return false;
     if (isOurs(el) || el.closest('[data-cp-keep]')) return false;
     if (el.hasAttribute('data-cp-blocked')) return false;
@@ -802,6 +1265,17 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     // the next mutation pass hid it — decoded, playing, display:none.
     if (el.tagName === 'VIDEO' || el.hasAttribute('data-cp-stage')) return false;
     if (el.querySelector('video') || el.querySelector('[data-cp-stage]')) return false;
+    // Neither querySelector above crosses a shadow boundary, so a custom
+    // element wrapping its own <video> reads as an empty positioned box.
+    if (hosts.some(host => el === host || el.contains(host))) return false;
+
+    // Never hide a sign-in. The no-video branch below treats any large
+    // positioned element as a gate, which is right for "verify you are human"
+    // and wrong for a real login: measured on a Jellyfin server, whose login
+    // view is a full-viewport positioned element over a poster backdrop, so it
+    // was hidden and left the user staring at the background with no way in.
+    // A consent gate does not ask for a password; a login does.
+    if (el.querySelector('input[type="password"]')) return false;
 
     const cs = getComputedStyle(el);
     if (cs.position !== 'fixed' && cs.position !== 'absolute') return false;
@@ -838,8 +1312,37 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     // like the app is broken.
     if (el.tagName === 'IFRAME' || el.querySelector('iframe')) return false;
 
+    // The frame guard above only works once the frame exists. aniwave's
+    // <div id="player"> is an absolutely positioned black box that sits empty
+    // until a server is picked, and the pass that ran in that window hid it —
+    // the iframe then landed inside display:none and the player stayed black.
+    // A gate has something to read or press; an empty box is a placeholder.
+    if (!hasContent(el)) return false;
+
     return r.width >= window.innerWidth * 0.6
         && r.height >= window.innerHeight * 0.5;
+  }
+
+  function hasContent(el) {
+    return el.textContent.trim().length > 0
+        || !!el.querySelector('img, svg, canvas, picture, button, input, a, form');
+  }
+
+  /// The complement of the guard, for when the guess was already wrong: a
+  /// container hidden as a gate that has since received the player frame is
+  /// released. Only where this document has no video of its own — the same
+  /// condition under which frames are spared — so an ad frame injected into
+  /// a hidden interstitial over a real <video> stays hidden with it.
+  function releaseFramedBlocks(hasOwnVideo) {
+    if (hasOwnVideo) return 0;
+    let released = 0;
+    for (const el of document.querySelectorAll('[data-cp-blocked]')) {
+      if (el.tagName === 'IFRAME' || el.querySelector('iframe')) {
+        el.removeAttribute('data-cp-blocked');
+        released++;
+      }
+    }
+    return released;
   }
 
   /// ponytail: walks every element in the body on each mutation batch, which is
@@ -853,6 +1356,9 @@ html[data-cp-unlock], html[data-cp-unlock] body {
 
     const video = largestVideo();
     const videoRect = video ? video.getBoundingClientRect() : null;
+    // Once per pass, not once per candidate.
+    const hosts = videoHosts();
+    releaseFramedBlocks(!!video);
 
     // One hit test per pass, not per candidate.
     let topAtVideo = null;
@@ -866,7 +1372,7 @@ html[data-cp-unlock], html[data-cp-unlock] body {
 
     let hidden = 0;
     for (const el of document.querySelectorAll('body *')) {
-      if (looksLikeInterstitial(el, videoRect, topAtVideo)) {
+      if (looksLikeInterstitial(el, videoRect, topAtVideo, hosts)) {
         el.setAttribute('data-cp-blocked', '');
         hidden++;
       }
@@ -877,7 +1383,7 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     // leaving the dimmer behind.
     if (hidden && videoRect) {
       for (let peel = 0; peel < 3; peel++) {
-        const again = blockLayerUnder(videoRect);
+        const again = blockLayerUnder(videoRect, hosts);
         if (!again) break;
         hidden += again;
       }
@@ -891,12 +1397,12 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     return hidden;
   }
 
-  function blockLayerUnder(videoRect) {
+  function blockLayerUnder(videoRect, hosts = []) {
     const cx = videoRect.left + videoRect.width / 2;
     const cy = videoRect.top + videoRect.height / 2;
     if (cx < 0 || cy < 0 || cx > window.innerWidth || cy > window.innerHeight) return 0;
     const top = document.elementFromPoint(cx, cy);
-    if (!top || !looksLikeInterstitial(top, videoRect, top)) return 0;
+    if (!top || !looksLikeInterstitial(top, videoRect, top, hosts)) return 0;
     top.setAttribute('data-cp-blocked', '');
     return 1;
   }
@@ -1013,6 +1519,59 @@ html[data-cp-unlock], html[data-cp-unlock] body {
   function scan(root = document) {
     sweepOrphans();
     for (const v of allVideos(root)) attachButton(v);
+    checkStaged();
+  }
+
+  // --- A player that leaves ------------------------------------------------
+
+  /// A single-page app does not reload between items. Jellyfin, Emby and Plex
+  /// route in the hash and rebuild their player in place, so an episode change
+  /// there produces no new document, no `ready`, and nothing for native's
+  /// resume to hook. What it does produce is the staged <video> leaving the
+  /// DOM — with a replacement arriving a moment later, or not at all when the
+  /// app went back to a page with no player.
+  ///
+  /// Follow the player rather than the page: keep the stage marks up as a
+  /// curtain, poll for a replacement the way resume does, and hand theater over
+  /// to it. Give up honestly when nothing turns up, so the user gets the page
+  /// and its controls back instead of black under a set of dead buttons.
+  const REPLACEMENT_TIMEOUT_MS = 8000;
+  let following = null;              // { lost, deadline, timer }
+
+  function checkStaged(timeoutMs = REPLACEMENT_TIMEOUT_MS) {
+    // The hosted frame in the main document, same story: the site swapped
+    // its player iframe. There is no agent left in the old frame to say so.
+    if (hosted && !hosted.isConnected) {
+      unhostTheater();
+      post({ type: 'theaterEnded' });
+    }
+    if (!staged || staged.isConnected) return;
+    if (following && following.lost === staged) {
+      following.deadline = Math.min(following.deadline, Date.now() + timeoutMs);
+      return;
+    }
+    following = { lost: staged, deadline: Date.now() + timeoutMs, timer: 0 };
+    const started = Date.now();
+    const attempt = () => {
+      // Someone else — Close, or a real navigation — moved on already.
+      if (!following || staged !== following.lost) { following = null; return; }
+      const video = resumeCandidate(Date.now() - started);
+      if (video && video !== staged) {
+        following = null;
+        // enterTheater posts theaterEnded for the old element and theater for
+        // the new one, in that order, so native banks the old position and
+        // then re-syncs its chrome to the replacement.
+        enterTheater(video);
+        return;
+      }
+      if (Date.now() > following.deadline) {
+        following = null;
+        exitTheater();
+        return;
+      }
+      following.timer = setTimeout(attempt, 200);
+    };
+    attempt();
   }
 
   // Coalesce mutation storms into one pass per frame; ad scripts mutate the
@@ -1055,10 +1614,14 @@ html[data-cp-unlock], html[data-cp-unlock] body {
   window.__cp = {
     enterTheater, exitTheater, isTheater, autoTheater,
     hostTheater, unhostTheater, largestFrame,
-    togglePlay, seek, skip, beginScrub, setRate,
+    togglePlay, seek, skip, beginScrub, setRate, setVolume,
+    armEpisodeTransition,
     textTracks, selectTextTrack, setObjectFit, selectSource, togglePiP,
-    findEpisodes, episodeList, largestVideo, allVideos, resumeCandidate, scan,
-    showAirPlay, nativeFullscreen,
+    findEpisodes, episodeList, navigateEpisode,
+    largestVideo, allVideos, resumeCandidate, scan,
+    checkStaged,
+    showAirPlay, nativeFullscreen, untrackAirPlay, isManifestURL,
+    streamCandidates, sourceKind, attachAirPlaySource,
     blockOverlays, setOverlayBlocking,
   };
 })();

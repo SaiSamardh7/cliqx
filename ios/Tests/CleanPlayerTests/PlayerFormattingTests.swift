@@ -59,6 +59,29 @@ final class PlayerFormattingTests: XCTestCase {
         XCTAssertNil(PlayerFormatting.episodeLabel("A film with no episodes"))
     }
 
+    func testSeriesTitleRemovesTheEpisodeButKeepsTheShow() {
+        XCTAssertEqual(PlayerFormatting.seriesTitle("Naruto — Episode 10", host: "watch.test"),
+                       "Naruto")
+        XCTAssertEqual(PlayerFormatting.seriesTitle("Naruto Ep.5 English Sub", host: "watch.test"),
+                       "Naruto")
+        XCTAssertEqual(PlayerFormatting.seriesTitle("Episode 8 - Naruto", host: "watch.test"),
+                       "Naruto")
+        XCTAssertNil(PlayerFormatting.seriesTitle("Episode 8", host: "watch.test"))
+    }
+
+    func testEpisodesOfOneSeriesShareARecentIdentity() {
+        let five = URL(string: "https://watch.test/naruto/episode-5")!
+        let ten = URL(string: "https://watch.test/naruto/episode-10")!
+        XCTAssertEqual(
+            PlayerFormatting.seriesIdentity(title: "Naruto Episode 5", url: five),
+            PlayerFormatting.seriesIdentity(title: "Naruto Episode 10", url: ten))
+        XCTAssertNotEqual(
+            PlayerFormatting.seriesIdentity(title: "Naruto Episode 10", url: ten),
+            PlayerFormatting.seriesIdentity(
+                title: "One Piece Episode 10",
+                url: URL(string: "https://watch.test/one-piece/episode-10")!))
+    }
+
     /// Episode links on real sites are commonly labelled with a bare number.
     func testBareNumbersReadAsEpisodes() {
         XCTAssertEqual(PlayerFormatting.episodeRowLabel("112"), "Episode 112")
