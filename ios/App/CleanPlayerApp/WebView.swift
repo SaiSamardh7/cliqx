@@ -43,6 +43,10 @@ final class PageState: ObservableObject {
     /// Drives the transition curtain copy. Kept separate from the destination
     /// URL so Previous never announces itself as Next.
     @Published var episodeTransitionDirection: EpisodeDirection?
+    /// The last frame of the outgoing video, shown under the curtain so an
+    /// episode change reads as a pause on the picture rather than a cut to
+    /// black. Nil until the snapshot lands, and again once the curtain lifts.
+    @Published var transitionFrame: UIImage?
 
     var episodeTransitionMessage: String {
         switch episodeTransitionDirection {
@@ -171,7 +175,7 @@ struct WebView: UIViewRepresentable {
         Coordinator(model: model, page: page, rules: rules, settings: settings)
     }
 
-    func makeUIView(context: Context) -> WKWebView {
+    func makeUIView(context: Context) -> UIView {
         let webView = WKWebView(
             frame: .zero,
             configuration: BrowserSetup.makeConfiguration(
@@ -252,15 +256,28 @@ struct WebView: UIViewRepresentable {
         context.coordinator.observe(webView)
         context.coordinator.loaded = url
         webView.load(URLRequest(url: url))
-        return webView
+
+        // A plain container rather than the web view itself, so the warm
+        // standby for the next episode can load in a second web view behind
+        // this one and be swapped to the front without SwiftUI noticing.
+        let container = UIView()
+        container.backgroundColor = .black
+        webView.frame = container.bounds
+        webView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        container.addSubview(webView)
+        context.coordinator.container = container
+        return container
     }
 
-    func updateUIView(_ webView: WKWebView, context: Context) {
+    func updateUIView(_ container: UIView, context: Context) {
         // Only reload when the model points somewhere new, or every state
-        // change would restart the page.
-        guard context.coordinator.loaded != url else { return }
-        context.coordinator.loaded = url
-        webView.load(URLRequest(url: url))
+        // change would restart the page. Read from the model, not the `url`
+        // this view was built with: a `page` change can run this update one
+        // pass before the parent rebuilds us, and that stale `url` navigated
+        // a just-promoted standby straight back to the episode it replaced.
+        guard let target = model.current, context.coordinator.loaded != target else { return }
+        context.coordinator.loaded = target
+        page.webView?.load(URLRequest(url: target))
     }
 
     @MainActor
@@ -322,6 +339,28 @@ struct WebView: UIViewRepresentable {
         private var lastDuration: Double = 0
         private var pendingResumeAt: Double = 0
         private var didApplyResume = false
+
+        /// The view both web views live in. Weak: SwiftUI owns it.
+        weak var container: UIView?
+
+        /// Warm standby: the next episode, loading in a second web view behind
+        /// the one on screen. Armed in the last minute of an episode, promoted
+        /// the moment its video proves it can play, so Next is a cut rather
+        /// than a load. Fails soft — anything going wrong just leaves the
+        /// ordinary in-place navigation, which is what ran before this existed.
+        ///
+        /// ponytail: one extra WebKit process for about a minute per episode.
+        /// The ceiling is memory on older phones, where jetsam kills rather
+        /// than warns; lower `standbyLeadSeconds` if that shows up in reports.
+        private var standby: WKWebView?
+        private var standbyURL: URL?
+        private var standbyFrame: WKFrameInfo?
+        private var standbyReady = false
+        private var standbyNavigation: StandbyNavigation?
+        /// The user asked for the episode the standby holds and it was not
+        /// ready yet: the curtain is up for the standby, not for a navigation.
+        private var waitingForStandby = false
+        private static let standbyLeadSeconds: Double = 60
 
         init(model: BrowserModel, page: PageState,
              rules: RuleListController, settings: ProtectionSettings) {
@@ -471,6 +510,24 @@ struct WebView: UIViewRepresentable {
             }
             let wasWatching = page.isTheater
             resumeTheaterFor = wasWatching ? destination : nil
+
+            // The standby already holds this episode. Promote it now if it has
+            // proven playback; otherwise hold the curtain for it — the video
+            // on screen keeps playing underneath, nothing navigates.
+            if wasWatching, standby != nil, standbyURL == destination {
+                if standbyReady {
+                    Self.transitionLog.notice("Standby ready; cutting to it")
+                    promoteStandby()
+                } else {
+                    Self.transitionLog.notice("Standby not ready; waiting under the curtain")
+                    waitingForStandby = true
+                    beginResume(direction: direction)
+                }
+                return
+            }
+            // Anything else the user picked makes the standby stale.
+            discardStandby()
+
             if wasWatching {
                 resumeOutgoingFrame = theaterFrame
                 resumeOutgoingSourceChanged = false
@@ -557,6 +614,15 @@ struct WebView: UIViewRepresentable {
         private func beginResume(direction: EpisodeDirection?) {
             page.episodeTransitionDirection = direction
             page.isResumingEpisode = true
+            // Grab the picture before the page underneath changes. The
+            // navigation waits on a JavaScript round trip, so this normally
+            // lands while the old video is still on screen; if it does not,
+            // the curtain is plain black, which is what it always was.
+            page.transitionFrame = nil
+            page.webView?.takeSnapshot(with: nil) { [weak self] image, _ in
+                guard let self, self.page.isResumingEpisode else { return }
+                self.page.transitionFrame = image
+            }
             resumeArmTask?.cancel()
             // Keep the page covered until playback resumes or the user chooses
             // to reveal it. Giving up early is the bug: slow player iframes
@@ -579,9 +645,168 @@ struct WebView: UIViewRepresentable {
             resumeOutgoingSourceChanged = false
             page.isResumingEpisode = false
             page.episodeTransitionDirection = nil
+            page.transitionFrame = nil
+            if waitingForStandby {
+                // Timed out or "Show the page": the episode on screen was
+                // never left, so it stays exactly as it was.
+                waitingForStandby = false
+                discardStandby()
+                return
+            }
             if !keepingTheater {
                 page.isTheater = false
                 releaseHostPage()
+            }
+        }
+
+        // MARK: Warm standby
+
+        private func armStandbyIfNear(currentTime: Double, duration: Double) {
+            // The next link changed under an armed standby: it holds the wrong
+            // episode now.
+            if let standbyURL, standbyURL != page.nextEpisode { discardStandby() }
+            guard standby == nil, duration > 0,
+                  duration - currentTime < Self.standbyLeadSeconds,
+                  let next = page.nextEpisode,
+                  let primary = page.webView, let current = primary.url,
+                  EpisodeTransition.mayResume(expected: next, current: current),
+                  let container
+            else { return }
+
+            // The primary's configuration, so rule lists, user scripts, the
+            // bridge and the data store are all shared: the standby is filtered
+            // and reports to this same handler, distinguished by `message.webView`.
+            let view = WKWebView(frame: container.bounds, configuration: primary.configuration)
+            view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            let navigation = StandbyNavigation(site: next) { [weak self] in
+                Self.transitionLog.notice("Standby failed to load; dropping it")
+                self?.discardStandby()
+            }
+            view.navigationDelegate = navigation
+            standbyNavigation = navigation
+            // Behind the opaque primary: on screen as far as WebKit is
+            // concerned, so its media is not suspended, and invisible to the user.
+            container.insertSubview(view, at: 0)
+            standby = view
+            standbyURL = next
+            standbyFrame = nil
+            standbyReady = false
+            view.load(URLRequest(url: next))
+            Self.transitionLog.notice("Standby armed for the next episode")
+        }
+
+        private func discardStandby() {
+            guard let view = standby else { return }
+            view.navigationDelegate = nil
+            view.stopLoading()
+            view.removeFromSuperview()
+            standby = nil
+            standbyURL = nil
+            standbyFrame = nil
+            standbyReady = false
+            standbyNavigation = nil
+        }
+
+        /// Messages from the standby never touch page state: it is not what
+        /// the user is looking at. It gets exactly the resume treatment the
+        /// primary would — every frame that announces is asked to stage — plus
+        /// silence, and a pause once it has proven it can play.
+        private func handleStandby(_ kind: String, _ body: [String: Any],
+                                   _ message: WKScriptMessage) {
+            guard let view = standby else { return }
+            switch kind {
+            case "ready":
+                view.evaluateJavaScript(
+                    "window.__cp && (window.__cp.setMuted(true), window.__cp.autoTheater())",
+                    in: message.frameInfo, in: BrowserSetup.world, completionHandler: nil)
+            case "theater":
+                standbyFrame = message.frameInfo
+                if !message.frameInfo.isMainFrame {
+                    view.evaluateJavaScript("window.__cp && window.__cp.hostTheater()",
+                                            in: nil, in: BrowserSetup.world,
+                                            completionHandler: nil)
+                }
+            case "theaterEnded":
+                standbyFrame = nil
+                standbyReady = false
+            case "playback":
+                guard body["playing"] as? Bool == true, !standbyReady,
+                      let frame = standbyFrame else { break }
+                standbyReady = true
+                // Proven. Park it at the start until it is wanted.
+                view.evaluateJavaScript(
+                    "window.__cp && (window.__cp.togglePlay(), window.__cp.seek(0))",
+                    in: frame, in: BrowserSetup.world, completionHandler: nil)
+                Self.transitionLog.notice("Standby proved playback")
+                if waitingForStandby { promoteStandby() }
+            default:
+                break
+            }
+        }
+
+        /// The cut. The standby becomes the page; the old web view leaves the
+        /// hierarchy and is released, which is what stops its media.
+        private func promoteStandby() {
+            guard let new = standby, let url = standbyURL, let frame = standbyFrame,
+                  let container else { return }
+            let old = page.webView
+            stopWatching()
+
+            container.bringSubviewToFront(new)
+            old?.navigationDelegate = nil
+            old?.uiDelegate = nil
+            old?.removeFromSuperview()
+
+            standby = nil
+            standbyURL = nil
+            standbyFrame = nil
+            standbyReady = false
+            standbyNavigation = nil
+            waitingForStandby = false
+
+            new.navigationDelegate = self
+            new.uiDelegate = self
+            new.allowsBackForwardNavigationGestures = true
+            page.webView = new
+            observe(new)
+            theaterFrame = frame
+            blockingFrames.removeAll()
+            let current = new.url ?? url
+            loaded = current
+            model.synchronizeCurrent(current)
+            page.host = Self.displayHost(current)
+            page.isSecure = current.scheme?.lowercased() == "https"
+            page.title = new.title ?? ""
+            page.loadError = nil
+            page.blockedExternal = nil
+            endResume(keepingTheater: true)
+            page.isTheater = true
+            page.playbackEnded = false
+            callPlayer("setMuted(false)")
+            callPlayer("setVolume(\(page.volumePercent))")
+            callPlayer("togglePlay()")
+            refreshEpisodes(new)
+            beginWatching(current)
+            Self.transitionLog.notice("Standby promoted; episode cut over")
+        }
+
+        /// The moment a page becomes a watched video: record it, and arm
+        /// resume + thumbnail for the session in this player.
+        private func beginWatching(_ url: URL) {
+            guard !settings.privateBrowsing else { return }
+            watchingURL = url
+            model.recordWatched(url, title: page.webView?.title)
+            pendingResumeAt = model.resume(for: url)
+            didApplyResume = false
+            lastTime = 0
+            lastDuration = 0
+            // Capture the poster on a short delay rather than on a time
+            // update: a paused or already-finished video sends no
+            // timeupdate, and would otherwise never get a thumbnail.
+            Task { [weak self] in
+                try? await Task.sleep(for: .seconds(1.5))
+                guard let self, self.page.isTheater, self.watchingURL == url else { return }
+                self.captureThumbnail(for: url)
             }
         }
 
@@ -838,6 +1063,8 @@ struct WebView: UIViewRepresentable {
         func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
             theaterFrame = nil
             blockingFrames.removeAll()
+            waitingForStandby = false
+            discardStandby()   // shares the process; it died too
             endResume()   // also drops theater and the curtain
 
             guard let url = webView.url ?? loaded else {
@@ -864,6 +1091,7 @@ struct WebView: UIViewRepresentable {
             // Leaving the page (including an episode change) banks where the
             // last video stopped before the old document goes away.
             stopWatching()
+            if !waitingForStandby { discardStandby() }
             // The old frame handle dies with the old document.
             theaterFrame = nil
             blockingFrames.removeAll()
@@ -1046,6 +1274,15 @@ struct WebView: UIViewRepresentable {
             guard let body = message.body as? [String: Any],
                   let kind = body["type"] as? String else { return }
 
+            if let standby, message.webView === standby {
+                handleStandby(kind, body, message)
+                return
+            }
+            // A web view that was swapped out is still tearing down and still
+            // talks through the shared bridge. Nothing it says is about what
+            // is on screen any more.
+            guard message.webView === page.webView else { return }
+
             switch kind {
             // Every frame announces itself once. Resuming theater after an
             // episode change has to happen in the frame holding the video, and
@@ -1081,24 +1318,7 @@ struct WebView: UIViewRepresentable {
                 page.pipAvailable = body["pip"] as? Bool ?? false
                 if let webView = page.webView { refreshEpisodes(webView) }
 
-                // This is the moment a page becomes a watched video. Record it,
-                // and arm resume + thumbnail for the session in this player.
-                if let url = page.webView?.url, !settings.privateBrowsing {
-                    watchingURL = url
-                    model.recordWatched(url, title: page.webView?.title)
-                    pendingResumeAt = model.resume(for: url)
-                    didApplyResume = false
-                    lastTime = 0
-                    lastDuration = 0
-                    // Capture the poster on a short delay rather than on a time
-                    // update: a paused or already-finished video sends no
-                    // timeupdate, and would otherwise never get a thumbnail.
-                    Task { [weak self] in
-                        try? await Task.sleep(for: .seconds(1.5))
-                        guard let self, self.page.isTheater, self.watchingURL == url else { return }
-                        self.captureThumbnail(for: url)
-                    }
-                }
+                if let url = page.webView?.url { beginWatching(url) }
 
                 // A player in a cross-origin frame stages the video against
                 // that frame's document and can reach no further. The host
@@ -1176,6 +1396,9 @@ struct WebView: UIViewRepresentable {
                 page.bufferedTo = body["buffered"] as? Double ?? 0
                 page.playbackRate = body["rate"] as? Double ?? 1
 
+                if page.isTheater {
+                    armStandbyIfNear(currentTime: page.currentTime, duration: page.duration)
+                }
                 if page.isTheater, watchingURL != nil {
                     lastTime = page.currentTime
                     lastDuration = page.duration
@@ -1280,5 +1503,41 @@ struct WebView: UIViewRepresentable {
             }
             return current
         }
+    }
+
+    /// The standby's navigation delegate. Lets the destination site load and
+    /// nothing else, and never touches page state — the standby is not what
+    /// the user is looking at. Auth falls to WebKit's default handling, which
+    /// replays a credential the user already saved.
+    @MainActor
+    final class StandbyNavigation: NSObject, WKNavigationDelegate {
+        private let site: URL
+        private let failed: () -> Void
+
+        init(site: URL, failed: @escaping () -> Void) {
+            self.site = site
+            self.failed = failed
+        }
+
+        func webView(_ webView: WKWebView,
+                     decidePolicyFor navigationAction: WKNavigationAction,
+                     decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+            guard let url = navigationAction.request.url,
+                  ["http", "https"].contains(url.scheme?.lowercased() ?? "")
+            else { decisionHandler(.cancel); return }
+            // Subframes go anywhere the rule lists allow; the document itself
+            // stays on the site it was armed for.
+            if navigationAction.targetFrame?.isMainFrame == true,
+               !HostKey.isSameSite(url, as: site) {
+                decisionHandler(.cancel); return
+            }
+            decisionHandler(.allow)
+        }
+
+        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!,
+                     withError error: Error) { failed() }
+
+        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!,
+                     withError error: Error) { failed() }
     }
 }
