@@ -707,6 +707,35 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     return best;
   }
 
+  function inFixedSubtree(el) {
+    for (let n = el; n && n !== document.documentElement; n = n.parentElement) {
+      if (getComputedStyle(n).position === 'fixed') return true;
+    }
+    return false;
+  }
+
+  /// The page's player embed: the biggest frame that scrolls WITH the page.
+  ///
+  /// `largestFrame` cannot serve here. On a phone a "choose your browser" card
+  /// is wider and taller than a 16:9 embed below it, so largest-wins hands back
+  /// the ad — and the overlay blocker then spares the ad and reads the real
+  /// player as the thing on top. What separates them is not size: a responsive
+  /// embed scrolls away with its page, while an interstitial is pinned to the
+  /// viewport. No site pins its own player there, so a frame under a
+  /// position:fixed ancestor is never the player.
+  function playerFrame() {
+    let best = null, bestArea = 0;
+    for (const f of document.querySelectorAll('iframe')) {
+      const r = f.getBoundingClientRect();
+      const area = r.width * r.height;
+      if (area <= bestArea || r.width < 200 || r.height < 100) continue;
+      if (isOurs(f) || f.closest('[data-cp-keep]')) continue;
+      if (inFixedSubtree(f)) continue;
+      best = f; bestArea = area;
+    }
+    return best;
+  }
+
   function exitTheater() {
     unstage();
     hosted = null;
@@ -1252,7 +1281,8 @@ html[data-cp-unlock], html[data-cp-unlock] body {
   /// `topAtVideo` is the element actually painted at the video's centre, which
   /// answers that exactly — no z-index guesswork — and naturally spares the
   /// player's own control bar, which does not cover the centre.
-  function looksLikeInterstitial(el, videoRect, topAtVideo, hosts = []) {
+  function looksLikeInterstitial(el, ctx) {
+    const { videoRect, topAtVideo, hosts = [] } = ctx;
     if (el === document.body || el === document.documentElement) return false;
     if (isOurs(el) || el.closest('[data-cp-keep]')) return false;
     if (el.hasAttribute('data-cp-blocked')) return false;
@@ -1294,22 +1324,64 @@ html[data-cp-unlock], html[data-cp-unlock] body {
       return overlapFraction(r, videoRect) >= 0.3;
     }
 
-    // No video in THIS document — the "verify your browser" gate appears
-    // before the player. Fall back to full-page coverage.
+    // No video in THIS document — either the player lives in a cross-origin
+    // frame, or nothing is playing yet and this is the "verify your browser"
+    // gate that comes first.
     //
-    // But a cross-origin player iframe looks identical from here: the
+    // A cross-origin player iframe looks identical to a gate from here: the
     // querySelector('video') guard above cannot see into it, and the standard
     // responsive embed is position:absolute at 100% of its wrapper with a
-    // black background. That is exactly the shape matched below, so without
-    // this the app hides the video the user came to watch and leaves a blank
-    // page. Spare anything that is, or holds, a frame.
+    // black background. So spare the player embed — the frame itself, and
+    // anything holding it.
     //
     // Only in this branch. When this document does have a video, the player is
     // that <video>, so an iframe painted over it is an ad and still goes.
+    const { frame, frameRect } = ctx;
+    if (frame && (el === frame || el.contains(frame))) return false;
+
+    if (frameRect) {
+      // The player frame stands in for the <video> this document has not got,
+      // so the branch can ask the same question as the one above instead of
+      // guessing from size: is this painted over the player?
+      //
+      // The old version could only guess, and spared anything that HELD a
+      // frame — which handed a free pass to the dimmer of every ad dialog
+      // served in one, because querySelector('iframe') found the ad's own
+      // frame inside it. That is the whole shape of the "is your browser
+      // Firefox?" smartlink: a fixed dimmer over the page, an iframe card in
+      // the middle of it, and the episode still playing underneath.
+      //
+      // Two shapes count. Over the player is the obvious one. The other is
+      // the dialog in the report: pinned to the viewport and centred on IT,
+      // so with a 16:9 embed on a tall phone it sits mostly ABOVE the
+      // episode and covers less than a third of it while still owning the
+      // screen. Nothing a site pins to the viewport at this size is content
+      // the user asked for — its header, footer and cookie bar are bands
+      // across one edge, far too short for either test.
+      const coversPlayer = overlapFraction(r, frameRect) >= 0.3;
+      const coversScreen = cs.position === 'fixed'
+          && r.width >= window.innerWidth * 0.5
+          && r.height >= window.innerHeight * 0.25;
+      if (!coversPlayer && !coversScreen) return false;
+
+      // Aim the hit test at the candidate's own centre, not the player's, for
+      // the same reason: the card need not cover the player's middle. It
+      // still spares anything merely sharing the player's coordinates from
+      // BEHIND — what is painted there is the frame, which such a box neither
+      // is nor contains.
+      //
+      // One hit test per candidate, where the video branch does one per pass.
+      // The coverage gates above knock all but a handful out first.
+      const top = centreHit(r);
+      return !!top && (el === top || el.contains(top));
+    }
+
+    // No player frame on the page at all. Fall back to full-page coverage,
+    // and keep the old frame guard for the window before the frame exists.
     //
-    // ponytail: costs us gates that are themselves iframes. That trade is
-    // deliberate — a missed gate is one shield tap away, a hidden player looks
-    // like the app is broken.
+    // ponytail: costs us gates that are themselves iframes on a page with no
+    // player. That trade is deliberate — a missed gate is one shield tap away,
+    // a hidden player looks like the app is broken.
     if (el.tagName === 'IFRAME' || el.querySelector('iframe')) return false;
 
     // The frame guard above only works once the frame exists. aniwave's
@@ -1333,11 +1405,24 @@ html[data-cp-unlock], html[data-cp-unlock] body {
   /// released. Only where this document has no video of its own — the same
   /// condition under which frames are spared — so an ad frame injected into
   /// a hidden interstitial over a real <video> stays hidden with it.
+  ///
+  /// Scoped twice over, because releasing on any frame let an ad dialog free
+  /// itself — the ad's own iframe is a frame inside the hidden container:
+  ///
+  /// - only what was hidden as a GATE, the guess made when the page had no
+  ///   player frame at all. An overlay hidden while a player frame existed was
+  ///   not that guess and never needs undoing;
+  /// - and only for a frame that scrolls with the page, the same test that
+  ///   picks the player out in the first place. `playerFrame` cannot be reused
+  ///   here: the container is display:none, so the frame inside it measures
+  ///   0×0 and fails the size floor, which would leave the player hidden for
+  ///   good — the exact deadlock this function exists to break.
   function releaseFramedBlocks(hasOwnVideo) {
     if (hasOwnVideo) return 0;
     let released = 0;
-    for (const el of document.querySelectorAll('[data-cp-blocked]')) {
-      if (el.tagName === 'IFRAME' || el.querySelector('iframe')) {
+    for (const el of document.querySelectorAll('[data-cp-blocked="gate"]')) {
+      const frame = el.tagName === 'IFRAME' ? el : el.querySelector('iframe');
+      if (frame && !inFixedSubtree(frame)) {
         el.removeAttribute('data-cp-blocked');
         released++;
       }
@@ -1358,32 +1443,38 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     const videoRect = video ? video.getBoundingClientRect() : null;
     // Once per pass, not once per candidate.
     const hosts = videoHosts();
+    // The stand-in for the video when this document has none of its own, so
+    // it is only worth finding in that case.
+    const frame = video ? null : playerFrame();
+    const frameRect = frame ? frame.getBoundingClientRect() : null;
     releaseFramedBlocks(!!video);
 
     // One hit test per pass, not per candidate.
-    let topAtVideo = null;
-    if (videoRect && videoRect.width > 0 && videoRect.height > 0) {
-      const cx = videoRect.left + videoRect.width / 2;
-      const cy = videoRect.top + videoRect.height / 2;
-      if (cx >= 0 && cy >= 0 && cx <= window.innerWidth && cy <= window.innerHeight) {
-        topAtVideo = document.elementFromPoint(cx, cy);
-      }
-    }
+    const ctx = {
+      videoRect, hosts, frame, frameRect,
+      topAtVideo: centreHit(videoRect),
+    };
+
+    // Which guess this was, so `releaseFramedBlocks` can undo the one that
+    // needs undoing and leave the other alone.
+    const reason = (videoRect || frameRect) ? 'overlay' : 'gate';
 
     let hidden = 0;
     for (const el of document.querySelectorAll('body *')) {
-      if (looksLikeInterstitial(el, videoRect, topAtVideo, hosts)) {
-        el.setAttribute('data-cp-blocked', '');
+      if (looksLikeInterstitial(el, ctx)) {
+        el.setAttribute('data-cp-blocked', reason);
         hidden++;
       }
     }
 
     // An interstitial is a card sitting on a backdrop, and only whichever is
     // topmost is caught per pass. Peel the remaining layers now rather than
-    // leaving the dimmer behind.
-    if (hidden && videoRect) {
+    // leaving the dimmer behind. Whatever the pass aimed at — the video, or
+    // the player frame standing in for it — is what the layers sit on.
+    const target = videoRect || frameRect;
+    if (hidden && target) {
       for (let peel = 0; peel < 3; peel++) {
-        const again = blockLayerUnder(videoRect, hosts);
+        const again = blockLayerUnder(target, ctx);
         if (!again) break;
         hidden += again;
       }
@@ -1397,13 +1488,26 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     return hidden;
   }
 
-  function blockLayerUnder(videoRect, hosts = []) {
-    const cx = videoRect.left + videoRect.width / 2;
-    const cy = videoRect.top + videoRect.height / 2;
-    if (cx < 0 || cy < 0 || cx > window.innerWidth || cy > window.innerHeight) return 0;
-    const top = document.elementFromPoint(cx, cy);
-    if (!top || !looksLikeInterstitial(top, videoRect, top, hosts)) return 0;
-    top.setAttribute('data-cp-blocked', '');
+  /// What is painted at the centre of `rect`, or null when there is no rect or
+  /// the centre is off screen.
+  function centreHit(rect) {
+    if (!rect || rect.width <= 0 || rect.height <= 0) return null;
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top + rect.height / 2;
+    if (cx < 0 || cy < 0 || cx > window.innerWidth || cy > window.innerHeight) return null;
+    return document.elementFromPoint(cx, cy);
+  }
+
+  function blockLayerUnder(targetRect, ctx) {
+    const top = centreHit(targetRect);
+    if (!top) return 0;
+    // Re-ask about the layer now on top, against the same target this pass is
+    // aiming at, so the player itself stays spared. The video branch wants the
+    // new topmost handed to it; the frame branch runs its own hit test per
+    // candidate and needs no help.
+    const next = ctx.videoRect ? { ...ctx, topAtVideo: top } : ctx;
+    if (!looksLikeInterstitial(top, next)) return 0;
+    top.setAttribute('data-cp-blocked', 'overlay');
     return 1;
   }
 

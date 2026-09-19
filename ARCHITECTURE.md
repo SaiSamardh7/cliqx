@@ -757,6 +757,87 @@ Those are the failure modes that make a blocker worse than the ads.
 
 ---
 
+## Overlay heuristic, third attempt: the page with no video of its own
+
+Reported from the phone, mid-episode: a card reading *"Is your browser Firefox?
+/ Yes / or choose your browser to continue / Cancel"*, sitting over the episode
+while it played. A browser-choice smartlink — the same affiliate family as the
+fake VPN dialog, wearing a different costume.
+
+The hit test above never ran on it. It aims at a `<video>`, and on the sites
+this app exists for the main frame has no `<video>` at all: the player is a
+cross-origin iframe. That document took the *other* branch, which had none of
+the second attempt's machinery and still guessed from size — plus one guard
+that turned out to be the whole bug.
+
+### The frame guard was immunising the ads
+
+A responsive embed is `position: absolute` at 100% of its wrapper with a black
+background, which is exactly the shape the size gate read as a full-page gate.
+Rather than hide the player, the branch spared anything that was, or *held*, a
+frame:
+
+```js
+if (el.tagName === 'IFRAME' || el.querySelector('iframe')) return false;
+```
+
+`querySelector` searches the whole subtree, and these dialogs are served in a
+frame of their own. So the ad's iframe, sitting inside the dimmer, handed the
+dimmer a free pass — and the card went with it. The guard written to protect
+players was protecting every framed ad on the page.
+
+### Which frame is the player cannot be answered by size
+
+The obvious repair — spare the *biggest* frame instead of any frame — fails on a
+phone, where a browser-choice card is larger than a 16:9 embed below it.
+Largest-wins returns the ad, spares it, and reads the real player as the thing
+on top of it.
+
+What separates them is not size but behaviour: **a player embed scrolls with the
+page; an interstitial is pinned to the viewport.** No site pins its own player
+there. `playerFrame()` is therefore the largest frame with no `position: fixed`
+ancestor, and only that frame and its holders are spared.
+
+### The player frame then stands in for the video
+
+With the player identified, the branch asks the second attempt's question after
+all — is this painted over the player? — instead of guessing from size. Two
+shapes count, and both then face one `elementFromPoint` hit test at the
+candidate's own centre:
+
+- it covers at least 30% of the player's box; or
+- it is `position: fixed` and covers at least half the viewport's width and a
+  quarter of its height.
+
+The second is what the reported card needed. Centred on the *viewport* while a
+16:9 embed sits lower down the page, it covered none of the player's middle and
+was nowhere near the full-page coverage the old gate demanded. Site chrome is a
+band across one edge — a header, a footer, a cookie bar — and is far too short
+for either test.
+
+The hit test is per candidate here, where the video branch does one per pass.
+The coverage gates run first and leave a handful of candidates at most.
+
+### Scoping the undo
+
+`releaseFramedBlocks` exists because a container hidden as a gate may turn out
+to be a player placeholder once the frame lands in it. It, too, released on
+*any* frame, so an ad dialog could free itself with its own iframe. Blocks now
+record which guess they were — `data-cp-blocked="gate"` before a player frame
+existed, `"overlay"` after — and only gates are released, and only for a frame
+that scrolls with the page.
+
+It cannot reuse `playerFrame()`: the container is `display: none`, so the frame
+inside it measures 0×0 and fails the size floor, which would leave the player
+hidden permanently — the exact deadlock the function exists to break.
+
+### Tested — 3 of the 5 new specs assert what it must NOT hide
+
+The player frame under a pinned card, a player frame smaller than the ad frame
+covering it, and a cookie bar on a page with a framed player.
+
+---
+
 ## Filter-list infrastructure (partial)
 
 Work against the "Stronger Ad Blocking" checklist. **Not finished** — that list

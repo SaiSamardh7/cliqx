@@ -1987,6 +1987,102 @@ test.describe('interstitial blocking', () => {
     await expect(page.locator('#gate')).toBeHidden();
   });
 
+  // Reported from the phone, watching an episode: a "Is your browser Firefox?
+  // / Yes / or choose your browser to continue" card over the still-playing
+  // episode. The site puts its player in a cross-origin frame, so this
+  // document has no <video> and the no-video branch is what runs — and that
+  // branch spared anything HOLDING a frame. The ad card is served in a frame
+  // of its own, so querySelector('iframe') found it inside the dimmer and
+  // waved the whole dialog through.
+  //
+  // A responsive embed in the page flow, as every one of these sites has.
+  const FRAMED_PLAYER = `
+    <div id="embed" style="position:relative;width:100vw;height:50vh">
+      <iframe id="player" src="about:blank"
+              style="position:absolute;inset:0;width:100%;height:100%;
+                     border:0;background:#000"></iframe>
+    </div>`;
+
+  test('hides a browser-choice dialog whose card is an ad iframe', async ({ page }) => {
+    await serve(page, `${HEAD}${FRAMED_PLAYER}
+      <div id="backdrop" style="position:fixed;inset:0;z-index:2147483647;
+           background:rgba(0,0,0,.6)">
+        <iframe id="card" src="about:blank"
+                style="position:absolute;top:12vh;left:11vw;width:78vw;height:35vh;
+                       border:0;background:#fff"></iframe>
+      </div>`);
+    await expect(page.locator('#backdrop')).toBeHidden();
+    await expect(page.locator('#player')).toBeVisible();
+  });
+
+  // The same dialog with no dimmer to catch it by. Pinned to the viewport and
+  // centred on IT, so with the episode further down the page it covers none of
+  // the player — and it is far shorter than the full-page gate the fallback
+  // used to insist on, which is how a card this size stayed on screen.
+  test('hides a viewport-pinned card that covers none of the framed player',
+    async ({ page }) => {
+      await serve(page, `${HEAD}
+        <div style="height:60vh"></div>${FRAMED_PLAYER}
+        <div id="card" style="position:fixed;top:5vh;left:11vw;width:78vw;height:35vh;
+             z-index:2147483647;background:#fff">
+          <h2>Is your browser Firefox?</h2><button>Yes</button>
+        </div>`);
+      await expect(page.locator('#card')).toBeHidden();
+      await expect(page.locator('#player')).toBeVisible();
+    });
+
+  // Which frame is the player cannot be answered by size. On a phone a card
+  // like the one above is BIGGER than a 16:9 embed, so largest-wins hands back
+  // the ad — and then the ad is spared and the real player reads as the thing
+  // sitting on top of it. What separates them is that the embed scrolls with
+  // the page and the ad is pinned to the viewport.
+  test('picks the scrolling embed over a larger pinned ad frame', async ({ page }) => {
+    await serve(page, `${HEAD}
+      <div id="embed" style="position:relative;width:60vw;height:30vh">
+        <iframe id="player" src="about:blank"
+                style="position:absolute;inset:0;width:100%;height:100%;
+                       border:0;background:#000"></iframe>
+      </div>
+      <iframe id="adframe" src="about:blank"
+              style="position:fixed;top:10vh;left:5vw;width:90vw;height:60vh;
+                     z-index:2147483647;border:0;background:#fff"></iframe>`);
+    await expect(page.locator('#adframe')).toBeHidden();
+    await expect(page.locator('#player')).toBeVisible();
+  });
+
+  // Over-blocking guard for the pinned-card rule above: site chrome is a band
+  // across one edge, and stays.
+  test('leaves a cookie bar on a page with a framed player alone', async ({ page }) => {
+    await serve(page, `${HEAD}${FRAMED_PLAYER}
+      <div id="cookie" style="position:fixed;left:0;bottom:0;width:100vw;height:8vh;
+           z-index:5000;background:#eee">
+        <p>We use cookies</p><button>OK</button>
+      </div>`);
+    await expect(page.locator('#cookie')).toBeVisible();
+  });
+
+  // The gate guess and its undo are scoped to each other. A container hidden
+  // before any frame existed is released when the player lands in it; an
+  // overlay hidden while a player frame was already on the page is not that
+  // guess, so an ad frame landing inside it cannot free it.
+  test('an ad iframe landing in a hidden overlay does not release it', async ({ page }) => {
+    await serve(page, `${HEAD}${FRAMED_PLAYER}
+      <div id="backdrop" style="position:fixed;inset:0;z-index:2147483647;
+           background:rgba(0,0,0,.6)">
+        <div id="card" style="position:absolute;top:12vh;left:11vw;width:78vw;height:35vh;
+             background:#fff">Is your browser Firefox?</div>
+      </div>`);
+    await expect(page.locator('#backdrop')).toBeHidden();
+    await page.evaluate(() => {
+      const f = document.createElement('iframe'); f.src = 'about:blank';
+      f.style.cssText = 'width:300px;height:200px;border:0';
+      document.getElementById('card')!.appendChild(f);
+    });
+    await page.waitForTimeout(300);
+    await expect(page.locator('#backdrop')).toBeHidden();
+    await expect(page.locator('#player')).toBeVisible();
+  });
+
   test('never hides its own controls', async ({ page }) => {
     await serve(page, MODAL);
     await page.evaluate(() => {
