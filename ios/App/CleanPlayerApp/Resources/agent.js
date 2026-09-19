@@ -731,6 +731,17 @@ html[data-cp-unlock], html[data-cp-unlock] body {
       if (area <= bestArea || r.width < 200 || r.height < 100) continue;
       if (isOurs(f) || f.closest('[data-cp-keep]')) continue;
       if (inFixedSubtree(f)) continue;
+      // Not every interstitial is pinned; some are absolutely positioned over
+      // a scroll-locked page, and one of those bigger than the embed would
+      // otherwise be crowned the player. A responsive embed is absolute INSIDE
+      // a wrapper that RESERVES its aspect-ratio box — the padding-bottom
+      // trick, and the whole technique. An overlay is positioned against the
+      // page, or hung off a zero-height anchor that reserves nothing.
+      if (getComputedStyle(f).position === 'absolute') {
+        const host = f.offsetParent;
+        if (!host || host === document.body || host === document.documentElement) continue;
+        if (overlapFraction(host.getBoundingClientRect(), r) < 0.5) continue;
+      }
       best = f; bestArea = area;
     }
     return best;
@@ -1243,6 +1254,55 @@ html[data-cp-unlock], html[data-cp-unlock] body {
            el.hasAttribute('data-cp-keep');
   }
 
+  /// `Node.contains` that crosses shadow boundaries, so an element painted
+  /// inside a shadow tree still counts as belonging to the hosts above it.
+  function containsDeep(el, node) {
+    for (let n = node; n; n = n.parentNode || n.host) {
+      if (n === el) return true;
+    }
+    return false;
+  }
+
+  /// Every element in the document, shadow trees included, and not only those
+  /// under <body>: ad scripts append to documentElement too, and a dialog
+  /// rendered by a custom element lives in its shadow root, where
+  /// querySelectorAll cannot reach.
+  ///
+  /// Also the only place that knows every shadow root, so it is where they get
+  /// put under observation. A MutationObserver does not cross a shadow
+  /// boundary either: without this, filling a host's shadow tree is invisible,
+  /// and an interstitial rendered there is never looked at.
+  function deepElements(root = document, out = []) {
+    for (const el of root.querySelectorAll('*')) {
+      out.push(el);
+      if (el.shadowRoot) {
+        watchRoot(el.shadowRoot);
+        deepElements(el.shadowRoot, out);
+      }
+    }
+    return out;
+  }
+
+  const OBSERVE = {
+    childList: true, subtree: true,
+    // Three attributes, not all of them. `data-cp-blocked` because a page that
+    // strips our mark would otherwise stay unblocked until something else
+    // happened to move a node; `open` because a <dialog> interstitial arrives
+    // by attribute, not by insertion; `style` because the usual way to show an
+    // ad is to flip the display on markup that was already in the document.
+    // `class` is left out deliberately — players churn it every frame.
+    attributes: true,
+    attributeFilter: ['data-cp-blocked', 'open', 'style'],
+  };
+  const watchedRoots = new WeakSet();
+  let domObserver = null;
+
+  function watchRoot(root) {
+    if (!domObserver || watchedRoots.has(root)) return;
+    watchedRoots.add(root);
+    domObserver.observe(root, OBSERVE);
+  }
+
   /// How much of `target` the rect `r` covers, 0..1.
   function overlapFraction(r, target) {
     const w = Math.max(0, Math.min(r.right, target.right) - Math.max(r.left, target.left));
@@ -1262,7 +1322,9 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     // This cannot catch the player itself: where this document has a video the
     // player is that <video>, and where it does not, looksLikeInterstitial
     // spares frames outright.
-    if (el.tagName === 'IFRAME') return true;
+    if (el.tagName === 'IFRAME' || el.tagName === 'OBJECT' || el.tagName === 'EMBED') {
+      return true;
+    }
 
     const bg = cs.backgroundColor;
     if (bg && bg !== 'transparent' && !/^rgba\(0, 0, 0, 0\)$/.test(bg)) return true;
@@ -1305,10 +1367,23 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     // view is a full-viewport positioned element over a poster backdrop, so it
     // was hidden and left the user staring at the background with no way in.
     // A consent gate does not ask for a password; a login does.
-    if (el.querySelector('input[type="password"]')) return false;
+    //
+    // Collected once per pass and crossing shadow boundaries, which
+    // querySelector does not. That matters more now the scan reaches into
+    // shadow trees: a login rendered by a web component would otherwise be a
+    // large positioned box with nothing to mark it as one. It also costs
+    // nothing on the pages — nearly all of them — that have no password field
+    // at all.
+    const { passwords = [] } = ctx;
+    if (passwords.some(input => containsDeep(el, input))) return false;
 
     const cs = getComputedStyle(el);
-    if (cs.position !== 'fixed' && cs.position !== 'absolute') return false;
+    // Sticky counts too. It is fixed once it has stuck, and a negative margin
+    // is all it takes to park one over the player from the start.
+    if (cs.position !== 'fixed' && cs.position !== 'absolute'
+        && cs.position !== 'sticky') {
+      return false;
+    }
     if (cs.display === 'none' || cs.visibility === 'hidden' || cs.opacity === '0') {
       return false;
     }
@@ -1320,7 +1395,7 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     if (videoRect) {
       // Must actually be painted over the video, not merely overlap its box:
       // an element behind the player can share the same coordinates.
-      if (!topAtVideo || !(el === topAtVideo || el.contains(topAtVideo))) return false;
+      if (!topAtVideo || !containsDeep(el, topAtVideo)) return false;
       return overlapFraction(r, videoRect) >= 0.3;
     }
 
@@ -1373,7 +1448,7 @@ html[data-cp-unlock], html[data-cp-unlock] body {
       // One hit test per candidate, where the video branch does one per pass.
       // The coverage gates above knock all but a handful out first.
       const top = centreHit(r);
-      return !!top && (el === top || el.contains(top));
+      return !!top && containsDeep(el, top);
     }
 
     // No player frame on the page at all. Fall back to full-page coverage,
@@ -1420,10 +1495,11 @@ html[data-cp-unlock], html[data-cp-unlock] body {
   function releaseFramedBlocks(hasOwnVideo) {
     if (hasOwnVideo) return 0;
     let released = 0;
-    for (const el of document.querySelectorAll('[data-cp-blocked="gate"]')) {
+    for (const el of blockedElements()) {
+      if (el.getAttribute('data-cp-blocked') !== 'gate') continue;
       const frame = el.tagName === 'IFRAME' ? el : el.querySelector('iframe');
       if (frame && !inFixedSubtree(frame)) {
-        el.removeAttribute('data-cp-blocked');
+        unmarkBlocked(el);
         released++;
       }
     }
@@ -1459,10 +1535,15 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     // needs undoing and leave the other alone.
     const reason = (videoRect || frameRect) ? 'overlay' : 'gate';
 
+    const all = deepElements();
+    ctx.passwords = all.filter(el =>
+      el.tagName === 'INPUT' && el.getAttribute('type') === 'password');
+
     let hidden = 0;
-    for (const el of document.querySelectorAll('body *')) {
+    for (const el of all) {
+      if (el.hasAttribute('data-cp-blocked')) { hideHard(el); continue; }
       if (looksLikeInterstitial(el, ctx)) {
-        el.setAttribute('data-cp-blocked', reason);
+        markBlocked(el, reason);
         hidden++;
       }
     }
@@ -1495,7 +1576,16 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     const cx = rect.left + rect.width / 2;
     const cy = rect.top + rect.height / 2;
     if (cx < 0 || cy < 0 || cx > window.innerWidth || cy > window.innerHeight) return null;
-    return document.elementFromPoint(cx, cy);
+    // elementFromPoint stops at a shadow host and reports the host itself.
+    // Descend to what is actually painted, so a dialog rendered inside a
+    // custom element can be recognised as the thing on top.
+    let top = document.elementFromPoint(cx, cy);
+    while (top && top.shadowRoot) {
+      const inner = top.shadowRoot.elementFromPoint(cx, cy);
+      if (!inner || inner === top) break;
+      top = inner;
+    }
+    return top;
   }
 
   function blockLayerUnder(targetRect, ctx) {
@@ -1507,15 +1597,61 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     // candidate and needs no help.
     const next = ctx.videoRect ? { ...ctx, topAtVideo: top } : ctx;
     if (!looksLikeInterstitial(top, next)) return 0;
-    top.setAttribute('data-cp-blocked', 'overlay');
+    markBlocked(top, 'overlay');
     return 1;
   }
 
   /// Escape hatch. Blocking by shape will sometimes catch a real dialog — a
   /// cookie consent or a login prompt — and the user needs a way back.
+  /// The stylesheet is the cheap way to hide a block, but it does not always
+  /// win. A document stylesheet never reaches inside a shadow root, and an
+  /// inline `display: … !important` on the ad itself outranks any author rule
+  /// — both are ways an interstitial stays on screen wearing our mark. So ask
+  /// the browser what it actually computed, and only where the mark failed to
+  /// land, overrule the element's own style. The value displaced is parked on
+  /// the element so the shield can hand it back.
+  function markBlocked(el, reason) {
+    el.setAttribute('data-cp-blocked', reason);
+    hideHard(el);
+  }
+
+  /// Make the mark stick. Called again on every pass for anything already
+  /// marked, because an ad that lost the first round comes back and sets its
+  /// display again on a timer — and a marked element is not re-examined, so
+  /// without this the last write would be theirs.
+  ///
+  /// Costs nothing in the ordinary case: the stylesheet has already hidden it
+  /// and this returns on the first line. Only the first displaced value is
+  /// parked, so a shield tap hands back what the page had, not what the ad
+  /// wrote while fighting us.
+  function hideHard(el) {
+    if (getComputedStyle(el).display === 'none') return;
+    if (!el.hasAttribute('data-cp-display')) {
+      const prior = el.style.getPropertyValue('display');
+      const priority = el.style.getPropertyPriority('display');
+      el.setAttribute('data-cp-display', priority ? `${prior} !${priority}` : prior);
+    }
+    el.style.setProperty('display', 'none', 'important');
+  }
+
+  function unmarkBlocked(el) {
+    el.removeAttribute('data-cp-blocked');
+    const prior = el.getAttribute('data-cp-display');
+    if (prior === null) return;
+    el.removeAttribute('data-cp-display');
+    const bang = prior.indexOf(' !');
+    if (!prior) el.style.removeProperty('display');
+    else if (bang < 0) el.style.setProperty('display', prior);
+    else el.style.setProperty('display', prior.slice(0, bang), prior.slice(bang + 2));
+  }
+
+  function blockedElements() {
+    return deepElements().filter(el => el.hasAttribute('data-cp-blocked'));
+  }
+
   function unblockOverlays() {
-    for (const el of document.querySelectorAll('[data-cp-blocked]')) {
-      el.removeAttribute('data-cp-blocked');
+    for (const el of blockedElements()) {
+      unmarkBlocked(el);
     }
     document.documentElement.removeAttribute('data-cp-unlock');
     blockedCount = 0;
@@ -1687,6 +1823,22 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     requestAnimationFrame(() => { passPending = false; scan(); blockOverlays(); });
   }
 
+  /// The slow lane, for the wake-ups that are not a node arriving: scrolling,
+  /// rotating, and attribute edits. A pass walks the whole DOM and reads a
+  /// computed style per element, so running one per frame through a scroll or
+  /// a progress-bar animation is the kind of thing that makes a page stutter.
+  /// These can afford to wait.
+  const SLOW_PASS_MS = 250;
+  let slowTimer = 0;
+  function scheduleThrottledPass() {
+    if (slowTimer || passPending) return;
+    slowTimer = setTimeout(() => {
+      slowTimer = 0;
+      scan();
+      blockOverlays();
+    }, SLOW_PASS_MS);
+  }
+
   /// Announces this frame to the native side, once.
   ///
   /// Resuming theater after an episode change has to run in the frame holding
@@ -1701,9 +1853,35 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     post({ type: 'ready' });
   }
 
-  new MutationObserver(schedulePass).observe(document.documentElement, {
-    childList: true, subtree: true
+  domObserver = new MutationObserver((records) => {
+    let structural = false;
+    let needsPass = false;
+    for (const rec of records) {
+      if (rec.type === 'childList') { structural = true; continue; }
+      // An element we have already hidden having its style rewritten is the ad
+      // fighting back on its own timer. Answer that here and now: a full pass
+      // is 250ms away, and a quarter second of ad, several times a second, is
+      // the ad winning. Re-asserting is one style write and no DOM walk, and
+      // it settles immediately — our own write comes back as a record whose
+      // element is already hidden, which this leaves alone.
+      if (rec.attributeName === 'style' && rec.target.nodeType === 1
+          && rec.target.hasAttribute('data-cp-blocked')) {
+        hideHard(rec.target);
+        continue;
+      }
+      needsPass = true;
+    }
+    if (structural) schedulePass();
+    else if (needsPass) scheduleThrottledPass();
   });
+  watchRoot(document.documentElement);
+
+  // An overlay whose centre is off screen cannot be hit-tested, and a rotation
+  // changes every rect on the page. Neither is a mutation, so without these a
+  // scroll could bring an untouched ad into view.
+  addEventListener('scroll', scheduleThrottledPass, { passive: true, capture: true });
+  addEventListener('resize', scheduleThrottledPass, { passive: true });
+  addEventListener('orientationchange', scheduleThrottledPass, { passive: true });
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', () => { schedulePass(); announce(); });
   } else {

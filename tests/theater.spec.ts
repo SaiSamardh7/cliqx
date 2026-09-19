@@ -2003,6 +2003,13 @@ test.describe('interstitial blocking', () => {
                      border:0;background:#000"></iframe>
     </div>`;
 
+  const PINNED_DIALOG = `
+    <div id="backdrop" style="position:fixed;inset:0;z-index:2147483647;
+         background:rgba(0,0,0,.6)">
+      <div id="card" style="position:absolute;top:12vh;left:11vw;width:78vw;height:35vh;
+           background:#fff"><h2>Is your browser Firefox?</h2><button>Yes</button></div>
+    </div>`;
+
   test('hides a browser-choice dialog whose card is an ad iframe', async ({ page }) => {
     await serve(page, `${HEAD}${FRAMED_PLAYER}
       <div id="backdrop" style="position:fixed;inset:0;z-index:2147483647;
@@ -2081,6 +2088,263 @@ test.describe('interstitial blocking', () => {
     await page.waitForTimeout(300);
     await expect(page.locator('#backdrop')).toBeHidden();
     await expect(page.locator('#player')).toBeVisible();
+  });
+
+  // --- QA sweep -----------------------------------------------------------
+  //
+  // The shapes an interstitial can take that the geometry above does not, by
+  // itself, see. Each of these got through when it was written.
+
+  const SETTLE = 350;
+
+  test('hides an overlay appended outside <body>', async ({ page }) => {
+    await serve(page, `${HEAD}${FRAMED_PLAYER}`);
+    // The scan used to be `body *`. Nothing stops a script appending to
+    // documentElement, and an ad that does was never even examined.
+    await page.evaluate(() => {
+      const d = document.createElement('div');
+      d.id = 'out';
+      d.style.cssText = 'position:fixed;inset:0;z-index:2147483647;background:#fff';
+      d.textContent = 'Is your browser Firefox?';
+      document.documentElement.appendChild(d);
+    });
+    await expect(page.locator('#out')).toBeHidden();
+  });
+
+  test('hides an overlay rendered inside a shadow root', async ({ page }) => {
+    await serve(page, `${HEAD}${FRAMED_PLAYER}`);
+    // Neither querySelectorAll nor a MutationObserver crosses a shadow
+    // boundary, and elementFromPoint stops at the host, so a dialog rendered
+    // by a custom element was invisible three times over.
+    await page.evaluate(() => {
+      const host = document.createElement('div');
+      host.id = 'host';
+      host.attachShadow({ mode: 'open' }).innerHTML =
+        `<div id="card" style="position:fixed;inset:0;z-index:2147483647;background:#fff">
+           Is your browser Firefox? <button>Yes</button></div>`;
+      document.body.appendChild(host);
+    });
+    await page.waitForTimeout(SETTLE);
+    expect(await page.evaluate(() => getComputedStyle(
+      document.getElementById('host')!.shadowRoot!.getElementById('card')!).display))
+      .toBe('none');
+  });
+
+  test('hides an interstitial that slides in from off screen', async ({ page }) => {
+    await serve(page, `${HEAD}${FRAMED_PLAYER}
+      <div id="slide" style="position:fixed;top:120vh;left:11vw;width:78vw;height:35vh;
+           z-index:2147483647;background:#fff">Is your browser Firefox? <button>Yes</button></div>`);
+    // Parked off screen its centre cannot be hit-tested, so the pass on
+    // insertion rightly let it be. It then arrives by a style edit — not a
+    // node — which nothing was listening for.
+    await expect(page.locator('#slide')).toBeVisible();
+    await page.evaluate(() =>
+      document.getElementById('slide')!.style.setProperty('top', '12vh'));
+    await expect(page.locator('#slide')).toBeHidden();
+  });
+
+  test('hides a gate a scroll brings into reach', async ({ page }) => {
+    await serve(page, `${HEAD}<div style="height:200vh"></div>${FRAMED_PLAYER}
+      <div id="gate" style="position:absolute;top:200vh;left:0;width:100vw;height:60vh;
+           z-index:2147483647;background:#fff">Checking your browser <a href="#">Continue</a></div>`);
+    await page.evaluate(() => window.scrollTo(0, window.innerHeight * 2.1));
+    await expect(page.locator('#gate')).toBeHidden();
+  });
+
+  test('re-hides an overlay after the page strips the mark', async ({ page }) => {
+    await serve(page, `${HEAD}${FRAMED_PLAYER}${PINNED_DIALOG}`);
+    await expect(page.locator('#backdrop')).toBeHidden();
+    await page.evaluate(() =>
+      document.getElementById('backdrop')!.removeAttribute('data-cp-blocked'));
+    await expect(page.locator('#backdrop')).toBeHidden();
+  });
+
+  test('hides a sticky overlay parked over the player', async ({ page }) => {
+    // Sticky is fixed once it has stuck, and a negative margin parks one over
+    // the player from the start. The position gate took fixed and absolute.
+    await serve(page, `${HEAD}${FRAMED_PLAYER}
+      <div id="sticky" style="position:sticky;top:0;margin-top:-45vh;width:100vw;height:45vh;
+           z-index:2147483647;background:#fff">Is your browser Firefox? <button>Yes</button></div>`);
+    await expect(page.locator('#sticky')).toBeHidden();
+  });
+
+  test('hides an invisible <object> clickjack layer over the video', async ({ page }) => {
+    // The same trick as the invisible ad iframe above, in the element that
+    // was not on the list.
+    await serve(page, `${HEAD}
+      <div id="player" style="position:relative;width:360px;height:200px">
+        <video id="v" playsinline style="width:360px;height:200px"></video>
+        <object id="clickjack" type="text/html" data="about:blank"
+                style="position:absolute;inset:0;width:100%;height:100%;
+                       opacity:0.01;z-index:10"></object>
+      </div>`);
+    await expect(page.locator('#clickjack')).toBeHidden();
+  });
+
+  test('hides a modal <dialog> interstitial', async ({ page }) => {
+    // showModal() flips an attribute. It inserts no node, so no pass ran.
+    await serve(page, `${HEAD}${FRAMED_PLAYER}
+      <dialog id="dlg" style="width:78vw;height:35vh;background:#fff">
+        <h2>Is your browser Firefox?</h2><button>Yes</button>
+      </dialog>`);
+    await page.evaluate(() => (document.getElementById('dlg') as HTMLDialogElement).showModal());
+    await expect(page.locator('#dlg')).toBeHidden();
+  });
+
+  test('hides an ad that pins its own display with inline !important', async ({ page }) => {
+    // Inline `!important` outranks any author stylesheet, so the mark landed
+    // and changed nothing.
+    await serve(page, `${HEAD}${FRAMED_PLAYER}
+      <div id="ad" style="position:fixed;inset:0;z-index:2147483647;background:#fff;
+           display:block !important">Is your browser Firefox? <button>Yes</button></div>`);
+    await expect(page.locator('#ad')).toBeHidden();
+  });
+
+  test('keeps hiding an ad that re-forces its display on a timer', async ({ page }) => {
+    // A marked element is not re-examined, so the ad's next write was the last
+    // one. Answered now from the observer rather than on the next pass: a
+    // quarter second of ad, several times a second, is the ad winning.
+    await serve(page, `${HEAD}${FRAMED_PLAYER}
+      <div id="ad" style="position:fixed;inset:0;z-index:2147483647;background:#fff">
+        Is your browser Firefox?</div>
+      <script>
+        setInterval(() => {
+          const a = document.getElementById('ad');
+          if (a) a.style.setProperty('display', 'block', 'important');
+        }, 60);
+      </script>`);
+    await page.waitForTimeout(900);
+    await expect(page.locator('#ad')).toBeHidden();
+  });
+
+  test('hides an ad re-inserted after each block', async ({ page }) => {
+    await serve(page, `${HEAD}${FRAMED_PLAYER}`);
+    for (let i = 0; i < 3; i++) {
+      await page.evaluate(() => {
+        document.getElementById('ad')?.remove();
+        const d = document.createElement('div');
+        d.id = 'ad';
+        d.style.cssText = 'position:fixed;inset:0;z-index:2147483647;background:#fff';
+        d.textContent = 'Is your browser Firefox?';
+        document.body.appendChild(d);
+      });
+      await expect(page.locator('#ad')).toBeHidden();
+    }
+  });
+
+  test('a decoy thumbnail video does not disarm the blocker', async ({ page }) => {
+    // largestVideo has no size floor, so a 16px preview elsewhere on the page
+    // is enough to make this document look like it has a player of its own.
+    await serve(page, `${HEAD}
+      <video id="thumb" playsinline style="width:16px;height:16px"></video>
+      ${FRAMED_PLAYER}${PINNED_DIALOG}`);
+    await expect(page.locator('#backdrop')).toBeHidden();
+  });
+
+  test('hides an ad frame hung off a zero-height anchor', async ({ page }) => {
+    // The other half of picking the player by shape: an ad frame absolutely
+    // positioned inside its own relative <div>. That wrapper reserves no room,
+    // which is exactly what a responsive embed's wrapper exists to do.
+    await serve(page, `${HEAD}
+      <div id="embed" style="position:relative;width:60vw;height:30vh">
+        <iframe id="player" src="about:blank"
+                style="position:absolute;inset:0;width:100%;height:100%;
+                       border:0;background:#000"></iframe>
+      </div>
+      <div id="adwrap" style="position:absolute;top:0;left:0;width:100%">
+        <iframe id="adframe" src="about:blank"
+                style="position:absolute;top:2vh;left:5vw;width:90vw;height:60vh;
+                       z-index:2147483647;border:0;background:#fff"></iframe>
+      </div>`);
+    await expect(page.locator('#adframe')).toBeHidden();
+    await expect(page.locator('#player')).toBeVisible();
+  });
+
+  // --- and what none of it may touch --------------------------------------
+
+  test('leaves a sticky site header alone', async ({ page }) => {
+    await serve(page, `${HEAD}
+      <header id="nav" style="position:sticky;top:0;width:100vw;height:9vh;
+              background:#222;color:#fff;z-index:99">AnimeSite — Browse</header>
+      ${FRAMED_PLAYER}`);
+    await page.waitForTimeout(SETTLE);
+    await expect(page.locator('#nav')).toBeVisible();
+  });
+
+  test('leaves a sticky episode sidebar alone', async ({ page }) => {
+    await serve(page, `${HEAD}${FRAMED_PLAYER}
+      <aside id="eps" style="position:sticky;top:0;width:30vw;height:100vh;
+             background:#111;color:#fff">Episode 1<br>Episode 2</aside>`);
+    await page.waitForTimeout(SETTLE);
+    await expect(page.locator('#eps')).toBeVisible();
+  });
+
+  test('leaves a pinned mini-player holding the real frame alone', async ({ page }) => {
+    // Pinning is the interstitial signal, so the one thing a site legitimately
+    // pins had better survive it: the frame guard for a page with no player
+    // frame of its own is what saves this.
+    await serve(page, `${HEAD}<div style="height:200vh"></div>
+      <div id="mini" style="position:fixed;right:2vw;bottom:2vh;width:60vw;height:34vh;
+           z-index:999;background:#000">
+        <iframe id="player" src="about:blank" style="width:100%;height:100%;border:0"></iframe>
+      </div>`);
+    await page.waitForTimeout(SETTLE);
+    await expect(page.locator('#mini')).toBeVisible();
+    await expect(page.locator('#player')).toBeVisible();
+  });
+
+  test('never hides a sign-in form inside a shadow root', async ({ page }) => {
+    // The password guard has to reach into shadow trees too, now that the scan
+    // does — otherwise reaching further would have cost a working login.
+    await serve(page, `${HEAD}${FRAMED_PLAYER}`);
+    await page.evaluate(() => {
+      const host = document.createElement('div');
+      host.id = 'host';
+      host.style.cssText = 'position:fixed;inset:0;z-index:2147483647;background:#222';
+      host.attachShadow({ mode: 'open' }).innerHTML =
+        `<div id="login" style="position:absolute;inset:0;color:#fff">
+           <h1>Please sign in</h1>
+           <input type="text"><input type="password"><button>Sign In</button></div>`;
+      document.body.appendChild(host);
+    });
+    await page.waitForTimeout(SETTLE);
+    // The host is the positioned box here, so the guard has to see through it
+    // into the shadow tree to find the password field.
+    await expect(page.locator('#host')).toBeVisible();
+    expect(await page.evaluate(() => getComputedStyle(
+      document.getElementById('host')!.shadowRoot!.getElementById('login')!).display))
+      .not.toBe('none');
+  });
+
+  test('the shield gives back a display the blocker had to overrule', async ({ page }) => {
+    await serve(page, `${HEAD}${FRAMED_PLAYER}
+      <div id="ad" style="position:fixed;inset:0;z-index:2147483647;background:#fff;
+           display:block !important">Is your browser Firefox? <button>Yes</button></div>`);
+    await expect(page.locator('#ad')).toBeHidden();
+    await page.evaluate(() => __cp.setOverlayBlocking(false));
+    await expect(page.locator('#ad')).toBeVisible();
+    expect(await page.evaluate(() =>
+      document.getElementById('ad')!.style.getPropertyValue('display'))).toBe('block');
+    await page.evaluate(() => __cp.setOverlayBlocking(true));
+    await expect(page.locator('#ad')).toBeHidden();
+  });
+
+  test('settles instead of rescanning forever', async ({ page }) => {
+    // Every fix above adds a reason to run a pass. They must all come to rest:
+    // writing our own mark is itself a mutation, and a pass per frame on a
+    // real episode page is the kind of thing that makes one stutter.
+    await serve(page, `${HEAD}${FRAMED_PLAYER}
+      <div id="ad" style="position:fixed;inset:0;z-index:2147483647;background:#fff">
+        Is your browser Firefox?</div>`);
+    await expect(page.locator('#ad')).toBeHidden();
+    const hits = await page.evaluate(async () => {
+      let n = 0;
+      const real = document.elementFromPoint.bind(document);
+      (document as any).elementFromPoint = (x: number, y: number) => { n++; return real(x, y); };
+      await new Promise((r) => setTimeout(r, 1200));
+      return n;
+    });
+    expect(hits).toBeLessThan(20);
   });
 
   test('never hides its own controls', async ({ page }) => {

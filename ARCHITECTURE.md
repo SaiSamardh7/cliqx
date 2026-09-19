@@ -838,6 +838,91 @@ covering it, and a cookie bar on a page with a framed player.
 
 ---
 
+## QA sweep: the shapes the geometry does not see
+
+Fixing the browser-choice dialog answered *where* an interstitial sits. It said
+nothing about the ways one can avoid being looked at in the first place. A
+deliberate pass at that found eleven, of which one was already covered.
+
+### Never examined
+
+- **Outside `<body>`.** The scan was `body *`. Nothing stops a script appending
+  to `documentElement`, and an ad that did was not a candidate at all.
+- **Inside a shadow root.** `querySelectorAll` does not cross a shadow
+  boundary, a `MutationObserver` does not either, and `elementFromPoint` stops
+  at the host. A dialog rendered by a custom element was invisible three times
+  over. The scan now descends, hit tests descend with it, containment is
+  checked across boundaries, and each shadow root found is put under the same
+  observer.
+- **`position: sticky`.** Fixed once it has stuck, and a negative margin parks
+  one over the player from the start. The position gate took `fixed` and
+  `absolute` only.
+- **`<object>` and `<embed>`.** `hasVisibleSurface` treats a frame as a surface
+  whatever it appears to contain, because a transparent ad frame is still an ad
+  frame. Only `<iframe>` was on the list.
+
+### Never woken
+
+The observer watched `childList` alone, so anything arriving by another route
+landed in silence:
+
+- a `<dialog>` interstitial, which opens by attribute;
+- an ad already in the markup, shown by flipping its inline display — the
+  ordinary way it is done;
+- an overlay parked off screen, whose centre cannot be hit-tested until it
+  slides in;
+- a scroll or a rotation, which moves everything without mutating anything.
+
+`open` and `style` are now watched, along with `data-cp-blocked` so a page that
+strips the mark is answered, and scroll, resize and orientation wake a pass.
+Those all run in a slow lane throttled to 250ms: a pass walks the DOM and reads
+a computed style per element, and one per frame through a scroll is how a page
+comes to stutter.
+
+### Marked, and still on screen
+
+Two ways the mark landed and changed nothing. A document stylesheet does not
+reach inside a shadow root, and an inline `display: … !important` on the ad
+outranks any author rule. So after marking, the blocker asks what the browser
+actually computed, and only where the mark failed to land overrules the
+element's own style — parking the value it displaced so the shield can give it
+back.
+
+An ad that re-sets its display on a timer needed one more thing: a marked
+element is not re-examined, so its next write was the last one. That is
+answered straight from the observer rather than on the next pass — a quarter
+second of ad, several times a second, is the ad winning.
+
+### Which frame is the player, again
+
+An interstitial need not be pinned; some are absolutely positioned over a
+scroll-locked page, and one bigger than the embed would be crowned the player
+and spared. A responsive embed is absolute *inside a wrapper that reserves its
+box* — the padding-bottom trick, and the whole technique. An overlay is
+positioned against the page, or hung off a zero-height anchor. The wrapper now
+has to cover the frame it holds.
+
+### Reaching further cost something, and it is paid for
+
+Scanning shadow trees meant the "never hide a login" guard had to reach into
+them too, or a sign-in rendered by a web component would read as a large
+positioned box with nothing to mark it as one. Password fields are collected
+once per pass, deep, and containment is checked across shadow boundaries —
+cheaper per candidate than the `querySelector` it replaces, and free on the
+pages that have no password field at all.
+
+### Tested — 6 of the 19 new specs assert what it must NOT hide
+
+A sticky site header, a sticky episode sidebar, a pinned mini-player holding
+the real frame, a sign-in inside a shadow root, the shield handing back a
+display the blocker had to overrule, and the whole thing coming to rest instead
+of rescanning forever. Pass cost was measured before and after on a
+4,000-element page: 12.4ms against 11.8ms, so reaching further is not what
+costs — the per-element computed style always did, and the note above
+`blockOverlays` still stands.
+
+---
+
 ## Filter-list infrastructure (partial)
 
 Work against the "Stronger Ad Blocking" checklist. **Not finished** — that list
