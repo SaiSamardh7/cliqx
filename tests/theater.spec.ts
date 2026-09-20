@@ -147,7 +147,7 @@ test.describe('theater mode', () => {
       expect.objectContaining({ type: 'theater' }));
 
     await page.evaluate(() => __cp.exitTheater());
-    expect(await posted(page)).toContainEqual({ type: 'theaterEnded' });
+    expect(await posted(page)).toContainEqual({ v: 1, type: 'theaterEnded' });
   });
 });
 
@@ -461,7 +461,7 @@ test.describe('AirPlay source for MSE', () => {
       });
 
       const report = (await posted(page)).filter((m: any) => m.type === 'airplay').pop();
-      expect(report).toEqual({ type: 'airplay', available: true, source: 'mse' });
+      expect(report).toEqual({ v: 1, type: 'airplay', available: true, source: 'mse' });
     });
 
   // Ranking, not guessing. A manifest with segments behind it was fetched from
@@ -603,7 +603,7 @@ test.describe('playback control', () => {
         expect.objectContaining({ type: 'playback' }));
 
       await page.evaluate(() => document.querySelector('video')!.dispatchEvent(new Event('play')));
-      expect(await posted(page)).toContainEqual({ type: 'playback', playing: true });
+      expect(await posted(page)).toContainEqual({ v: 1, type: 'playback', playing: true });
     });
 
   test('togglePlay drives the staged video both ways', async ({ page }) => {
@@ -644,7 +644,7 @@ test.describe('playback control', () => {
     });
     expect(await page.evaluate(() => __cp.setVolume(50))).toBe(true);
     expect(await posted(page)).toContainEqual(
-      { type: 'volume', percent: 50, boosted: false });
+      { v: 1, type: 'volume', percent: 50, boosted: false });
   });
 
   test('all website volume levels use the primed gain node and cap at 200 percent', async ({ page }) => {
@@ -667,12 +667,12 @@ test.describe('playback control', () => {
     expect(await page.evaluate(() => __cp.setVolume(50))).toBe(true);
     expect(await page.evaluate(() => (window as any).__gain.gain.value)).toBe(1);
     expect(await posted(page)).toContainEqual(
-      { type: 'volume', percent: 50, boosted: false });
+      { v: 1, type: 'volume', percent: 50, boosted: false });
 
     expect(await page.evaluate(() => __cp.setVolume(250))).toBe(true);
     expect(await page.evaluate(() => (window as any).__gain.gain.value)).toBe(2);
     expect(await posted(page)).toContainEqual(
-      { type: 'volume', percent: 200, boosted: true });
+      { v: 1, type: 'volume', percent: 200, boosted: true });
   });
 
   test('does not claim boost when WebKit rejects audio activation', async ({ page }) => {
@@ -694,7 +694,7 @@ test.describe('playback control', () => {
 
     expect(await page.evaluate(() => __cp.setVolume(175))).toBe(true);
     await expect.poll(() => posted(page)).toContainEqual(
-      { type: 'volume', percent: 100, boosted: false });
+      { v: 1, type: 'volume', percent: 100, boosted: false });
     expect(await page.evaluate(() => (window as any).__gain.gain.value)).toBe(1);
   });
 });
@@ -753,7 +753,7 @@ test.describe('resuming theater after an episode change', () => {
       // Once the source changed, the frame is no longer the outgoing one.
       await page.evaluate(() => document.querySelector('video')!.dispatchEvent(new Event('play')));
       expect((await posted(page)).filter((m: any) => m.type === 'playback').slice(-1)[0])
-        .toEqual({ type: 'playback', playing: false });
+        .toEqual({ v: 1, type: 'playback', playing: false });
     });
 
   test('waits for a video inserted by a delayed AJAX player lifecycle',

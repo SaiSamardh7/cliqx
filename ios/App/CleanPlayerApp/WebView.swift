@@ -306,6 +306,9 @@ struct WebView: UIViewRepresentable {
         private static let transitionLog = Logger(
             subsystem: Bundle.main.bundleIdentifier ?? "com.saisamardh.cleanplayer",
             category: "EpisodeTransition")
+        private static let bridgeLog = Logger(
+            subsystem: Bundle.main.bundleIdentifier ?? "com.saisamardh.cleanplayer",
+            category: "PageBridge")
         private var resumeArmTask: Task<Void, Never>?
         private var observations: [NSKeyValueObservation] = []
 
@@ -1041,12 +1044,17 @@ struct WebView: UIViewRepresentable {
 
         func userContentController(_ controller: WKUserContentController,
                                    didReceive message: WKScriptMessage) {
-            // Page-supplied: only the message shape is trusted. No URL from here
-            // is used without being re-validated against the current host.
-            guard let body = message.body as? [String: Any],
-                  let kind = body["type"] as? String else { return }
+            do {
+                let bridgeMessage = try BridgeMessage.decode(body: message.body)
+                handle(bridgeMessage, from: message.frameInfo)
+            } catch {
+                Self.bridgeLog.error(
+                    "Rejected page bridge message: \(error.localizedDescription, privacy: .public)")
+            }
+        }
 
-            switch kind {
+        private func handle(_ message: BridgeMessage, from frameInfo: WKFrameInfo) {
+            switch message {
             // Every frame announces itself once. Resuming theater after an
             // episode change has to happen in the frame holding the video, and
             // on these sites that is a cross-origin iframe — the main frame has
@@ -1054,7 +1062,7 @@ struct WebView: UIViewRepresentable {
             // `resumeTheater` is cleared by the theater message rather than
             // here, so a frame without a video simply finds nothing and the one
             // that has it still gets asked.
-            case "ready":
+            case .ready:
                 // Scoped to the destination, which is what the property was
                 // always documented to be: checking only for non-nil meant a
                 // resume armed for one episode could fire on whatever page
@@ -1066,19 +1074,19 @@ struct WebView: UIViewRepresentable {
                 Self.transitionLog.notice("Player frame ready during episode transition")
                 page.webView?.evaluateJavaScript(
                     "window.__cp && window.__cp.autoTheater()",
-                    in: message.frameInfo, in: BrowserSetup.world,
+                    in: frameInfo, in: BrowserSetup.world,
                     completionHandler: nil)
 
-            case "theater":
+            case .theater(let airplay, let pip):
                 // Remember WHICH frame staged the video. Everything the native
                 // chrome does afterwards is addressed to this frame.
-                theaterFrame = message.frameInfo
+                theaterFrame = frameInfo
                 endResume(keepingTheater: true)
                 page.isTheater = true
                 callPlayer("setVolume(\(page.volumePercent))")
                 page.playbackEnded = false
-                page.airplayAvailable = body["airplay"] as? Bool ?? false
-                page.pipAvailable = body["pip"] as? Bool ?? false
+                page.airplayAvailable = airplay
+                page.pipAvailable = pip
                 if let webView = page.webView { refreshEpisodes(webView) }
 
                 // This is the moment a page becomes a watched video. Record it,
@@ -1106,12 +1114,12 @@ struct WebView: UIViewRepresentable {
                 // screen under the native controls — which is what "Watch
                 // clean did nothing but add a close button" looks like. Tell
                 // the main frame to stage the player frame itself.
-                if !message.frameInfo.isMainFrame {
+                if !frameInfo.isMainFrame {
                     page.webView?.evaluateJavaScript(
                         "window.__cp && window.__cp.hostTheater()",
                         in: nil, in: BrowserSetup.world, completionHandler: nil)
                 }
-            case "theaterEnded":
+            case .theaterEnded:
                 theaterFrame = nil
                 if resumeTheaterFor != nil {
                     Self.transitionLog.notice("Old player frame ended; preserving theater transition")
@@ -1124,31 +1132,29 @@ struct WebView: UIViewRepresentable {
             // The agent gave up finding a video to resume into. Only the frame
             // that was actually asked reports this, so the curtain comes down
             // on a real answer rather than on the watchdog's deadline.
-            case "theaterFailed":
+            case .theaterFailed:
                 // Stay covered and armed. This is usually the main document,
                 // while the real player iframe announces later. Revealing the
                 // page here is what made Next look like a redirect.
                 Self.transitionLog.debug("A frame has not found the replacement video yet")
                 break
-            case "ended":
+            case .ended:
                 page.playbackEnded = true
                 page.isPlaying = false
-            case "blocked":
-                page.blockedCount = body["count"] as? Int ?? 0
+            case .blocked(let count):
+                page.blockedCount = count
                 if page.blockedCount > 0,
-                   !blockingFrames.contains(where: { $0 == message.frameInfo }) {
-                    blockingFrames.append(message.frameInfo)
+                   !blockingFrames.contains(where: { $0 == frameInfo }) {
+                    blockingFrames.append(frameInfo)
                 }
-            case "playback":
-                let playing = body["playing"] as? Bool ?? false
+            case .playback(let playing, let armed):
                 page.isPlaying = playing
                 // An SPA may keep the same staged <video> and only replace its
                 // source. There is no new theater message in that case; fresh
                 // playback is the successful handoff signal.
                 if playing, resumeTheaterFor != nil {
-                    let fromOutgoing = body["armed"] as? Bool ?? false
                     if EpisodeTransition.playbackCompletesResume(
-                        isFromOutgoingFrame: fromOutgoing,
+                        isFromOutgoingFrame: armed,
                         outgoingSourceChanged: resumeOutgoingSourceChanged) {
                         Self.transitionLog.notice("Episode transition resumed playback")
                         endResume(keepingTheater: true)
@@ -1158,23 +1164,23 @@ struct WebView: UIViewRepresentable {
                 }
                 // Replaying, or seeking back out of the end, retracts the offer.
                 if playing { page.playbackEnded = false }
-            case "episodeSourceChanged":
+            case .episodeSourceChanged(let playing):
                 // Only the armed frame posts this, so no frame check is needed —
                 // nor possible: WKFrameInfo has no value equality.
                 guard resumeTheaterFor != nil else { break }
                 resumeOutgoingSourceChanged = true
                 Self.transitionLog.notice("Outgoing frame confirmed a new episode source")
-                if body["playing"] as? Bool == true {
+                if playing {
                     endResume(keepingTheater: true)
                 }
-            case "volume":
-                page.volumePercent = min(max(body["percent"] as? Int ?? 100, 0), 200)
-            case "time":
-                page.currentTime = body["at"] as? Double ?? 0
-                page.duration = body["duration"] as? Double ?? 0
-                page.isLive = body["live"] as? Bool ?? false
-                page.bufferedTo = body["buffered"] as? Double ?? 0
-                page.playbackRate = body["rate"] as? Double ?? 1
+            case .volume(let percent, _):
+                page.volumePercent = percent
+            case .time(let at, let duration, let live, let buffered, let rate):
+                page.currentTime = at
+                page.duration = duration
+                page.isLive = live
+                page.bufferedTo = buffered
+                page.playbackRate = rate
 
                 if page.isTheater, watchingURL != nil {
                     lastTime = page.currentTime
@@ -1187,37 +1193,26 @@ struct WebView: UIViewRepresentable {
                         callTheaterFrame("window.__cp && window.__cp.seek(\(pendingResumeAt))")
                     }
                 }
-            case "video":
-                let info = body["info"] as? [String: Any] ?? [:]
-                page.videoHeight = info["height"] as? Int ?? 0
-                page.objectFit = info["fit"] as? String ?? "contain"
-                page.sources = (info["sources"] as? [[String: Any]] ?? [])
-                    .compactMap { entry in
-                        guard let index = entry["index"] as? Int,
-                              let label = entry["label"] as? String else { return nil }
-                        return PageState.VideoSource(
-                            id: index, label: label,
-                            active: entry["active"] as? Bool ?? false)
-                    }
-            case "tracks":
-                let raw = body["tracks"] as? [[String: Any]] ?? []
-                page.textTracks = raw.compactMap { entry in
-                    guard let index = entry["index"] as? Int,
-                          let label = entry["label"] as? String else { return nil }
-                    return PageState.TextTrack(
-                        id: index, label: label,
-                        active: entry["active"] as? Bool ?? false)
+            case .video(let info):
+                page.videoHeight = info.height
+                page.objectFit = info.fit
+                page.sources = info.sources.map { source in
+                    PageState.VideoSource(
+                        id: source.index, label: source.label, active: source.active)
                 }
-            case "airplay":
-                page.airplayAvailable = body["available"] as? Bool ?? false
-                page.airplayCanSendVideo = (body["source"] as? String) != "mse"
+            case .tracks(let tracks):
+                page.textTracks = tracks.map { track in
+                    PageState.TextTrack(
+                        id: track.index, label: track.label, active: track.active)
+                }
+            case .airplay(let available, let source):
+                page.airplayAvailable = available
+                page.airplayCanSendVideo = source != "mse"
             // Sent once when a video is staged: the picker capability and the
             // stream kind, both known before any route appears.
-            case "airplaySupport":
-                page.airplayPickerSupported = body["picker"] as? Bool ?? false
-                page.airplayCanSendVideo = (body["source"] as? String) != "mse"
-            default:
-                break
+            case .airplaySupport(let picker, let source):
+                page.airplayPickerSupported = picker
+                page.airplayCanSendVideo = source != "mse"
             }
         }
 

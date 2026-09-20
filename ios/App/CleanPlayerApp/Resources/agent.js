@@ -72,7 +72,9 @@ html[data-cp-unlock], html[data-cp-unlock] body {
   let airplayAvailable = false;
 
   function post(payload) {
-    try { window.webkit?.messageHandlers?.cp?.postMessage(payload); } catch (_) {}
+    try {
+      window.webkit?.messageHandlers?.cp?.postMessage({ ...payload, v: 1 });
+    } catch (_) {}
   }
 
   /// Shadow DOM encapsulates styles, so a stylesheet in the document does not
