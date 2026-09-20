@@ -149,6 +149,34 @@ test.describe('theater mode', () => {
     await page.evaluate(() => __cp.exitTheater());
     expect(await posted(page)).toContainEqual({ type: 'theaterEnded' });
   });
+
+  // WebKit draws a full second set of controls inside a viewport-sized <video>
+  // that still has `controls` — under the native overlay, which is the same
+  // buttons twice. Theater must take the attribute, and give it back.
+  test('takes the video\'s own controls for the duration of theater', async ({ page }) => {
+    await page.evaluate(() => document.getElementById('v')!.setAttribute('controls', ''));
+    await watchClean(page).click();
+    await expect(page.locator('#v')).not.toHaveAttribute('controls');
+
+    await page.evaluate(() => __cp.exitTheater());
+    await expect(page.locator('#v')).toHaveAttribute('controls', '');
+  });
+
+  test('leaves a video that never had controls without them', async ({ page }) => {
+    await watchClean(page).click();
+    await page.evaluate(() => __cp.exitTheater());
+    await expect(page.locator('#v')).not.toHaveAttribute('controls');
+  });
+
+  // `paused` flips before any data arrives. The native button must not say
+  // "pause" about a black screen.
+  test('reports buffering until the video has frames to show', async ({ page }) => {
+    await watchClean(page).click();
+    // The fixture <video> has no source: play() is requested, nothing loads.
+    // The `play` event is a queued task, so poll rather than race it.
+    await expect.poll(async () => (await posted(page)).some((m: any) =>
+      m.type === 'playback' && m.playing === true && m.buffering === true)).toBe(true);
+  });
 });
 
 test.describe('episode discovery', () => {
@@ -603,7 +631,8 @@ test.describe('playback control', () => {
         expect.objectContaining({ type: 'playback' }));
 
       await page.evaluate(() => document.querySelector('video')!.dispatchEvent(new Event('play')));
-      expect(await posted(page)).toContainEqual({ type: 'playback', playing: true });
+      expect(await posted(page)).toContainEqual(
+        { type: 'playback', playing: true, buffering: true });
     });
 
   test('togglePlay drives the staged video both ways', async ({ page }) => {
@@ -753,7 +782,7 @@ test.describe('resuming theater after an episode change', () => {
       // Once the source changed, the frame is no longer the outgoing one.
       await page.evaluate(() => document.querySelector('video')!.dispatchEvent(new Event('play')));
       expect((await posted(page)).filter((m: any) => m.type === 'playback').slice(-1)[0])
-        .toEqual({ type: 'playback', playing: false });
+        .toEqual({ type: 'playback', playing: false, buffering: false });
     });
 
   test('waits for a video inserted by a delayed AJAX player lifecycle',

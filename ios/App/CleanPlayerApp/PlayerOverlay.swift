@@ -71,10 +71,15 @@ struct PlayerOverlay: View {
             }
             chrome.onSeek = { page.actions.seek($0) }
             chrome.onBeginScrub = { page.actions.beginScrub() }
-            chrome.playbackChanged(isPlaying: page.isPlaying)
+            chrome.playbackChanged(isPlaying: isShowingFrames)
         }
-        .onChange(of: page.isPlaying) { _, playing in
-            chrome.playbackChanged(isPlaying: playing)
+        // The chrome's "only auto-hide while playing" needs frames on screen,
+        // not merely a play() that has been requested.
+        .onChange(of: page.isPlaying) { _, _ in
+            chrome.playbackChanged(isPlaying: isShowingFrames)
+        }
+        .onChange(of: page.isBuffering) { _, _ in
+            chrome.playbackChanged(isPlaying: isShowingFrames)
         }
         .onChange(of: page.playbackEnded) { _, ended in
             guard ended else { return }
@@ -97,6 +102,9 @@ struct PlayerOverlay: View {
                  + "from Control Centre instead — it sends the picture as well.")
         }
     }
+
+    /// Playing as the user would mean it: not paused, and with a picture.
+    private var isShowingFrames: Bool { page.isPlaying && !page.isBuffering }
 
     // MARK: Tap and double-tap
 
@@ -418,13 +426,20 @@ struct PlayerOverlay: View {
                 page.actions.togglePlay()
                 chrome.interacted()
             } label: {
-                Image(systemName: page.isPlaying ? "pause.fill" : "play.fill")
-                    .font(.system(size: 30, weight: .semibold))
-                    .foregroundStyle(.black)
-                    .frame(width: 66, height: 66)
-                    .background(.white, in: .circle)
+                Group {
+                    if page.isBuffering {
+                        ProgressView().tint(.black).controlSize(.large)
+                    } else {
+                        Image(systemName: page.isPlaying ? "pause.fill" : "play.fill")
+                            .font(.system(size: 30, weight: .semibold))
+                    }
+                }
+                .foregroundStyle(.black)
+                .frame(width: 66, height: 66)
+                .background(.white, in: .circle)
             }
-            .accessibilityLabel(page.isPlaying ? "Pause" : "Play")
+            .accessibilityLabel(page.isBuffering ? "Loading, tap to pause"
+                                : page.isPlaying ? "Pause" : "Play")
             circleButton("goforward.10", label: "Forward 10 seconds", size: 30) {
                 page.actions.skip(10)
                 chrome.interacted()

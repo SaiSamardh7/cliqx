@@ -217,17 +217,46 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     delete video.__cpInlined;
   }
 
+  /// WebKit draws its own control bar inside any <video> that has `controls`,
+  /// and once theater pins the element to the viewport it picks the full-size
+  /// layout: fullscreen and PiP top-left, AirPlay and volume top-right,
+  /// skip/play/skip in the centre, timecodes and "..." along the bottom. That
+  /// is the same set of controls the native overlay draws, rendered a second
+  /// time underneath it. `stage()` cannot hide it: it lives in the video's own
+  /// shadow root, not among the siblings theater hides.
+  ///
+  /// Only taken back if we took it, so a page that had no controls keeps none.
+  function suppressControls(video) {
+    video.__cpHadControls = video.hasAttribute('controls');
+    if (video.__cpHadControls) video.removeAttribute('controls');
+  }
+
+  function restoreControls(video) {
+    if (video.__cpHadControls) video.setAttribute('controls', '');
+    delete video.__cpHadControls;
+  }
+
   /// Distinct from the `pause` that follows it. "Finished" is the only state
   /// that should offer the next episode; a pause halfway through must not.
   function reportEnded() {
     post({ type: 'ended' });
   }
 
+  /// Events beyond play/pause that change what the native button should say.
+  /// `paused` flips to false the instant play() is called, before any data
+  /// arrives; these are how the agent tells "requested" from "rendering".
+  const BUFFERING_EVENTS = ['playing', 'waiting', 'stalled', 'canplay'];
+
   function reportPlayback() {
     // `armed` marks playback from the frame native armed before an episode
     // change. Native cannot tell frames apart itself: WKFrameInfo is a
     // transient object with no value equality.
     if (staged) post({ type: 'playback', playing: !staged.paused,
+                       // Not paused is a request, not a picture. Until there is
+                       // a frame to show, the native button says "loading", and
+                       // the chrome does not auto-hide over a black screen.
+                       buffering: !staged.paused
+                                  && staged.readyState < 3 /* HAVE_FUTURE_DATA */,
                        ...(armedEpisodeSource !== null && { armed: true }) });
   }
 
@@ -640,6 +669,7 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     // Before anything asks it to play: setting this on a playing element does
     // not always bring the picture back on iOS.
     allowInline(video);
+    suppressControls(video);
     staged = video;
     prepareVolume(video);
     trackAirPlay(video);
@@ -648,6 +678,7 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     // pause, or the user is left with no way to control what they are watching.
     video.addEventListener('play', reportPlayback);
     video.addEventListener('pause', reportPlayback);
+    for (const name of BUFFERING_EVENTS) video.addEventListener(name, reportPlayback);
     video.addEventListener('ended', reportEnded);
     video.addEventListener('timeupdate', onTimeUpdate);
     video.addEventListener('durationchange', reportTime);
@@ -753,6 +784,7 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     if (staged) {
       staged.removeEventListener('play', reportPlayback);
       staged.removeEventListener('pause', reportPlayback);
+      for (const name of BUFFERING_EVENTS) staged.removeEventListener(name, reportPlayback);
       staged.removeEventListener('ended', reportEnded);
       staged.removeEventListener('timeupdate', onTimeUpdate);
       staged.removeEventListener('durationchange', reportTime);
@@ -762,6 +794,7 @@ html[data-cp-unlock], html[data-cp-unlock] body {
       staged.style.removeProperty('object-fit');
       untrackAirPlay(staged);
       detachAirPlaySource(staged);
+      restoreControls(staged);
       restoreInline(staged);
       endScrub();
       staged = null;

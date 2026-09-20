@@ -55,6 +55,10 @@ final class PageState: ObservableObject {
     /// pause must not.
     @Published var playbackEnded = false
     @Published var isPlaying = false
+    /// Not paused, but no frame to show yet. Distinct from `isPlaying` so the
+    /// centre button can say "loading" and the chrome does not auto-hide over
+    /// a black screen.
+    @Published var isBuffering = false
     @Published var currentTime: Double = 0
     /// 0 both for a live stream and before metadata arrives. `isLive`
     /// separates them: only one of those deserves a LIVE badge.
@@ -879,6 +883,7 @@ struct WebView: UIViewRepresentable {
             page.isResumingEpisode = resumeTheaterFor != nil
             page.playbackEnded = false
             page.isPlaying = false
+            page.isBuffering = false
             page.currentTime = 0
             page.duration = 0
             page.isLive = false
@@ -1133,6 +1138,7 @@ struct WebView: UIViewRepresentable {
             case "ended":
                 page.playbackEnded = true
                 page.isPlaying = false
+                page.isBuffering = false
             case "blocked":
                 page.blockedCount = body["count"] as? Int ?? 0
                 if page.blockedCount > 0,
@@ -1142,6 +1148,7 @@ struct WebView: UIViewRepresentable {
             case "playback":
                 let playing = body["playing"] as? Bool ?? false
                 page.isPlaying = playing
+                page.isBuffering = body["buffering"] as? Bool ?? false
                 // An SPA may keep the same staged <video> and only replace its
                 // source. There is no new theater message in that case; fresh
                 // playback is the successful handoff signal.
