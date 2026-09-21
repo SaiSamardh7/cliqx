@@ -747,9 +747,9 @@ struct WebView: UIViewRepresentable {
         ///
         /// Password challenges get a native prompt. This is how a home server
         /// behind nginx, Caddy or a NAS's own auth asks for a login, and the
-        /// credential is kept (`.permanent`, keychain-backed) so it is not
-        /// asked for again next launch — unless private browsing is on, where
-        /// it lasts the session like everything else.
+        /// credential is kept (`.permanent`, keychain-backed) only for secure
+        /// connections outside private browsing. Cleartext HTTP credentials
+        /// always expire with the session and carry an explicit warning.
         func webView(_ webView: WKWebView,
                      didReceive challenge: URLAuthenticationChallenge,
                      completionHandler: @escaping (URLSession.AuthChallengeDisposition,
@@ -777,9 +777,13 @@ struct WebView: UIViewRepresentable {
             let space = challenge.protectionSpace
             let where_ = space.port == 80 || space.port == 443
                 ? space.host : "\(space.host):\(space.port)"
+            let message = [
+                space.realm.flatMap { $0.isEmpty ? nil : $0 },
+                CredentialPolicy.warning(for: space),
+            ].compactMap { $0 }.joined(separator: "\n\n")
             let alert = UIAlertController(
                 title: challenge.previousFailureCount > 0 ? "Wrong username or password" : "Sign in to \(where_)",
-                message: space.realm.flatMap { $0.isEmpty ? nil : $0 },
+                message: message.isEmpty ? nil : message,
                 preferredStyle: .alert)
             alert.addTextField {
                 $0.placeholder = "Username"
@@ -796,7 +800,9 @@ struct WebView: UIViewRepresentable {
             alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { _ in
                 completionHandler(.cancelAuthenticationChallenge, nil)
             })
-            let persistence: URLCredential.Persistence = settings.privateBrowsing ? .forSession : .permanent
+            let persistence = CredentialPolicy.persistence(
+                for: space,
+                privateBrowsing: settings.privateBrowsing)
             alert.addAction(UIAlertAction(title: "Sign In", style: .default) { [weak alert] _ in
                 let fields = alert?.textFields ?? []
                 let credential = URLCredential(user: fields.first?.text ?? "",
