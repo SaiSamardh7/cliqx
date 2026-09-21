@@ -18,6 +18,9 @@ struct HomeView: View {
     /// player. `playing` non-nil drives the full-screen cover.
     /// Local playback progress — Continue Watching reads it, the player writes.
     @StateObject private var library = MediaLibrary()
+    /// Media servers the user signed into. Their own shelf, above the web.
+    @StateObject private var servers = JellyfinServers()
+    @State private var addingServer = false
 
     @State private var importingFile = false
     @State private var pickingPhoto = false
@@ -50,6 +53,7 @@ struct HomeView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 28) {
                     deviceBar
+                    serversSection
                     browseBar
                     if rules.status.isPreparing { preparingNote }
                     if !library.continueWatching.isEmpty { continueWatchingSection }
@@ -92,6 +96,7 @@ struct HomeView: View {
                              gestureSettings: gestureSettings,
                              onProtectionChanged: {})
             }
+            .sheet(isPresented: $addingServer) { AddServerSheet(servers: servers) }
             .fileImporter(isPresented: $importingFile,
                           allowedContentTypes: Self.playableTypes,
                           allowsMultipleSelection: false) { result in
@@ -161,6 +166,63 @@ struct HomeView: View {
         .padding(.vertical, 12)
         .background(Color(.secondarySystemGroupedBackground), in: .rect(cornerRadius: 12))
         .accessibilityElement(children: .combine)
+    }
+
+    /// Servers the user has signed into, one tile each, plus the way to add
+    /// one. Jellyfin today; the tile shape does not care.
+    private var serversSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Servers").font(.title3.weight(.semibold))
+                Spacer()
+                Button { addingServer = true } label: {
+                    Label("Add", systemImage: "plus").font(.subheadline)
+                }
+                .accessibilityLabel("Add server")
+            }
+            if servers.servers.isEmpty {
+                Button { addingServer = true } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: "server.rack")
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Add your media server").fontWeight(.medium)
+                            Text("Jellyfin — movies and shows from your own server, "
+                                 + "with resume that follows you.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Image(systemName: "chevron.right").font(.footnote).foregroundStyle(.secondary)
+                    }
+                    .padding(16)
+                    .background(Color(.secondarySystemGroupedBackground), in: .rect(cornerRadius: 14))
+                }
+                .buttonStyle(.plain)
+            } else {
+                ForEach(servers.servers) { server in
+                    NavigationLink {
+                        ServerBrowserView(servers: servers, server: server,
+                                          gestureSettings: gestureSettings)
+                    } label: {
+                        HStack(spacing: 12) {
+                            Image(systemName: "server.rack")
+                                .font(.title3)
+                                .frame(width: 44, height: 44)
+                                .background(Color(.tertiarySystemFill), in: .rect(cornerRadius: 10))
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(server.name).fontWeight(.medium)
+                                Text("\(server.username) · \(server.url.host() ?? "")")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Image(systemName: "chevron.right").font(.footnote).foregroundStyle(.secondary)
+                        }
+                        .padding(12)
+                        .background(Color(.secondarySystemGroupedBackground), in: .rect(cornerRadius: 14))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
     }
 
     /// Play something already on the device. Two native pickers, no
