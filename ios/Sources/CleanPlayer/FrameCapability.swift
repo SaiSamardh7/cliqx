@@ -55,7 +55,7 @@ public struct BridgeFrame: Equatable, Sendable {
     }
 }
 
-public enum BridgeMessageKind: Sendable {
+public enum BridgeMessageKind: Hashable, Sendable {
     case ready
     case frameGone
     case theater
@@ -71,6 +71,55 @@ public enum BridgeMessageKind: Sendable {
     case tracks
     case airplay
     case airplaySupport
+}
+
+/// Bounds high-frequency reports from an untrusted page frame. Player control
+/// messages remain event-driven; only `blocked` is intentionally chatty and
+/// therefore subject to this fixed-window budget.
+public struct BridgeRateLimiter: Sendable {
+    private struct Window: Sendable {
+        var startedAt: TimeInterval
+        var accepted: Int
+    }
+
+    public let blockedLimit: Int
+    public let interval: TimeInterval
+    private var blockedWindows: [String: Window] = [:]
+
+    public init(blockedLimit: Int = 60, interval: TimeInterval = 1) {
+        precondition(blockedLimit > 0)
+        precondition(interval > 0)
+        self.blockedLimit = blockedLimit
+        self.interval = interval
+    }
+
+    public mutating func allow(
+        _ kind: BridgeMessageKind,
+        from frameID: String,
+        at now: TimeInterval
+    ) -> Bool {
+        guard kind == .blocked else { return true }
+
+        guard var window = blockedWindows[frameID],
+              now - window.startedAt < interval
+        else {
+            blockedWindows[frameID] = Window(startedAt: now, accepted: 1)
+            return true
+        }
+
+        guard window.accepted < blockedLimit else { return false }
+        window.accepted += 1
+        blockedWindows[frameID] = window
+        return true
+    }
+
+    public mutating func remove(frameID: String) {
+        blockedWindows.removeValue(forKey: frameID)
+    }
+
+    public mutating func reset() {
+        blockedWindows.removeAll()
+    }
 }
 
 public struct FrameCapabilityModel: Sendable {

@@ -319,6 +319,8 @@ struct WebView: UIViewRepresentable {
         /// reported by every other iframe. The keys also address each frame
         /// when overlay blocking is toggled.
         private var blockedByFrame = BlockedFrameRegistry()
+        private var bridgeRateLimiter = BridgeRateLimiter()
+        private var droppedRateLimitedMessages = 0
 
         /// Resume + thumbnail bookkeeping for the video currently in theater.
         /// The URL is the watch page; last time/duration are saved when the
@@ -1057,6 +1059,22 @@ struct WebView: UIViewRepresentable {
                     removeFrame(id: envelope.frameID)
                     return
                 }
+                guard bridgeRateLimiter.allow(
+                    envelope.message.kind,
+                    from: envelope.frameID,
+                    at: ProcessInfo.processInfo.systemUptime)
+                else {
+                    droppedRateLimitedMessages += 1
+                    // Avoid turning a hostile flood into an equally expensive
+                    // unified-log flood. The counter retains the exact total.
+                    if droppedRateLimitedMessages == 1
+                        || droppedRateLimitedMessages.isMultiple(of: 1_000) {
+                        Self.bridgeLog.notice(
+                            "Rate-limited page bridge messages; "
+                                + "total: \(self.droppedRateLimitedMessages)")
+                    }
+                    return
+                }
                 if envelope.message.kind == .ready {
                     guard let metrics = envelope.metrics else {
                         throw BridgeMessage.ValidationError.malformedPayload
@@ -1120,6 +1138,7 @@ struct WebView: UIViewRepresentable {
             knownFrames.removeAll()
             frameCapabilities.reset()
             blockedByFrame.reset()
+            bridgeRateLimiter.reset()
             page.blockedCount = 0
         }
 
@@ -1129,6 +1148,7 @@ struct WebView: UIViewRepresentable {
                 theaterFrame = nil
             }
             blockedByFrame.remove(frameID: id)
+            bridgeRateLimiter.remove(frameID: id)
             page.blockedCount = blockedByFrame.total
         }
 
