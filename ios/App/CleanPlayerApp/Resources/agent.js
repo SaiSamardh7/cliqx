@@ -826,6 +826,7 @@ html[data-cp-unlock], html[data-cp-unlock] body {
   /// no way back to our controls — so it cannot be the default. It is offered
   /// as a separate button instead.
   function watchClean(video) {
+    post({ type: 'watchCleanTapped' });
     // Players routinely swap the <video> out after they initialise (Wikimedia's
     // does), leaving a detached node behind. Re-resolve rather than fail.
     if (!video || !video.isConnected) video = largestVideo();

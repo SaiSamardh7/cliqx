@@ -26,11 +26,7 @@ struct CleanPlayerApp: App {
                 // milliseconds afterwards. Starting at launch — not at first
                 // navigation — is what keeps that cost off the critical path.
                 rules.begin(settings.level)
-                // What makes the `audio` background mode mean something. The
-                // default category is silenced by the ring switch and stops on
-                // lock, which would suspend Picture in Picture and cut AirPlay
-                // the moment the phone locked.
-                MediaSession.activate()
+                Diagnostics.start()
             }
         }
     }

@@ -89,6 +89,38 @@ public enum AddressResolver {
 
     public static let defaultSearch = URL(string: "https://duckduckgo.com/")!
 
+    /// The identity of a watch page, for keying resume positions.
+    ///
+    /// The absolute string was the key, and the same episode arrived under
+    /// five of them: `www.` or not, a `?t=` the site added on share, a
+    /// `utm_source` from wherever the link was pasted, a trailing slash. Host
+    /// is canonicalised, the scheme dropped (a site moving to https keeps its
+    /// history), tracking and timestamp parameters removed, the rest kept
+    /// in order. The fragment stays: single-page servers route with it.
+    public static func resumeKey(for url: URL) -> String {
+        guard var parts = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            return url.absoluteString
+        }
+        let host = parts.host.flatMap(HostKey.canonical) ?? parts.host ?? ""
+        let port = parts.port.map { ":\($0)" } ?? ""
+        var path = parts.path
+        if path.count > 1, path.hasSuffix("/") { path.removeLast() }
+        parts.queryItems = parts.queryItems?.filter { item in
+            let name = item.name.lowercased()
+            return !(name.hasPrefix("utm_") || ignoredQuery.contains(name))
+        }
+        let query = (parts.queryItems?.isEmpty == false) ? "?" + (parts.percentEncodedQuery ?? "") : ""
+        let fragment = parts.fragment.map { "#" + $0 } ?? ""
+        return host + port + path + query + fragment
+    }
+
+    /// Share-sheet noise and the "start at" parameters that would otherwise
+    /// make every deep link a different video.
+    private static let ignoredQuery: Set<String> = [
+        "fbclid", "gclid", "msclkid", "igshid", "mc_cid", "mc_eid", "ref", "ref_src",
+        "t", "start", "time_continue", "feature", "si",
+    ]
+
     private static func query(_ text: String, on engine: URL) -> URL? {
         var components = URLComponents(url: engine, resolvingAgainstBaseURL: false)
         components?.queryItems = [URLQueryItem(name: "q", value: text)]

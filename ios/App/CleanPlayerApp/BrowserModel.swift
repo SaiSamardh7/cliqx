@@ -78,7 +78,13 @@ final class BrowserModel: ObservableObject {
         }
         if let data = store.data(forKey: episodeProgressKey),
            let saved = try? JSONDecoder().decode([String: EpisodeProgress].self, from: data) {
-            episodeProgress = saved
+            // Keys used to be absolute URL strings. Fold each onto its
+            // normalised key; where two collapse, keep the further position.
+            for (key, progress) in saved {
+                let folded = URL(string: key).map(AddressResolver.resumeKey(for:)) ?? key
+                if let existing = episodeProgress[folded], existing.position >= progress.position { continue }
+                episodeProgress[folded] = progress
+            }
         }
         if let data = store.data(forKey: pinnedKey),
            let saved = try? JSONDecoder().decode([Site].self, from: data) {
@@ -142,7 +148,7 @@ final class BrowserModel: ObservableObject {
         let key = PlayerFormatting.seriesIdentity(title: name, url: url)
         let show = PlayerFormatting.seriesTitle(name, host: url.host() ?? "")
         let existing = recents.first { $0.url == url } ?? pinned.first { $0.url == url }
-        let saved = episodeProgress[url.absoluteString]
+        let saved = episodeProgress[AddressResolver.resumeKey(for: url)]
         let site = Site(url: url, title: name,
                         resumeAt: saved?.position ?? existing?.resumeAt,
                         resumeDuration: saved?.duration ?? existing?.resumeDuration,
@@ -168,7 +174,7 @@ final class BrowserModel: ObservableObject {
     /// the card lives.
     func saveResume(_ url: URL, at seconds: Double, duration: Double) {
         guard duration > 0 else { return }
-        episodeProgress[url.absoluteString] = EpisodeProgress(position: seconds,
+        episodeProgress[AddressResolver.resumeKey(for: url)] = EpisodeProgress(position: seconds,
                                                               duration: duration)
         for index in recents.indices where recents[index].url == url {
             recents[index].resumeAt = seconds
@@ -185,7 +191,7 @@ final class BrowserModel: ObservableObject {
 
     /// Saved position for a URL, or 0.
     func resume(for url: URL) -> Double {
-        episodeProgress[url.absoluteString]?.position
+        episodeProgress[AddressResolver.resumeKey(for: url)]?.position
             ?? (recents.first { $0.url == url } ?? pinned.first { $0.url == url })?.resumeAt
             ?? 0
     }
@@ -221,6 +227,18 @@ final class BrowserModel: ObservableObject {
     func isPinned(_ url: URL) -> Bool {
         guard let root = AddressResolver.siteRoot(of: url) else { return false }
         return pinned.contains { $0.url == root }
+    }
+
+    /// A host the user pinned. The one signal that a server is theirs.
+    func isPinnedHost(_ host: String) -> Bool {
+        guard let wanted = HostKey.canonical(host) else { return false }
+        return pinned.contains { $0.url.host().flatMap(HostKey.canonical) == wanted }
+    }
+
+    /// Pinned, or on the local network: where a saved password may live in
+    /// the keychain rather than die with the session.
+    func isOwnHost(_ host: String) -> Bool {
+        isPinnedHost(host) || AddressResolver.isLocalHost(host)
     }
 
     func unpinSite(_ url: URL) {
@@ -266,7 +284,7 @@ final class BrowserModel: ObservableObject {
             ($0.lastPlayed ?? .distantPast) > ($1.lastPlayed ?? .distantPast)
         }) {
             if let at = site.resumeAt, let duration = site.resumeDuration {
-                episodeProgress[site.url.absoluteString] = EpisodeProgress(position: at,
+                episodeProgress[AddressResolver.resumeKey(for: site.url)] = EpisodeProgress(position: at,
                                                                           duration: duration)
             }
             let key = site.seriesKey ?? seriesIdentity(for: site)

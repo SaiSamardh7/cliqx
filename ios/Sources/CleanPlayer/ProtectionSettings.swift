@@ -29,6 +29,11 @@ public enum HostKey {
         var exact: Set<String> = []
         var wildcard: Set<String> = []
         var exceptions: Set<String> = []
+        /// False when the bundled list did not load. `isSameSite` is a
+        /// security predicate, so an empty rule set must not quietly become
+        /// "everything is two labels": that made `evil.co.uk` equal
+        /// `victim.co.uk`.
+        var isLoaded: Bool { !exact.isEmpty }
 
         init() {
             guard let url = Bundle.module.url(forResource: "public_suffix_list.dat",
@@ -80,6 +85,12 @@ public enum HostKey {
     /// site just because they share a hosting provider.
     public static func registrableDomain(_ raw: String) -> String? {
         guard let host = canonical(raw) else { return nil }
+        // No list, no reduction: the full host is the most specific answer,
+        // so two different sites can never collide. Over-strict, not unsafe.
+        guard publicSuffixRules.isLoaded else {
+            assertionFailure("public_suffix_list.dat.txt did not load")
+            return host
+        }
         if host == "localhost" || host.contains(":") || host.allSatisfy({ $0.isNumber || $0 == "." }) {
             return host
         }

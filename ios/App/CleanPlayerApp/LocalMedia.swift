@@ -302,6 +302,7 @@ struct LocalPlayerView: View {
         .statusBarHidden(true)
         .persistentSystemOverlays(.hidden)
         .onAppear {
+            MediaSession.activate()
             model.onProgress = onProgress
             model.start(url: video.url, resumeMs: video.resumeMs)
             scheduleHide()

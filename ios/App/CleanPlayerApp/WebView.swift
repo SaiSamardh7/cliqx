@@ -372,6 +372,23 @@ struct WebView: UIViewRepresentable {
             self.page = page
             self.rules = rules
             self.settings = settings
+            super.init()
+            // A second web view is the first thing to give up under pressure.
+            // Only when nobody is waiting on it: then it is the transition.
+            memoryWarning = NotificationCenter.default.addObserver(
+                forName: UIApplication.didReceiveMemoryWarningNotification,
+                object: nil, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self, !self.waitingForStandby else { return }
+                    self.discardStandby()
+                }
+            }
+        }
+
+        private var memoryWarning: NSObjectProtocol?
+        deinit {
+            if let memoryWarning { NotificationCenter.default.removeObserver(memoryWarning) }
         }
 
         func observe(_ webView: WKWebView) {
@@ -797,6 +814,10 @@ struct WebView: UIViewRepresentable {
         /// The moment a page becomes a watched video: record it, and arm
         /// resume + thumbnail for the session in this player.
         private func beginWatching(_ url: URL) {
+            // Now, not at launch: taking `.playback` on open ducked whatever
+            // the user was listening to before they had chosen a video.
+            MediaSession.activate()
+            Diagnostics.count(.watchCleanSucceeded)
             guard !settings.privateBrowsing else { return }
             watchingURL = url
             model.recordWatched(url, title: page.webView?.title)
@@ -950,7 +971,10 @@ struct WebView: UIViewRepresentable {
             page.blockedExternal = nil
             loaded = url
             model.synchronizeCurrent(url)
-            webView.load(request)
+            // The URL only. The request the page built carried its method,
+            // headers and body; "Open" means "show me where this goes", not
+            // "replay the POST this page wrote".
+            webView.load(URLRequest(url: url))
         }
 
         func retryFailedNavigation() {
@@ -1021,7 +1045,14 @@ struct WebView: UIViewRepresentable {
             alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { _ in
                 completionHandler(.cancelAuthenticationChallenge, nil)
             })
-            let persistence: URLCredential.Persistence = settings.privateBrowsing ? .forSession : .permanent
+            // Kept across launches only for the user's own servers — pinned
+            // sites and local addresses. Any other host that sends a 401 gets
+            // a session credential: a page can put "Jellyfin — session expired"
+            // in a realm string, and a keychain entry that replays forever is
+            // too much to hand it.
+            let own = model.isOwnHost(space.host)
+            let persistence: URLCredential.Persistence =
+                (own && !settings.privateBrowsing) ? .permanent : .forSession
             alert.addAction(UIAlertAction(title: "Sign In", style: .default) { [weak alert] _ in
                 let fields = alert?.textFields ?? []
                 let credential = URLCredential(user: fields.first?.text ?? "",
@@ -1036,21 +1067,23 @@ struct WebView: UIViewRepresentable {
 
         /// WKWebView drops session cookies (no expiry) when the app quits, so a
         /// media server that keeps its login in one — Synology, Nextcloud, a
-        /// NAS's web UI — asks for it again every launch. On the user's own
-        /// servers, pinned sites and local addresses, the cookie is re-set
-        /// with an expiry so the login survives. Nothing changes for any other
-        /// site, and private browsing never registers this observer.
+        /// NAS's web UI — asks for it again every launch. On servers the user
+        /// has PINNED, the cookie is re-set with an expiry so the login
+        /// survives. Pinned, not merely local: a session cookie is short-lived
+        /// because the server said so, and overriding that for every device on
+        /// the Wi-Fi is not the user's decision to make by accident. Nothing
+        /// changes for any other site, and private browsing never registers
+        /// this observer.
         ///
         /// ponytail: every cookie change re-reads the whole jar. Fine at this
         /// scale; index by domain if a site ever churns cookies fast enough to
         /// show up in a profile.
         nonisolated func cookiesDidChange(in store: WKHTTPCookieStore) {
             Task { @MainActor in
-                let mine = Set(model.pinned.compactMap { $0.url.host() })
                 let cookies = await store.allCookies()
                 for cookie in cookies where cookie.isSessionOnly {
                     let domain = cookie.domain.hasPrefix(".") ? String(cookie.domain.dropFirst()) : cookie.domain
-                    guard mine.contains(domain) || AddressResolver.isLocalHost(domain),
+                    guard model.isPinnedHost(domain),
                           var properties = cookie.properties else { continue }
                     properties[.expires] = Date(timeIntervalSinceNow: 30 * 24 * 3600)
                     properties.removeValue(forKey: .discard)
@@ -1312,6 +1345,16 @@ struct WebView: UIViewRepresentable {
                     completionHandler: nil)
 
             case "theater":
+                // One frame holds theater at a time. Another frame announcing
+                // — an ad iframe whose <video> the resume poll happened to
+                // like — does not take the controls away from the one that
+                // has them. It gets its turn when this one ends.
+                if let held = theaterFrame, page.isTheater,
+                   held.isMainFrame != message.frameInfo.isMainFrame
+                    || held.request.url != message.frameInfo.request.url {
+                    Self.transitionLog.notice("Ignored theater claim from a second frame")
+                    break
+                }
                 // Remember WHICH frame staged the video. Everything the native
                 // chrome does afterwards is addressed to this frame.
                 theaterFrame = message.frameInfo
@@ -1355,6 +1398,8 @@ struct WebView: UIViewRepresentable {
                 // page here is what made Next look like a redirect.
                 Self.transitionLog.debug("A frame has not found the replacement video yet")
                 break
+            case "watchCleanTapped":
+                Diagnostics.count(.watchCleanAttempted)
             case "ended":
                 page.playbackEnded = true
                 page.isPlaying = false

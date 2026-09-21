@@ -115,4 +115,26 @@ final class AddressResolverTests: XCTestCase {
         XCTAssertEqual(url?.host(), "example.org")
         XCTAssertEqual(url?.path(), "/find")
     }
+
+    // MARK: Resume key
+
+    /// One episode, five URLs. They have to land on one saved position.
+    func testResumeKeyIgnoresTheWaysASiteDressesUpTheSameURL() {
+        let key = { AddressResolver.resumeKey(for: URL(string: $0)!) }
+        let expected = key("https://example.com/watch/ep-4")
+        XCTAssertEqual(key("http://www.example.com/watch/ep-4/"), expected)
+        XCTAssertEqual(key("https://example.com/watch/ep-4?utm_source=x&fbclid=y"), expected)
+        XCTAssertEqual(key("https://EXAMPLE.com/watch/ep-4?t=120"), expected)
+        XCTAssertEqual(key("https://example.com/watch/ep-4?si=abc&start=30"), expected)
+    }
+
+    /// Things that DO identify a different video survive: a real query
+    /// parameter, a hash route, a port.
+    func testResumeKeyKeepsWhatIdentifiesTheVideo() {
+        let key = { AddressResolver.resumeKey(for: URL(string: $0)!) }
+        XCTAssertNotEqual(key("https://example.com/watch?v=abc"), key("https://example.com/watch?v=def"))
+        XCTAssertNotEqual(key("http://nas.local:8096/web/#/video?id=1"),
+                          key("http://nas.local:8096/web/#/video?id=2"))
+        XCTAssertNotEqual(key("http://nas.local:8096/"), key("http://nas.local:8920/"))
+    }
 }
