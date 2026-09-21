@@ -3,60 +3,26 @@ import SwiftUI
 
 // MARK: - Playback, shared by the home and the grid
 
-/// Opens a server item in the local player and keeps the server told where
-/// playback is. One of these per screen that can play something.
+/// What a screen is playing from the server, if anything. The engine and
+/// the progress reporting live in `ServerEngine`; this just holds the cover.
 @MainActor
 final class ServerPlayback: ObservableObject {
-    @Published var playing: LocalVideo?
-    private(set) var item: JellyfinItem?
-    private var lastPositionMs = 0
-    private var client: JellyfinClient?
-
-    /// Direct stream into the same player local files use. The server's own
-    /// saved position is the resume point, so a film paused on the TV
-    /// continues here.
-    func play(_ item: JellyfinItem, on server: JellyfinServer, servers: JellyfinServers) {
-        let client = servers.client(for: server)
-        guard let token = client.token,
-              let url = JellyfinAPI.streamURL(server: server.url, itemID: item.id, token: token)
-        else { return }
-        self.client = client
-        self.item = item
-        lastPositionMs = item.resumeMs
-        client.reportStart(itemID: item.id, positionMs: item.resumeMs)
-        playing = LocalVideo(url: url, scoped: false, sourceKind: "jellyfin",
-                             displayName: item.seriesName.map { "\($0) — \(item.name)" } ?? item.name,
-                             resumeMs: item.resumeMs)
-    }
-
-    func progress(positionMs: Int) {
-        lastPositionMs = positionMs
-        if let item { client?.reportProgress(itemID: item.id, positionMs: positionMs, paused: false) }
-    }
-
-    /// Returns true if something was playing, so the caller can refresh the
-    /// rows the server just updated.
-    @discardableResult
-    func stopped() -> Bool {
-        guard let item else { return false }
-        client?.reportStopped(itemID: item.id, positionMs: lastPositionMs)
-        self.item = nil
-        return true
-    }
+    @Published var playing: JellyfinItem?
+    func play(_ item: JellyfinItem) { playing = item }
 }
 
 extension View {
-    /// The full-screen player for a `ServerPlayback`, and the reload once it
-    /// closes: progress bars on the shelf come from the server.
-    func serverPlayer(_ playback: ServerPlayback, gestureSettings: PlayerGestureSettings,
+    /// The full-screen Cliqx player over a server stream, and the reload once
+    /// it closes: progress bars on the shelf come from the server.
+    func serverPlayer(_ playback: ServerPlayback, server: JellyfinServer, servers: JellyfinServers,
+                      rules: RuleListController, gestureSettings: PlayerGestureSettings,
                       onStop: @escaping () -> Void) -> some View {
         fullScreenCover(item: Binding(get: { playback.playing },
                                       set: { playback.playing = $0 }),
-                        onDismiss: { if playback.stopped() { onStop() } }) { video in
-            LocalPlayerView(video: video, onClose: { playback.playing = nil },
-                            gestureSettings: gestureSettings) { positionMs, _ in
-                playback.progress(positionMs: positionMs)
-            }
+                        onDismiss: onStop) { item in
+            ServerPlayerView(item: item, server: server, servers: servers,
+                             rules: rules, gestureSettings: gestureSettings,
+                             onClose: { playback.playing = nil })
         }
     }
 }
@@ -70,6 +36,7 @@ extension View {
 struct ServerHomeView: View {
     @ObservedObject var servers: JellyfinServers
     let server: JellyfinServer
+    @ObservedObject var rules: RuleListController
     @ObservedObject var gestureSettings: PlayerGestureSettings
 
     @State private var libraries: [JellyfinItem]?
@@ -135,7 +102,8 @@ struct ServerHomeView: View {
         }
         .task { await loadAll() }
         .refreshable { await loadAll() }
-        .serverPlayer(playback, gestureSettings: gestureSettings) { Task { await loadRows() } }
+        .serverPlayer(playback, server: server, servers: servers, rules: rules,
+                      gestureSettings: gestureSettings) { Task { await loadRows() } }
     }
 
     // MARK: Loading
@@ -175,10 +143,11 @@ struct ServerHomeView: View {
 
     // MARK: Pieces
 
-    private func play(_ item: JellyfinItem) { playback.play(item, on: server, servers: servers) }
+    private func play(_ item: JellyfinItem) { playback.play(item) }
 
     private func browser(_ parent: JellyfinItem) -> some View {
-        ServerBrowserView(servers: servers, server: server, parent: parent, gestureSettings: gestureSettings)
+        ServerBrowserView(servers: servers, server: server, parent: parent,
+                          rules: rules, gestureSettings: gestureSettings)
     }
 
     /// A titled, horizontally scrolling shelf. The title itself links to the

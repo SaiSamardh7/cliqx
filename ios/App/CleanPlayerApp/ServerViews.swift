@@ -96,6 +96,7 @@ struct ServerBrowserView: View {
     @ObservedObject var servers: JellyfinServers
     let server: JellyfinServer
     let parent: JellyfinItem
+    @ObservedObject var rules: RuleListController
     @ObservedObject var gestureSettings: PlayerGestureSettings
 
     @State private var items: [JellyfinItem]?
@@ -124,7 +125,8 @@ struct ServerBrowserView: View {
         .navigationTitle(parent.name)
         .task(id: parent.id) { await load() }
         .refreshable { await load() }
-        .serverPlayer(playback, gestureSettings: gestureSettings) { Task { await load() } }
+        .serverPlayer(playback, server: server, servers: servers, rules: rules,
+                      gestureSettings: gestureSettings) { Task { await load() } }
     }
 
     private func load() async {
@@ -146,14 +148,14 @@ struct ServerBrowserView: View {
                           spacing: 18) {
                     ForEach(items) { item in
                         if item.isPlayable {
-                            Button { playback.play(item, on: server, servers: servers) } label: {
+                            Button { playback.play(item) } label: {
                                 PosterCard(server: server, item: item, width: width)
                             }
                             .buttonStyle(.plain)
                         } else {
                             NavigationLink {
                                 ServerBrowserView(servers: servers, server: server, parent: item,
-                                                  gestureSettings: gestureSettings)
+                                                  rules: rules, gestureSettings: gestureSettings)
                             } label: { PosterCard(server: server, item: item, width: width) }
                                 .buttonStyle(.plain)
                         }

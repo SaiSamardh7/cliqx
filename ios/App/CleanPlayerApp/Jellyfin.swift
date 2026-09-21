@@ -2,6 +2,7 @@ import CleanPlayer
 import Foundation
 import Security
 import UIKit
+import os
 
 // MARK: - Models
 
@@ -49,6 +50,7 @@ struct JellyfinItem: Codable, Identifiable, Hashable {
     var parentBackdropItemId: String?
     var parentBackdropImageTags: [String]?
     var seriesId: String?
+    var seasonId: String?
     var seriesPrimaryImageTag: String?
     var userData: UserData?
     var childCount: Int?
@@ -66,7 +68,7 @@ struct JellyfinItem: Codable, Identifiable, Hashable {
         case seriesName = "SeriesName", runTimeTicks = "RunTimeTicks"
         case imageTags = "ImageTags", backdropImageTags = "BackdropImageTags"
         case parentBackdropItemId = "ParentBackdropItemId", parentBackdropImageTags = "ParentBackdropImageTags"
-        case seriesId = "SeriesId", seriesPrimaryImageTag = "SeriesPrimaryImageTag"
+        case seriesId = "SeriesId", seasonId = "SeasonId", seriesPrimaryImageTag = "SeriesPrimaryImageTag"
         case userData = "UserData", childCount = "ChildCount"
         case communityRating = "CommunityRating", officialRating = "OfficialRating"
         case genres = "Genres", overview = "Overview", status = "Status", endDate = "EndDate"
@@ -378,8 +380,25 @@ final class JellyfinServers: ObservableObject {
 
 /// Generic-password items under one service. ponytail: the three calls the
 /// store needs, nothing else.
+///
+/// Simulator builds are deliberately unsigned (`CODE_SIGNING_ALLOWED` is off
+/// for that SDK so CI needs no identity), and an unsigned process has no
+/// keychain: every SecItem call returns -34018. There the token goes to
+/// UserDefaults instead, plainly and only there. A device build is signed
+/// and uses the real keychain.
 enum Keychain {
     private static let service = "com.saisamardh.cleanplayer.jellyfin"
+#if targetEnvironment(simulator)
+    static func set(_ value: String, for account: String) {
+        UserDefaults.standard.set(value, forKey: service + "." + account)
+    }
+    static func get(_ account: String) -> String? {
+        UserDefaults.standard.string(forKey: service + "." + account)
+    }
+    static func delete(_ account: String) {
+        UserDefaults.standard.removeObject(forKey: service + "." + account)
+    }
+#else
 
     private static func query(_ account: String) -> [String: Any] {
         [kSecClass as String: kSecClassGenericPassword,
@@ -387,12 +406,15 @@ enum Keychain {
          kSecAttrAccount as String: account]
     }
 
+    private static let log = Logger(subsystem: Bundle.main.bundleIdentifier ?? "cliqx", category: "Keychain")
+
     static func set(_ value: String, for account: String) {
         delete(account)
         var item = query(account)
         item[kSecValueData as String] = Data(value.utf8)
         item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        SecItemAdd(item as CFDictionary, nil)
+        let status = SecItemAdd(item as CFDictionary, nil)
+        if status != errSecSuccess { log.error("SecItemAdd failed: \(status)") }
     }
 
     static func get(_ account: String) -> String? {
@@ -400,12 +422,16 @@ enum Keychain {
         item[kSecReturnData as String] = true
         item[kSecMatchLimit as String] = kSecMatchLimitOne
         var out: CFTypeRef?
-        guard SecItemCopyMatching(item as CFDictionary, &out) == errSecSuccess,
-              let data = out as? Data else { return nil }
+        let status = SecItemCopyMatching(item as CFDictionary, &out)
+        guard status == errSecSuccess, let data = out as? Data else {
+            log.error("SecItemCopyMatching failed: \(status)")
+            return nil
+        }
         return String(data: data, encoding: .utf8)
     }
 
     static func delete(_ account: String) {
         SecItemDelete(query(account) as CFDictionary)
     }
+#endif
 }
