@@ -41,18 +41,28 @@ public enum JellyfinAPI {
         return parts?.url
     }
 
-    /// Poster art, capped in height. Nil when the item reports no primary
+    public enum ImageKind: String { case primary = "Primary", backdrop = "Backdrop", logo = "Logo", thumb = "Thumb" }
+
+    /// Art of one kind, capped in height. Nil when the item reports no such
     /// image, so the caller can draw a monogram instead of a broken image.
     public static func imageURL(server: URL, itemID: String, tag: String?,
-                                maxHeight: Int = 450) -> URL? {
+                                kind: ImageKind = .primary, maxHeight: Int = 450) -> URL? {
         guard let tag else { return nil }
-        var parts = URLComponents(url: server.appendingPathComponent("Items/\(itemID)/Images/Primary"),
+        var parts = URLComponents(url: server.appendingPathComponent("Items/\(itemID)/Images/\(kind.rawValue)"),
                                   resolvingAgainstBaseURL: false)
         parts?.queryItems = [
             URLQueryItem(name: "maxHeight", value: String(maxHeight)),
             URLQueryItem(name: "tag", value: tag),
         ]
         return parts?.url
+    }
+
+    /// "Ends at 01:51 AM": when a film finishes if played from `positionMs`
+    /// starting now. Nil without a runtime.
+    public static func endsAt(runtimeTicks: Int64?, positionMs: Int, now: Date = Date()) -> Date? {
+        guard let runtimeTicks, runtimeTicks > 0 else { return nil }
+        let remainingMs = max(0, milliseconds(fromTicks: runtimeTicks) - positionMs)
+        return now.addingTimeInterval(Double(remainingMs) / 1000)
     }
 
     /// Jellyfin positions are in ticks: 10,000,000 per second.

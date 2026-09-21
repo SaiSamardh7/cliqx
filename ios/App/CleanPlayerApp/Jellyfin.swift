@@ -23,10 +23,14 @@ struct JellyfinItem: Codable, Identifiable, Hashable {
         var playbackPositionTicks: Int64?
         var played: Bool?
         var playedPercentage: Double?
+        var unplayedItemCount: Int?
+        var isFavorite: Bool?
         enum CodingKeys: String, CodingKey {
             case playbackPositionTicks = "PlaybackPositionTicks"
             case played = "Played"
             case playedPercentage = "PlayedPercentage"
+            case unplayedItemCount = "UnplayedItemCount"
+            case isFavorite = "IsFavorite"
         }
     }
 
@@ -41,28 +45,65 @@ struct JellyfinItem: Codable, Identifiable, Hashable {
     var seriesName: String?
     var runTimeTicks: Int64?
     var imageTags: [String: String]?
+    var backdropImageTags: [String]?
+    var parentBackdropItemId: String?
+    var parentBackdropImageTags: [String]?
+    var seriesId: String?
+    var seriesPrimaryImageTag: String?
     var userData: UserData?
     var childCount: Int?
+    var communityRating: Double?
+    var officialRating: String?
+    var genres: [String]?
+    var overview: String?
+    var status: String?
+    var endDate: Date?
 
     enum CodingKeys: String, CodingKey {
         case id = "Id", name = "Name", type = "Type", isFolder = "IsFolder"
         case collectionType = "CollectionType", productionYear = "ProductionYear"
         case indexNumber = "IndexNumber", parentIndexNumber = "ParentIndexNumber"
         case seriesName = "SeriesName", runTimeTicks = "RunTimeTicks"
-        case imageTags = "ImageTags", userData = "UserData", childCount = "ChildCount"
+        case imageTags = "ImageTags", backdropImageTags = "BackdropImageTags"
+        case parentBackdropItemId = "ParentBackdropItemId", parentBackdropImageTags = "ParentBackdropImageTags"
+        case seriesId = "SeriesId", seriesPrimaryImageTag = "SeriesPrimaryImageTag"
+        case userData = "UserData", childCount = "ChildCount"
+        case communityRating = "CommunityRating", officialRating = "OfficialRating"
+        case genres = "Genres", overview = "Overview", status = "Status", endDate = "EndDate"
     }
 
     /// Something the player can open, as opposed to something to drill into.
     var isPlayable: Bool { ["Movie", "Episode", "Video", "MusicVideo"].contains(type) }
     var primaryImageTag: String? { imageTags?["Primary"] }
+    var logoImageTag: String? { imageTags?["Logo"] }
     var resumeMs: Int { JellyfinAPI.milliseconds(fromTicks: userData?.playbackPositionTicks ?? 0) }
+
+    /// The wide picture: the item's own backdrop, else its series'. Returns
+    /// which item to ask and with what tag, since the two differ.
+    var backdrop: (itemID: String, tag: String)? {
+        if let tag = backdropImageTags?.first { return (id, tag) }
+        if let parent = parentBackdropItemId, let tag = parentBackdropImageTags?.first { return (parent, tag) }
+        return nil
+    }
+
+    /// "2008 – 2013" for a finished show, "2025 – Present" for a running one,
+    /// the year for a film.
+    var yearRange: String? {
+        guard let start = productionYear else { return nil }
+        guard type == "Series" else { return String(start) }
+        if status == "Continuing" { return "\(start) – Present" }
+        if let end = endDate.map({ Calendar.current.component(.year, from: $0) }), end != start {
+            return "\(start) – \(end)"
+        }
+        return String(start)
+    }
 
     /// "S2 · E5" for an episode, the year for a film, a count for a folder.
     var subtitle: String? {
         if type == "Episode", let e = indexNumber {
             return parentIndexNumber.map { "S\($0) · E\(e)" } ?? "Episode \(e)"
         }
-        if let productionYear, isPlayable || type == "Series" { return String(productionYear) }
+        if isPlayable || type == "Series" { return yearRange }
         if let childCount { return "\(childCount) items" }
         return nil
     }
@@ -169,6 +210,53 @@ struct JellyfinClient {
         try await get("Users/\(userID)/Items/\(id)")
     }
 
+    // MARK: The home rows, same endpoints the web client uses
+
+    static let homeFields = "PrimaryImageAspectRatio,Overview,Genres,ProductionYear,Status,EndDate,ChildCount"
+
+    /// Continue Watching: anything left partway through.
+    func resume(userID: String) async throws -> [JellyfinItem] {
+        let page: Page = try await get("Users/\(userID)/Items/Resume", query: [
+            "Limit": "12", "MediaTypes": "Video", "Fields": Self.homeFields,
+            "EnableImageTypes": "Primary,Backdrop,Thumb",
+        ])
+        return page.Items
+    }
+
+    /// Next Up: the episode after the last one watched, per show.
+    func nextUp(userID: String) async throws -> [JellyfinItem] {
+        let page: Page = try await get("Shows/NextUp", query: [
+            "UserId": userID, "Limit": "12", "Fields": Self.homeFields,
+            "EnableImageTypes": "Primary,Backdrop,Thumb",
+        ])
+        return page.Items
+    }
+
+    /// Recently Added in one library. This endpoint returns a bare array.
+    func latest(userID: String, parentID: String) async throws -> [JellyfinItem] {
+        try await get("Users/\(userID)/Items/Latest", query: [
+            "ParentId": parentID, "Limit": "12", "Fields": Self.homeFields,
+            "EnableImageTypes": "Primary,Backdrop,Logo",
+        ])
+    }
+
+    /// The hero. First: something to pick back up. Else: an unwatched film,
+    /// chosen at random so the shelf changes between visits.
+    func recommended(userID: String) async throws -> JellyfinItem? {
+        let page: Page = try await get("Users/\(userID)/Items", query: [
+            "IncludeItemTypes": "Movie", "Recursive": "true", "Filters": "IsUnplayed",
+            "SortBy": "Random", "Limit": "1", "Fields": Self.homeFields,
+            "EnableImageTypes": "Primary,Backdrop,Logo", "ImageTypeLimit": "1",
+        ])
+        return page.Items.first
+    }
+
+    func setFavorite(userID: String, itemID: String, _ on: Bool) {
+        var req = request("Users/\(userID)/FavoriteItems/\(itemID)")
+        req.httpMethod = on ? "POST" : "DELETE"
+        URLSession.shared.dataTask(with: req).resume()
+    }
+
     // MARK: Progress, so the TV and the browser agree with the phone
 
     func reportStart(itemID: String, positionMs: Int) {
@@ -203,10 +291,24 @@ struct JellyfinClient {
         return request
     }
 
+    private static let decoder: JSONDecoder = {
+        let decoder = JSONDecoder()
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let plain = ISO8601DateFormatter()
+        decoder.dateDecodingStrategy = .custom { container in
+            let text = try container.singleValueContainer().decode(String.self)
+            if let date = iso.date(from: text) ?? plain.date(from: text) { return date }
+            throw DecodingError.dataCorrupted(.init(codingPath: container.codingPath,
+                                                    debugDescription: "not ISO 8601: \(text)"))
+        }
+        return decoder
+    }()
+
     private func get<T: Decodable>(_ path: String, query: [String: String] = [:]) async throws -> T {
         let (data, response) = try await URLSession.shared.data(for: request(path, query: query))
         try Self.check(response)
-        return try JSONDecoder().decode(T.self, from: data)
+        return try Self.decoder.decode(T.self, from: data)
     }
 
     private func post<T: Decodable>(_ path: String, body: [String: Any]) async throws -> T {
@@ -216,7 +318,7 @@ struct JellyfinClient {
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
         let (data, response) = try await URLSession.shared.data(for: req)
         try Self.check(response)
-        return try JSONDecoder().decode(T.self, from: data)
+        return try Self.decoder.decode(T.self, from: data)
     }
 
     /// Progress reports: best effort, no result, never blocks the player.

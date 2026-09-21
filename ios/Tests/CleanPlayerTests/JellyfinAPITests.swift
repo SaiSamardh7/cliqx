@@ -26,6 +26,19 @@ final class JellyfinAPITests: XCTestCase {
                        "/Items/x/Images/Primary")
     }
 
+    func testEndsAtCountsOnlyWhatIsLeft() {
+        let now = Date(timeIntervalSince1970: 0)
+        // 100 min film, 40 min in: ends 60 min from now.
+        let ends = JellyfinAPI.endsAt(runtimeTicks: 100 * 60 * 10_000_000, positionMs: 40 * 60_000, now: now)
+        XCTAssertEqual(ends, now.addingTimeInterval(60 * 60))
+        XCTAssertNil(JellyfinAPI.endsAt(runtimeTicks: nil, positionMs: 0, now: now))
+    }
+
+    func testImageKindPicksThePath() {
+        XCTAssertEqual(JellyfinAPI.imageURL(server: server, itemID: "x", tag: "t", kind: .backdrop)?.path,
+                       "/Items/x/Images/Backdrop")
+    }
+
     func testTicksRoundTrip() {
         XCTAssertEqual(JellyfinAPI.ticks(fromMilliseconds: 1500), 15_000_000)
         XCTAssertEqual(JellyfinAPI.milliseconds(fromTicks: 15_000_000), 1500)

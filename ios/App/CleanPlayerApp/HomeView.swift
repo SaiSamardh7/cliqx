@@ -200,8 +200,8 @@ struct HomeView: View {
             } else {
                 ForEach(servers.servers) { server in
                     NavigationLink {
-                        ServerBrowserView(servers: servers, server: server,
-                                          gestureSettings: gestureSettings)
+                        ServerHomeView(servers: servers, server: server,
+                                       gestureSettings: gestureSettings)
                     } label: {
                         HStack(spacing: 12) {
                             Image(systemName: "server.rack")
