@@ -1867,6 +1867,16 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     post({ type: 'ready', ...frameMetrics() });
   }
 
+  // A subframe navigation has no frame-specific WKNavigationDelegate callback.
+  // Tell native while this document still owns its fid so per-frame state can
+  // be removed. A page restored from the back-forward cache announces again.
+  addEventListener('pagehide', () => post({ type: 'frameGone' }));
+  addEventListener('pageshow', (event) => {
+    if (!event.persisted) return;
+    announced = false;
+    announce();
+  });
+
   domObserver = new MutationObserver((records) => {
     let structural = false;
     let needsPass = false;

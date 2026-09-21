@@ -752,6 +752,19 @@ test.describe('frame announcement', () => {
     expect(childID).not.toBe(mainID);
   });
 
+  test('retires its identity when the document leaves the frame', async ({ page }) => {
+    await serve(page, PLAYER);
+    const frameID = (await posted(page))[0].fid;
+
+    await page.evaluate(() => dispatchEvent(new Event('pagehide')));
+
+    expect(await posted(page)).toContainEqual(expect.objectContaining({
+      v: 1,
+      fid: frameID,
+      type: 'frameGone',
+    }));
+  });
+
   test('autoTheater stages the video in the frame it runs in', async ({ page }) => {
     await serve(page, PLAYER);
     expect(await page.evaluate(() => __cp.autoTheater())).toBe(true);

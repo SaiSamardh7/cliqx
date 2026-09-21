@@ -57,6 +57,7 @@ public struct BridgeFrame: Equatable, Sendable {
 
 public enum BridgeMessageKind: Sendable {
     case ready
+    case frameGone
     case theater
     case theaterEnded
     case theaterFailed
@@ -91,7 +92,7 @@ public struct FrameCapabilityModel: Sendable {
         mainOrigin: BridgeOrigin?
     ) -> Bool {
         switch kind {
-        case .ready, .blocked:
+        case .ready, .frameGone, .blocked:
             return true
         case .theater:
             if playerFrameID == frameID { return true }
@@ -110,6 +111,14 @@ public struct FrameCapabilityModel: Sendable {
 
     public mutating func releasePlayer(frameID: String) {
         if playerFrameID == frameID { playerFrameID = nil }
+    }
+
+    @discardableResult
+    public mutating func remove(frameID: String) -> Bool {
+        knownFrames.removeValue(forKey: frameID)
+        guard playerFrameID == frameID else { return false }
+        playerFrameID = nil
+        return true
     }
 
     public mutating func reset() {
@@ -131,5 +140,37 @@ public struct FrameCapabilityModel: Sendable {
             .map(\.visibleArea)
             .max() ?? 0
         return frame.visibleArea == largestVisibleArea
+    }
+}
+
+public struct BlockedFrameRegistry: Equatable, Sendable {
+    private var countsByFrame: [String: Int] = [:]
+
+    public init() {}
+
+    public var total: Int {
+        countsByFrame.values.reduce(0, +)
+    }
+
+    public var frameIDs: [String] {
+        countsByFrame.keys.sorted()
+    }
+
+    public mutating func update(frameID: String, count: Int) {
+        countsByFrame[frameID] = count
+    }
+
+    public mutating func remove(frameID: String) {
+        countsByFrame.removeValue(forKey: frameID)
+    }
+
+    public mutating func zeroAll() {
+        for frameID in countsByFrame.keys {
+            countsByFrame[frameID] = 0
+        }
+    }
+
+    public mutating func reset() {
+        countsByFrame.removeAll()
     }
 }

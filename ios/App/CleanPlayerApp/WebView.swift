@@ -315,10 +315,10 @@ struct WebView: UIViewRepresentable {
         private var resumeArmTask: Task<Void, Never>?
         private var observations: [NSKeyValueObservation] = []
 
-        /// Frames that reported blocking something. Toggling has to reach each
-        /// of them: `evaluateJavaScript(in: nil)` only ever hits the main frame,
-        /// and interstitials are frequently inside an ad iframe.
-        private var blockingFrames: [WKFrameInfo] = []
+        /// Per-frame totals prevent a zero from one iframe erasing blocks
+        /// reported by every other iframe. The keys also address each frame
+        /// when overlay blocking is toggled.
+        private var blockedByFrame = BlockedFrameRegistry()
 
         /// Resume + thumbnail bookkeeping for the video currently in theater.
         /// The URL is the watch page; last time/duration are saved when the
@@ -420,12 +420,16 @@ struct WebView: UIViewRepresentable {
         func setOverlayBlocking(_ on: Bool) {
             page.overlayBlocking = on
             let js = "window.__cp && window.__cp.setOverlayBlocking(\(on))"
-            for frame in [nil] + blockingFrames.map(Optional.init) {
+            let reportingFrames = blockedByFrame.frameIDs.compactMap { knownFrames[$0] }
+            for frame in [nil] + reportingFrames.map(Optional.init) {
                 page.webView?.evaluateJavaScript(js, in: frame,
                                                  in: BrowserSetup.world,
                                                  completionHandler: nil)
             }
-            if !on { page.blockedCount = 0 }
+            if !on {
+                blockedByFrame.zeroAll()
+                page.blockedCount = 0
+            }
         }
 
         func showAirPlay() {
@@ -843,7 +847,6 @@ struct WebView: UIViewRepresentable {
         /// no explanation — the view stays up, but nothing is in it.
         func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
             theaterFrame = nil
-            blockingFrames.removeAll()
             clearFrameCapabilities()
             endResume()   // also drops theater and the curtain
 
@@ -873,7 +876,6 @@ struct WebView: UIViewRepresentable {
             stopWatching()
             // The old frame handle dies with the old document.
             theaterFrame = nil
-            blockingFrames.removeAll()
             clearFrameCapabilities()
             page.blockedCount = 0
             page.popupsBlocked = 0
@@ -1051,6 +1053,10 @@ struct WebView: UIViewRepresentable {
                                    didReceive message: WKScriptMessage) {
             do {
                 let envelope = try BridgeEnvelope.decode(body: message.body)
+                if envelope.message.kind == .frameGone {
+                    removeFrame(id: envelope.frameID)
+                    return
+                }
                 if envelope.message.kind == .ready {
                     guard let metrics = envelope.metrics else {
                         throw BridgeMessage.ValidationError.malformedPayload
@@ -1078,7 +1084,10 @@ struct WebView: UIViewRepresentable {
                     return
                 }
 
-                handle(envelope.message, from: message.frameInfo)
+                handle(
+                    envelope.message,
+                    from: message.frameInfo,
+                    frameID: envelope.frameID)
                 if envelope.message.kind == .theaterEnded {
                     frameCapabilities.releasePlayer(frameID: envelope.frameID)
                 }
@@ -1110,9 +1119,24 @@ struct WebView: UIViewRepresentable {
         private func clearFrameCapabilities() {
             knownFrames.removeAll()
             frameCapabilities.reset()
+            blockedByFrame.reset()
+            page.blockedCount = 0
         }
 
-        private func handle(_ message: BridgeMessage, from frameInfo: WKFrameInfo) {
+        private func removeFrame(id: String) {
+            knownFrames.removeValue(forKey: id)
+            if frameCapabilities.remove(frameID: id) {
+                theaterFrame = nil
+            }
+            blockedByFrame.remove(frameID: id)
+            page.blockedCount = blockedByFrame.total
+        }
+
+        private func handle(
+            _ message: BridgeMessage,
+            from frameInfo: WKFrameInfo,
+            frameID: String
+        ) {
             switch message {
             // Every frame announces itself once. Resuming theater after an
             // episode change has to happen in the frame holding the video, and
@@ -1135,6 +1159,10 @@ struct WebView: UIViewRepresentable {
                     "window.__cp && window.__cp.autoTheater()",
                     in: frameInfo, in: BrowserSetup.world,
                     completionHandler: nil)
+
+            case .frameGone:
+                // Lifecycle messages are consumed before dispatch.
+                break
 
             case .theater(let airplay, let pip):
                 // Remember WHICH frame staged the video. Everything the native
@@ -1201,11 +1229,8 @@ struct WebView: UIViewRepresentable {
                 page.playbackEnded = true
                 page.isPlaying = false
             case .blocked(let count):
-                page.blockedCount = count
-                if page.blockedCount > 0,
-                   !blockingFrames.contains(where: { $0 == frameInfo }) {
-                    blockingFrames.append(frameInfo)
-                }
+                blockedByFrame.update(frameID: frameID, count: count)
+                page.blockedCount = blockedByFrame.total
             case .playback(let playing, let armed):
                 page.isPlaying = playing
                 // An SPA may keep the same staged <video> and only replace its

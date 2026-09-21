@@ -49,6 +49,7 @@ public enum BridgeMessage: Codable, Equatable, Sendable {
     }
 
     case ready
+    case frameGone
     case theater(airplay: Bool, pip: Bool)
     case theaterEnded
     case theaterFailed
@@ -66,6 +67,7 @@ public enum BridgeMessage: Codable, Equatable, Sendable {
     public var kind: BridgeMessageKind {
         switch self {
         case .ready: .ready
+        case .frameGone: .frameGone
         case .theater: .theater
         case .theaterEnded: .theaterEnded
         case .theaterFailed: .theaterFailed
@@ -144,6 +146,8 @@ public enum BridgeMessage: Codable, Equatable, Sendable {
         switch type {
         case "ready":
             self = .ready
+        case "frameGone":
+            self = .frameGone
         case "theater":
             self = .theater(
                 airplay: try values.decode(Bool.self, forKey: .airplay),
@@ -230,6 +234,8 @@ public enum BridgeMessage: Codable, Equatable, Sendable {
         switch self {
         case .ready:
             try values.encode("ready", forKey: .type)
+        case .frameGone:
+            try values.encode("frameGone", forKey: .type)
         case .theater(let airplay, let pip):
             try values.encode("theater", forKey: .type)
             try values.encode(airplay, forKey: .airplay)
