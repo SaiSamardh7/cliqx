@@ -63,6 +63,7 @@ public enum BridgeMessageKind: Hashable, Sendable {
     case theaterFailed
     case ended
     case blocked
+    case popupBlocked
     case playback
     case episodeSourceChanged
     case volume
@@ -98,7 +99,7 @@ public struct BridgeRateLimiter: Sendable {
         from frameID: String,
         at now: TimeInterval
     ) -> Bool {
-        guard kind == .blocked else { return true }
+        guard kind == .blocked || kind == .popupBlocked else { return true }
 
         guard var window = blockedWindows[frameID],
               now - window.startedAt < interval
@@ -141,7 +142,7 @@ public struct FrameCapabilityModel: Sendable {
         mainOrigin: BridgeOrigin?
     ) -> Bool {
         switch kind {
-        case .ready, .frameGone, .blocked:
+        case .ready, .frameGone, .blocked, .popupBlocked:
             return true
         case .theater:
             if playerFrameID == frameID { return true }

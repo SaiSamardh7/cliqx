@@ -13,6 +13,7 @@ final class BridgeMessageTests: XCTestCase {
         let payloads = [
             #"{"v":1,"type":"ready"}"#,
             #"{"v":1,"type":"frameGone"}"#,
+            #"{"v":1,"type":"popupBlocked"}"#,
             #"{"v":1,"type":"theater","airplay":false,"pip":true}"#,
             #"{"v":1,"type":"theaterEnded"}"#,
             #"{"v":1,"type":"theaterFailed"}"#,

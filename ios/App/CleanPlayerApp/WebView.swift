@@ -91,14 +91,8 @@ final class PageState: ObservableObject {
     @Published var previousEpisode: URL?
     @Published var overlayBlocking = true
     @Published var blockedCount = 0
-    /// Popups the page agent stopped, plus the ones native held. Two counters,
-    /// because they measure different things and the page-world one is polled
-    /// rather than pushed.
+    /// Popups stopped in either the page or native navigation layer.
     @Published var popupsBlocked = 0
-    /// Held by native: cross-site windows and cancelled redirects. Kept apart
-    /// from the page's own tally, which arrives as an absolute value — adding
-    /// it in would be overwritten on the next poll.
-    var nativePopupsBlocked = 0
     /// A cross-origin window the page tried to open. Held rather than followed,
     /// so the user decides whether to leave the page they are watching.
     @Published var blockedExternal: URLRequest?
@@ -673,7 +667,6 @@ struct WebView: UIViewRepresentable {
                 webView.load(navigationAction.request)
             } else {
                 page.blockedExternal = navigationAction.request
-                page.nativePopupsBlocked += 1
                 page.popupsBlocked += 1
             }
             return nil
@@ -715,7 +708,6 @@ struct WebView: UIViewRepresentable {
                 if page.isTheater, navigationAction.navigationType == .other,
                    !HostKey.isSameSite(url, as: webView.url) {
                     page.blockedExternal = navigationAction.request
-                    page.nativePopupsBlocked += 1
                     page.popupsBlocked += 1
                     decisionHandler(.cancel)
                     return
@@ -881,7 +873,6 @@ struct WebView: UIViewRepresentable {
             clearFrameCapabilities()
             page.blockedCount = 0
             page.popupsBlocked = 0
-            page.nativePopupsBlocked = 0
             page.blockedExternal = nil
             page.isTheater = false
             // Not simply `false`: goToEpisode arms the resume and starts the
@@ -1034,19 +1025,6 @@ struct WebView: UIViewRepresentable {
 
             recoveredFrom = nil
             refreshEpisodes(webView)
-            // The guard lives in the page world, so it is read rather than
-            // reporting through the bridge.
-            webView.evaluateJavaScript("window.__cpPopupsBlocked || 0",
-                                       in: nil, in: .page) { [weak self] result in
-                if case .success(let value) = result {
-                    // Assigning here erased every native block that landed
-                    // during the load — a count that went down as you watched.
-                    guard let self else { return }
-                    self.page.popupsBlocked =
-                        (value as? Int ?? 0) + self.page.nativePopupsBlocked
-                }
-            }
-
         }
 
         // MARK: Page agent
@@ -1069,9 +1047,9 @@ struct WebView: UIViewRepresentable {
                     // unified-log flood. The counter retains the exact total.
                     if droppedRateLimitedMessages == 1
                         || droppedRateLimitedMessages.isMultiple(of: 1_000) {
+                        let total = droppedRateLimitedMessages
                         Self.bridgeLog.notice(
-                            "Rate-limited page bridge messages; "
-                                + "total: \(self.droppedRateLimitedMessages)")
+                            "Rate-limited page bridge messages; total: \(total)")
                     }
                     return
                 }
@@ -1251,6 +1229,8 @@ struct WebView: UIViewRepresentable {
             case .blocked(let count):
                 blockedByFrame.update(frameID: frameID, count: count)
                 page.blockedCount = blockedByFrame.total
+            case .popupBlocked:
+                page.popupsBlocked += 1
             case .playback(let playing, let armed):
                 page.isPlaying = playing
                 // An SPA may keep the same staged <video> and only replace its

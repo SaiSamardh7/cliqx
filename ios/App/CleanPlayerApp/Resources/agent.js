@@ -89,6 +89,13 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     } catch (_) {}
   }
 
+  // popupguard has to patch the page world, where the named bridge is not
+  // visible. A DOM event crosses content worlds without leaving a readable
+  // counter or string-named property behind on `window`.
+  document.addEventListener('cliqx:popup-blocked', () => {
+    post({ type: 'popupBlocked' });
+  });
+
   /// Shadow DOM encapsulates styles, so a stylesheet in the document does not
   /// reach a button appended inside a shadow root. Each root that holds a
   /// player needs its own copy.

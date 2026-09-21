@@ -55,6 +55,7 @@ public enum BridgeMessage: Codable, Equatable, Sendable {
     case theaterFailed
     case ended
     case blocked(count: Int)
+    case popupBlocked
     case playback(playing: Bool, armed: Bool)
     case episodeSourceChanged(playing: Bool)
     case volume(percent: Int, boosted: Bool)
@@ -73,6 +74,7 @@ public enum BridgeMessage: Codable, Equatable, Sendable {
         case .theaterFailed: .theaterFailed
         case .ended: .ended
         case .blocked: .blocked
+        case .popupBlocked: .popupBlocked
         case .playback: .playback
         case .episodeSourceChanged: .episodeSourceChanged
         case .volume: .volume
@@ -162,6 +164,8 @@ public enum BridgeMessage: Codable, Equatable, Sendable {
             self = .blocked(count: try Self.validatedInteger(
                 try values.decode(Int.self, forKey: .count),
                 in: 0...100_000, field: "count"))
+        case "popupBlocked":
+            self = .popupBlocked
         case "playback":
             self = .playback(
                 playing: try values.decode(Bool.self, forKey: .playing),
@@ -249,6 +253,8 @@ public enum BridgeMessage: Codable, Equatable, Sendable {
         case .blocked(let count):
             try values.encode("blocked", forKey: .type)
             try values.encode(count, forKey: .count)
+        case .popupBlocked:
+            try values.encode("popupBlocked", forKey: .type)
         case .playback(let playing, let armed):
             try values.encode("playback", forKey: .type)
             try values.encode(playing, forKey: .playing)

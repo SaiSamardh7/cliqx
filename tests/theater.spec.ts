@@ -1340,6 +1340,51 @@ test.describe('episode neighbours', () => {
   });
 });
 
+test.describe('popup guard fingerprint', () => {
+  test('leaves no string-named __cp property in the page world', async ({ page }) => {
+    await page.setContent(PLAYER);
+    await page.addScriptTag({ content: POPUPGUARD });
+
+    expect(await page.evaluate(() =>
+      Object.getOwnPropertyNames(window).filter((name) => name.startsWith('__cp'))))
+      .toEqual([]);
+  });
+
+  test('reports blocked popups through the versioned bridge', async ({ page }) => {
+    await serve(page, PLAYER);
+    await page.addScriptTag({ content: POPUPGUARD });
+
+    await page.evaluate(() => window.open('https://advertisement.test'));
+
+    expect(await posted(page)).toContainEqual(expect.objectContaining({
+      v: 1,
+      fid: expect.any(String),
+      type: 'popupBlocked',
+    }));
+    expect(await page.evaluate(() =>
+      Object.prototype.hasOwnProperty.call(window, '__cpPopupsBlocked'))).toBe(false);
+  });
+
+  test('does not stack wrappers when injected twice', async ({ page }) => {
+    await serve(page, PLAYER);
+    await page.addScriptTag({ content: POPUPGUARD });
+    await page.addScriptTag({ content: POPUPGUARD });
+
+    await page.evaluate(() => window.open('https://advertisement.test'));
+
+    expect((await posted(page)).filter((message: any) => message.type === 'popupBlocked'))
+      .toHaveLength(1);
+  });
+
+  test('makes the wrapped window.open resemble the native function', async ({ page }) => {
+    await page.setContent(PLAYER);
+    await page.addScriptTag({ content: POPUPGUARD });
+
+    expect(await page.evaluate(() => window.open.toString()))
+      .toBe('function open() { [native code] }');
+  });
+});
+
 test.describe('page-initiated fullscreen', () => {
   // WebKit element fullscreen renders above the app's own views, so a page that
   // calls requestFullscreen when playback starts hides the native player chrome
