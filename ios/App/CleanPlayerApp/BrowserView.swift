@@ -81,11 +81,20 @@ struct BrowserView: View {
     /// the player.
     private var immersive: Bool { page.isTheater || page.isResumingEpisode }
 
-    /// Black, not a spinner over the page. The point is that the next episode's
+    /// The last frame of the outgoing video, dimmed, with the spinner over it —
+    /// or black when there is no frame yet. Either way the next episode's
     /// header, ads and cookie banner are never seen at all.
     private var resumingCurtain: some View {
         ZStack {
             Color.black.ignoresSafeArea()
+            if let frame = page.transitionFrame {
+                Image(uiImage: frame)
+                    .resizable()
+                    .scaledToFill()
+                    .ignoresSafeArea()
+                    .overlay(Color.black.opacity(0.45).ignoresSafeArea())
+                    .accessibilityHidden(true)
+            }
             VStack(spacing: 16) {
                 ProgressView().controlSize(.large).tint(.white)
                 Text(page.episodeTransitionMessage)

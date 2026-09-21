@@ -671,6 +671,7 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     allowInline(video);
     suppressControls(video);
     staged = video;
+    if (startMuted) video.muted = true;
     prepareVolume(video);
     trackAirPlay(video);
     // Theater hides the page, and the page is where the player's own play
@@ -691,6 +692,17 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     reportVideo();
     video.addEventListener('loadedmetadata', reportVideo);
     video.addEventListener('resize', reportVideo);
+    return true;
+  }
+
+  /// Warm standby: native decodes the next episode in a second web view
+  /// behind the one on screen, and it must not be heard until it is swapped
+  /// in. Applies to the staged video now and to whatever autoTheater stages
+  /// later, so it can be set before the frame has found its video.
+  let startMuted = false;
+  function setMuted(on) {
+    startMuted = !!on;
+    if (staged) staged.muted = startMuted;
     return true;
   }
 
@@ -1929,7 +1941,7 @@ html[data-cp-unlock], html[data-cp-unlock] body {
   window.__cp = {
     enterTheater, exitTheater, isTheater, autoTheater,
     hostTheater, unhostTheater, largestFrame,
-    togglePlay, seek, skip, beginScrub, setRate, setVolume,
+    togglePlay, seek, skip, beginScrub, setRate, setVolume, setMuted,
     armEpisodeTransition,
     textTracks, selectTextTrack, setObjectFit, selectSource, togglePiP,
     findEpisodes, episodeList, navigateEpisode,
