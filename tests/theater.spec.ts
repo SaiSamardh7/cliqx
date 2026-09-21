@@ -147,7 +147,8 @@ test.describe('theater mode', () => {
       expect.objectContaining({ type: 'theater' }));
 
     await page.evaluate(() => __cp.exitTheater());
-    expect(await posted(page)).toContainEqual({ v: 1, type: 'theaterEnded' });
+    expect(await posted(page)).toContainEqual(
+      expect.objectContaining({ v: 1, type: 'theaterEnded' }));
   });
 });
 
@@ -461,7 +462,8 @@ test.describe('AirPlay source for MSE', () => {
       });
 
       const report = (await posted(page)).filter((m: any) => m.type === 'airplay').pop();
-      expect(report).toEqual({ v: 1, type: 'airplay', available: true, source: 'mse' });
+      expect(report).toEqual(expect.objectContaining(
+        { v: 1, type: 'airplay', available: true, source: 'mse' }));
     });
 
   // Ranking, not guessing. A manifest with segments behind it was fetched from
@@ -603,7 +605,8 @@ test.describe('playback control', () => {
         expect.objectContaining({ type: 'playback' }));
 
       await page.evaluate(() => document.querySelector('video')!.dispatchEvent(new Event('play')));
-      expect(await posted(page)).toContainEqual({ v: 1, type: 'playback', playing: true });
+      expect(await posted(page)).toContainEqual(
+        expect.objectContaining({ v: 1, type: 'playback', playing: true }));
     });
 
   test('togglePlay drives the staged video both ways', async ({ page }) => {
@@ -643,8 +646,8 @@ test.describe('playback control', () => {
       __cp.enterTheater(video);
     });
     expect(await page.evaluate(() => __cp.setVolume(50))).toBe(true);
-    expect(await posted(page)).toContainEqual(
-      { v: 1, type: 'volume', percent: 50, boosted: false });
+    expect(await posted(page)).toContainEqual(expect.objectContaining(
+      { v: 1, type: 'volume', percent: 50, boosted: false }));
   });
 
   test('all website volume levels use the primed gain node and cap at 200 percent', async ({ page }) => {
@@ -666,13 +669,13 @@ test.describe('playback control', () => {
 
     expect(await page.evaluate(() => __cp.setVolume(50))).toBe(true);
     expect(await page.evaluate(() => (window as any).__gain.gain.value)).toBe(1);
-    expect(await posted(page)).toContainEqual(
-      { v: 1, type: 'volume', percent: 50, boosted: false });
+    expect(await posted(page)).toContainEqual(expect.objectContaining(
+      { v: 1, type: 'volume', percent: 50, boosted: false }));
 
     expect(await page.evaluate(() => __cp.setVolume(250))).toBe(true);
     expect(await page.evaluate(() => (window as any).__gain.gain.value)).toBe(2);
-    expect(await posted(page)).toContainEqual(
-      { v: 1, type: 'volume', percent: 200, boosted: true });
+    expect(await posted(page)).toContainEqual(expect.objectContaining(
+      { v: 1, type: 'volume', percent: 200, boosted: true }));
   });
 
   test('does not claim boost when WebKit rejects audio activation', async ({ page }) => {
@@ -693,8 +696,8 @@ test.describe('playback control', () => {
     });
 
     expect(await page.evaluate(() => __cp.setVolume(175))).toBe(true);
-    await expect.poll(() => posted(page)).toContainEqual(
-      { v: 1, type: 'volume', percent: 100, boosted: false });
+    await expect.poll(() => posted(page)).toContainEqual(expect.objectContaining(
+      { v: 1, type: 'volume', percent: 100, boosted: false }));
     expect(await page.evaluate(() => (window as any).__gain.gain.value)).toBe(1);
   });
 });
@@ -709,6 +712,44 @@ test.describe('frame announcement', () => {
     await serve(page, PLAYER);
     const ready = (await posted(page)).filter((m: any) => m.type === 'ready');
     expect(ready).toHaveLength(1);
+    expect(ready[0]).toEqual(expect.objectContaining({
+      v: 1,
+      fid: expect.stringMatching(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i),
+      width: expect.any(Number),
+      height: expect.any(Number),
+      visible: true,
+    }));
+  });
+
+  test('uses one stable identity per frame', async ({ page }) => {
+    await serve(page, PLAYER);
+    const mainMessages = await posted(page);
+    const mainID = mainMessages[0].fid;
+    expect(mainMessages.every((message: any) => message.fid === mainID)).toBe(true);
+
+    await page.evaluate(() => {
+      const iframe = document.createElement('iframe');
+      iframe.name = 'identity-fixture';
+      iframe.srcdoc = '<!doctype html><video></video>';
+      document.body.appendChild(iframe);
+    });
+    const iframe = await page.waitForSelector('iframe[name="identity-fixture"]');
+    const child = await iframe.contentFrame();
+    if (!child) throw new Error('identity fixture frame did not attach');
+    await child.evaluate(() => {
+      (window as any).__posted = [];
+      (window as any).webkit = {
+        messageHandlers: { cp: { postMessage: (message: any) =>
+          (window as any).__posted.push(message) } },
+      };
+    });
+    await child.addScriptTag({ content: AGENT });
+    const childMessages = await child.evaluate(() => (window as any).__posted);
+    const childID = childMessages[0].fid;
+
+    expect(childMessages.every((message: any) => message.fid === childID)).toBe(true);
+    expect(childID).not.toBe(mainID);
   });
 
   test('autoTheater stages the video in the frame it runs in', async ({ page }) => {
@@ -753,7 +794,7 @@ test.describe('resuming theater after an episode change', () => {
       // Once the source changed, the frame is no longer the outgoing one.
       await page.evaluate(() => document.querySelector('video')!.dispatchEvent(new Event('play')));
       expect((await posted(page)).filter((m: any) => m.type === 'playback').slice(-1)[0])
-        .toEqual({ v: 1, type: 'playback', playing: false });
+        .toEqual(expect.objectContaining({ v: 1, type: 'playback', playing: false }));
     });
 
   test('waits for a video inserted by a delayed AJAX player lifecycle',

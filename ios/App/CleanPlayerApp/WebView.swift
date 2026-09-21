@@ -287,6 +287,9 @@ struct WebView: UIViewRepresentable {
         /// main frame — reaches a different `window.__cp` than the one holding
         /// the staged video, and silently does nothing.
         private var theaterFrame: WKFrameInfo?
+        private var knownFrames: [String: WKFrameInfo] = [:]
+        private var frameCapabilities = FrameCapabilityModel()
+        private var droppedSpectatorMessages = 0
 
         /// The episode navigation theater should carry across to, if any.
         ///
@@ -841,6 +844,7 @@ struct WebView: UIViewRepresentable {
         func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
             theaterFrame = nil
             blockingFrames.removeAll()
+            clearFrameCapabilities()
             endResume()   // also drops theater and the curtain
 
             guard let url = webView.url ?? loaded else {
@@ -870,6 +874,7 @@ struct WebView: UIViewRepresentable {
             // The old frame handle dies with the old document.
             theaterFrame = nil
             blockingFrames.removeAll()
+            clearFrameCapabilities()
             page.blockedCount = 0
             page.popupsBlocked = 0
             page.nativePopupsBlocked = 0
@@ -1045,12 +1050,66 @@ struct WebView: UIViewRepresentable {
         func userContentController(_ controller: WKUserContentController,
                                    didReceive message: WKScriptMessage) {
             do {
-                let bridgeMessage = try BridgeMessage.decode(body: message.body)
-                handle(bridgeMessage, from: message.frameInfo)
+                let envelope = try BridgeEnvelope.decode(body: message.body)
+                if envelope.message.kind == .ready {
+                    guard let metrics = envelope.metrics else {
+                        throw BridgeMessage.ValidationError.malformedPayload
+                    }
+                    registerFrame(
+                        id: envelope.frameID,
+                        frameInfo: message.frameInfo,
+                        metrics: metrics)
+                } else if let metrics = envelope.metrics,
+                          knownFrames[envelope.frameID] != nil {
+                    registerFrame(
+                        id: envelope.frameID,
+                        frameInfo: message.frameInfo,
+                        metrics: metrics)
+                }
+
+                guard frameCapabilities.authorize(
+                    envelope.message.kind,
+                    from: envelope.frameID,
+                    mainOrigin: page.webView?.url.flatMap(BridgeOrigin.init(url:)))
+                else {
+                    droppedSpectatorMessages += 1
+                    Self.bridgeLog.notice(
+                        "Dropped spectator bridge message; total: \(self.droppedSpectatorMessages)")
+                    return
+                }
+
+                handle(envelope.message, from: message.frameInfo)
+                if envelope.message.kind == .theaterEnded {
+                    frameCapabilities.releasePlayer(frameID: envelope.frameID)
+                }
             } catch {
                 Self.bridgeLog.error(
                     "Rejected page bridge message: \(error.localizedDescription, privacy: .public)")
             }
+        }
+
+        private func registerFrame(
+            id: String,
+            frameInfo: WKFrameInfo,
+            metrics: BridgeEnvelope.FrameMetrics
+        ) {
+            knownFrames[id] = frameInfo
+            let securityOrigin = frameInfo.securityOrigin
+            frameCapabilities.register(BridgeFrame(
+                id: id,
+                origin: BridgeOrigin(
+                    scheme: securityOrigin.protocol,
+                    host: securityOrigin.host,
+                    port: securityOrigin.port == 0 ? nil : securityOrigin.port),
+                width: metrics.width,
+                height: metrics.height,
+                isVisible: metrics.isVisible,
+                isMainFrame: frameInfo.isMainFrame))
+        }
+
+        private func clearFrameCapabilities() {
+            knownFrames.removeAll()
+            frameCapabilities.reset()
         }
 
         private func handle(_ message: BridgeMessage, from frameInfo: WKFrameInfo) {

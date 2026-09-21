@@ -1,0 +1,135 @@
+import Foundation
+
+public struct BridgeOrigin: Equatable, Sendable {
+    public let scheme: String
+    public let host: String
+    public let port: Int
+
+    public init(scheme: String, host: String, port: Int? = nil) {
+        let normalizedScheme = scheme.lowercased()
+        self.scheme = normalizedScheme
+        self.host = host.lowercased()
+        self.port = port ?? Self.defaultPort(for: normalizedScheme)
+    }
+
+    public init?(url: URL) {
+        guard let scheme = url.scheme, let host = url.host else { return nil }
+        self.init(scheme: scheme, host: host, port: url.port)
+    }
+
+    private static func defaultPort(for scheme: String) -> Int {
+        switch scheme {
+        case "http": 80
+        case "https": 443
+        default: 0
+        }
+    }
+}
+
+public struct BridgeFrame: Equatable, Sendable {
+    public let id: String
+    public let origin: BridgeOrigin
+    public let width: Int
+    public let height: Int
+    public let isVisible: Bool
+    public let isMainFrame: Bool
+
+    public init(
+        id: String,
+        origin: BridgeOrigin,
+        width: Int,
+        height: Int,
+        isVisible: Bool,
+        isMainFrame: Bool = false
+    ) {
+        self.id = id
+        self.origin = origin
+        self.width = width
+        self.height = height
+        self.isVisible = isVisible
+        self.isMainFrame = isMainFrame
+    }
+
+    fileprivate var visibleArea: Int {
+        isVisible ? width * height : 0
+    }
+}
+
+public enum BridgeMessageKind: Sendable {
+    case ready
+    case theater
+    case theaterEnded
+    case theaterFailed
+    case ended
+    case blocked
+    case playback
+    case episodeSourceChanged
+    case volume
+    case time
+    case video
+    case tracks
+    case airplay
+    case airplaySupport
+}
+
+public struct FrameCapabilityModel: Sendable {
+    public private(set) var knownFrames: [String: BridgeFrame] = [:]
+    public private(set) var playerFrameID: String?
+
+    public init() {}
+
+    public mutating func register(_ frame: BridgeFrame) {
+        knownFrames[frame.id] = frame
+    }
+
+    /// Returns whether a message may mutate global player state. Ready and
+    /// blocked reports are spectator-safe. Theater is the sole capability
+    /// acquisition message; everything else is player-only.
+    public mutating func authorize(
+        _ kind: BridgeMessageKind,
+        from frameID: String,
+        mainOrigin: BridgeOrigin?
+    ) -> Bool {
+        switch kind {
+        case .ready, .blocked:
+            return true
+        case .theater:
+            if playerFrameID == frameID { return true }
+            guard playerFrameID == nil,
+                  let frame = knownFrames[frameID],
+                  isEligiblePlayer(frame, mainOrigin: mainOrigin)
+            else { return false }
+            playerFrameID = frameID
+            return true
+        case .theaterEnded, .theaterFailed, .ended, .playback,
+             .episodeSourceChanged, .volume, .time, .video, .tracks,
+             .airplay, .airplaySupport:
+            return playerFrameID == frameID
+        }
+    }
+
+    public mutating func releasePlayer(frameID: String) {
+        if playerFrameID == frameID { playerFrameID = nil }
+    }
+
+    public mutating func reset() {
+        knownFrames.removeAll()
+        playerFrameID = nil
+    }
+
+    private func isEligiblePlayer(
+        _ frame: BridgeFrame,
+        mainOrigin: BridgeOrigin?
+    ) -> Bool {
+        if frame.isMainFrame || frame.origin == mainOrigin { return true }
+        guard frame.visibleArea > 0 else { return false }
+        // The main document contains every iframe and normally fills the whole
+        // viewport, so including it would make a cross-origin player
+        // ineligible by construction. Embedded frames compete with peers.
+        let largestVisibleArea = knownFrames.values
+            .filter { !$0.isMainFrame }
+            .map(\.visibleArea)
+            .max() ?? 0
+        return frame.visibleArea == largestVisibleArea
+    }
+}

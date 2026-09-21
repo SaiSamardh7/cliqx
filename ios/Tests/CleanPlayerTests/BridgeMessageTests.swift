@@ -76,6 +76,26 @@ final class BridgeMessageTests: XCTestCase {
         }
     }
 
+    func testEnvelopeRequiresUUIDFrameIdentity() throws {
+        let valid = try BridgeEnvelope.decode(body: [
+            "v": 1,
+            "fid": "5D95A57B-FADB-45A6-9513-627E3894CFE7",
+            "type": "blocked",
+            "count": 2,
+        ])
+
+        XCTAssertEqual(valid.frameID, "5D95A57B-FADB-45A6-9513-627E3894CFE7")
+        XCTAssertEqual(valid.message, .blocked(count: 2))
+        XCTAssertThrowsError(try BridgeEnvelope.decode(body: [
+            "v": 1,
+            "fid": "not-a-frame-id",
+            "type": "ready",
+            "width": 320,
+            "height": 180,
+            "visible": true,
+        ]))
+    }
+
     func testRejectsUnknownMessageType() {
         XCTAssertThrowsError(try decode(#"{"v":1,"type":"surprise"}"#)) { error in
             XCTAssertEqual(error as? BridgeMessage.ValidationError,

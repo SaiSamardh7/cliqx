@@ -63,6 +63,25 @@ public enum BridgeMessage: Codable, Equatable, Sendable {
     case airplay(available: Bool, source: String)
     case airplaySupport(picker: Bool, source: String)
 
+    public var kind: BridgeMessageKind {
+        switch self {
+        case .ready: .ready
+        case .theater: .theater
+        case .theaterEnded: .theaterEnded
+        case .theaterFailed: .theaterFailed
+        case .ended: .ended
+        case .blocked: .blocked
+        case .playback: .playback
+        case .episodeSourceChanged: .episodeSourceChanged
+        case .volume: .volume
+        case .time: .time
+        case .video: .video
+        case .tracks: .tracks
+        case .airplay: .airplay
+        case .airplaySupport: .airplaySupport
+        }
+    }
+
     private static let maximumCollectionCount = 1_000
     private static let maximumMediaIndex = 100_000
     private static let maximumMediaDimension = 32_768
@@ -297,5 +316,52 @@ public enum BridgeMessage: Codable, Equatable, Sendable {
                 raw.index, in: 0...maximumMediaIndex, field: "\(field).index"),
             label: try validatedString(raw.label, field: "\(field).label"),
             active: raw.active)
+    }
+}
+
+public struct BridgeEnvelope: Equatable, Sendable {
+    public struct FrameMetrics: Equatable, Sendable {
+        public let width: Int
+        public let height: Int
+        public let isVisible: Bool
+    }
+
+    public let frameID: String
+    public let metrics: FrameMetrics?
+    public let message: BridgeMessage
+
+    private struct Header: Decodable {
+        let fid: String
+        let width: Int?
+        let height: Int?
+        let visible: Bool?
+    }
+
+    public static func decode(body: Any) throws -> BridgeEnvelope {
+        guard let object = body as? [String: Any],
+              JSONSerialization.isValidJSONObject(object)
+        else { throw BridgeMessage.ValidationError.malformedPayload }
+
+        let data = try JSONSerialization.data(withJSONObject: object)
+        let header = try JSONDecoder().decode(Header.self, from: data)
+        guard header.fid.count <= BridgeMessage.maximumStringLength,
+              UUID(uuidString: header.fid) != nil
+        else { throw BridgeMessage.ValidationError.malformedPayload }
+
+        let metrics: FrameMetrics?
+        switch (header.width, header.height, header.visible) {
+        case (nil, nil, nil):
+            metrics = nil
+        case (.some(let width), .some(let height), .some(let visible))
+        where (0...32_768).contains(width) && (0...32_768).contains(height):
+            metrics = FrameMetrics(width: width, height: height, isVisible: visible)
+        default:
+            throw BridgeMessage.ValidationError.numberOutOfRange(field: "frame")
+        }
+
+        return BridgeEnvelope(
+            frameID: header.fid,
+            metrics: metrics,
+            message: try JSONDecoder().decode(BridgeMessage.self, from: data))
     }
 }

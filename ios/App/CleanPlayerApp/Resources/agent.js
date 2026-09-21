@@ -70,10 +70,22 @@ html[data-cp-unlock], html[data-cp-unlock] body {
   let staged = null;                  // the video currently in theater
   let hosted = null;                  // the player frame this page is staging
   let airplayAvailable = false;
+  const FRAME_ID = crypto.randomUUID();
+
+  function frameMetrics() {
+    const width = Math.max(0, Math.round(window.innerWidth));
+    const height = Math.max(0, Math.round(window.innerHeight));
+    return {
+      width,
+      height,
+      visible: document.visibilityState !== 'hidden' && width > 0 && height > 0,
+    };
+  }
 
   function post(payload) {
     try {
-      window.webkit?.messageHandlers?.cp?.postMessage({ ...payload, v: 1 });
+      window.webkit?.messageHandlers?.cp?.postMessage(
+        { ...payload, v: 1, fid: FRAME_ID });
     } catch (_) {}
   }
 
@@ -655,7 +667,7 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     video.addEventListener('durationchange', reportTime);
     video.addEventListener('progress', onTimeUpdate);
 
-    post({ type: 'theater', airplay: airplayAvailable, pip: canPiP() });
+    post({ type: 'theater', airplay: airplayAvailable, pip: canPiP(), ...frameMetrics() });
     reportPlayback();
     reportTime();
     reportTracks();
@@ -1852,7 +1864,7 @@ html[data-cp-unlock], html[data-cp-unlock] body {
   function announce() {
     if (announced) return;
     announced = true;
-    post({ type: 'ready' });
+    post({ type: 'ready', ...frameMetrics() });
   }
 
   domObserver = new MutationObserver((records) => {
