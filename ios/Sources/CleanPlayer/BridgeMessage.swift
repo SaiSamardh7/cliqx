@@ -58,7 +58,7 @@ public enum BridgeMessage: Codable, Equatable, Sendable {
     case popupBlocked
     case playback(playing: Bool, armed: Bool)
     case episodeSourceChanged(playing: Bool)
-    case volume(percent: Int, boosted: Bool)
+    case volume(percent: Int, boosted: Bool, available: Bool)
     case time(at: Double, duration: Double, live: Bool, buffered: Double, rate: Double)
     case video(info: VideoInfo)
     case tracks([MediaChoice])
@@ -101,6 +101,7 @@ public enum BridgeMessage: Codable, Equatable, Sendable {
         case armed
         case percent
         case boosted
+        case available
         case at
         case duration
         case live
@@ -108,7 +109,6 @@ public enum BridgeMessage: Codable, Equatable, Sendable {
         case rate
         case info
         case tracks
-        case available
         case source
         case picker
     }
@@ -178,7 +178,8 @@ public enum BridgeMessage: Codable, Equatable, Sendable {
                 percent: try Self.validatedInteger(
                     try values.decode(Int.self, forKey: .percent),
                     in: 0...200, field: "percent"),
-                boosted: try values.decode(Bool.self, forKey: .boosted))
+                boosted: try values.decode(Bool.self, forKey: .boosted),
+                available: try values.decode(Bool.self, forKey: .available))
         case "time":
             self = .time(
                 at: try Self.validatedNumber(
@@ -262,10 +263,11 @@ public enum BridgeMessage: Codable, Equatable, Sendable {
         case .episodeSourceChanged(let playing):
             try values.encode("episodeSourceChanged", forKey: .type)
             try values.encode(playing, forKey: .playing)
-        case .volume(let percent, let boosted):
+        case .volume(let percent, let boosted, let available):
             try values.encode("volume", forKey: .type)
             try values.encode(percent, forKey: .percent)
             try values.encode(boosted, forKey: .boosted)
+            try values.encode(available, forKey: .available)
         case .time(let at, let duration, let live, let buffered, let rate):
             try values.encode("time", forKey: .type)
             try values.encode(at, forKey: .at)

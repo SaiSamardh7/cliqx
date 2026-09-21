@@ -604,6 +604,22 @@ The native control bar has **not** been seen working on a real page yet.
 
 ---
 
+## Volume ownership
+
+iOS does not expose a supported API for setting device output volume.
+`AVAudioSession.outputVolume` is read-only, and reaching into
+`MPVolumeView.subviews` for its private slider is not a stable contract. The
+app therefore does not write hardware volume: the iPhone's hardware buttons
+remain the device-volume control.
+
+The in-player slider controls only the staged media stream through a Web Audio
+gain node. That works for same-origin, blob/data, and CORS-enabled sources. A
+cross-origin source without CORS cannot be connected to Web Audio; for those
+streams the control is visibly disabled and its accessibility hint directs the
+user to the hardware buttons. The UI never advances a volume value it could
+not apply. The 100–200% range is media gain and may distort; it is not device
+volume.
+
 ## Interstitial and ad blocking
 
 Reported symptom: a full-screen "Checking your browser before visiting the
@@ -1075,4 +1091,3 @@ forward, both decisions rather than code:
 Until one is chosen, Settings shows each list's version and how long ago the
 rules were generated, and warns outright once they pass 30 days. Protection
 that quietly decays behind an "Active" label is the failure being prevented.
-

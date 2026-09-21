@@ -21,7 +21,7 @@ final class BridgeMessageTests: XCTestCase {
             #"{"v":1,"type":"blocked","count":2}"#,
             #"{"v":1,"type":"playback","playing":true,"armed":true}"#,
             #"{"v":1,"type":"episodeSourceChanged","playing":false}"#,
-            #"{"v":1,"type":"volume","percent":125,"boosted":true}"#,
+            #"{"v":1,"type":"volume","percent":125,"boosted":true,"available":true}"#,
             #"{"v":1,"type":"time","at":12.5,"duration":24,"live":false,"buffered":18,"rate":1.25}"#,
             #"{"v":1,"type":"video","info":{"height":1080,"width":1920,"fit":"contain","sources":[{"index":0,"label":"1080p","active":true}]}}"#,
             #"{"v":1,"type":"tracks","tracks":[{"index":0,"label":"English","active":true}]}"#,

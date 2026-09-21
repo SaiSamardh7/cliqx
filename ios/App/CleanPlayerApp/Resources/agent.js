@@ -376,8 +376,9 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     return true;
   }
 
-  // iOS ignores writes to HTMLMediaElement.volume. Route every requested level
-  // through Web Audio when the stream is CORS-safe, not only the boosted range.
+  // iOS exposes device output volume as read-only and ignores writes to
+  // HTMLMediaElement.volume. Route the in-app media control through Web Audio
+  // when the stream is CORS-safe; hardware buttons continue to own the device.
   // Creating the graph while entering theater is important: watchClean runs in
   // the site's real click, while a later native evaluateJavaScript call has no
   // WebKit user activation and may leave AudioContext permanently suspended.
@@ -414,28 +415,23 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     const wanted = Math.min(Math.max(Math.round(Number(percent) || 0), 0), 200);
     const chain = prepareVolume(staged);
     if (!chain) {
-      // Native owns 0...100 through MPVolumeView. Cross-origin streams without
-      // CORS cannot be routed through Web Audio, so boost honestly caps at 100.
-      if (wanted <= 100) {
-        post({ type: 'volume', percent: wanted, boosted: false });
-        return true;
-      }
-      post({ type: 'volume', percent: 100, boosted: false });
+      // Cross-origin streams without CORS cannot be routed through Web Audio.
+      // Say so instead of moving a control that has no effect.
+      post({ type: 'volume', percent: 100, boosted: false, available: false });
       return false;
     }
     staged.volume = 1;
-    // Native already attenuates 0...100. Applying that level here too would
-    // turn 50% into 25%, so Web Audio is boost-only.
-    chain.gain.gain.value = Math.max(wanted / 100, 1);
+    chain.gain.gain.value = wanted / 100;
     Promise.resolve(chain.context.resume()).then(() => {
       if (chain.context.state && chain.context.state !== 'running') {
-        post({ type: 'volume', percent: Math.min(wanted, 100), boosted: false });
+        chain.gain.gain.value = 1;
+        post({ type: 'volume', percent: 100, boosted: false, available: false });
         return;
       }
-      post({ type: 'volume', percent: wanted, boosted: wanted > 100 });
+      post({ type: 'volume', percent: wanted, boosted: wanted > 100, available: true });
     }).catch(() => {
       chain.gain.gain.value = 1;
-      post({ type: 'volume', percent: Math.min(wanted, 100), boosted: false });
+      post({ type: 'volume', percent: 100, boosted: false, available: false });
     });
     return true;
   }

@@ -636,7 +636,7 @@ test.describe('playback control', () => {
     expect(await page.evaluate(() => __cp.togglePlay())).toBe(false);
   });
 
-  test('volume up to 100 percent is acknowledged for native hardware control', async ({ page }) => {
+  test('disables media volume when a cross-origin stream cannot use Web Audio', async ({ page }) => {
     await serve(page, PLAYER);
     await page.evaluate(() => {
       const video = document.querySelector('video')!;
@@ -645,9 +645,9 @@ test.describe('playback control', () => {
       video.src = 'https://media.example/episode.mp4';
       __cp.enterTheater(video);
     });
-    expect(await page.evaluate(() => __cp.setVolume(50))).toBe(true);
+    expect(await page.evaluate(() => __cp.setVolume(50))).toBe(false);
     expect(await posted(page)).toContainEqual(expect.objectContaining(
-      { v: 1, type: 'volume', percent: 50, boosted: false }));
+      { v: 1, type: 'volume', percent: 100, boosted: false, available: false }));
   });
 
   test('all website volume levels use the primed gain node and cap at 200 percent', async ({ page }) => {
@@ -668,14 +668,14 @@ test.describe('playback control', () => {
     });
 
     expect(await page.evaluate(() => __cp.setVolume(50))).toBe(true);
-    expect(await page.evaluate(() => (window as any).__gain.gain.value)).toBe(1);
+    expect(await page.evaluate(() => (window as any).__gain.gain.value)).toBe(0.5);
     expect(await posted(page)).toContainEqual(expect.objectContaining(
-      { v: 1, type: 'volume', percent: 50, boosted: false }));
+      { v: 1, type: 'volume', percent: 50, boosted: false, available: true }));
 
     expect(await page.evaluate(() => __cp.setVolume(250))).toBe(true);
     expect(await page.evaluate(() => (window as any).__gain.gain.value)).toBe(2);
     expect(await posted(page)).toContainEqual(expect.objectContaining(
-      { v: 1, type: 'volume', percent: 200, boosted: true }));
+      { v: 1, type: 'volume', percent: 200, boosted: true, available: true }));
   });
 
   test('does not claim boost when WebKit rejects audio activation', async ({ page }) => {
@@ -697,7 +697,7 @@ test.describe('playback control', () => {
 
     expect(await page.evaluate(() => __cp.setVolume(175))).toBe(true);
     await expect.poll(() => posted(page)).toContainEqual(expect.objectContaining(
-      { v: 1, type: 'volume', percent: 100, boosted: false }));
+      { v: 1, type: 'volume', percent: 100, boosted: false, available: false }));
     expect(await page.evaluate(() => (window as any).__gain.gain.value)).toBe(1);
   });
 });

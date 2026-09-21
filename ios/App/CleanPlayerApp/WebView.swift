@@ -1,26 +1,8 @@
 import CleanPlayer
-import MediaPlayer
 import os
 import SwiftUI
 import UIKit
 import WebKit
-
-/// Bridges website playback to the iPhone's real output volume. WebKit on iOS
-/// deliberately ignores JavaScript writes to HTMLMediaElement.volume.
-@MainActor
-private final class SystemVolumeController {
-    static let shared = SystemVolumeController()
-    private let volumeView = MPVolumeView(frame: .zero)
-
-    func set(percent: Int) {
-        let value = Float(min(max(percent, 0), 100)) / 100
-        guard let slider = volumeView.subviews.compactMap({ $0 as? UISlider }).first else {
-            return
-        }
-        slider.setValue(value, animated: false)
-        slider.sendActions(for: .valueChanged)
-    }
-}
 
 /// Navigation and player state the SwiftUI chrome needs.
 @MainActor
@@ -64,6 +46,7 @@ final class PageState: ObservableObject {
     @Published var playbackRate: Double = 1
     /// Per-video level. 100 is normal; 101...200 is software amplification.
     @Published var volumePercent = 100
+    @Published var mediaVolumeAvailable = false
     @Published var textTracks: [TextTrack] = []
     @Published var pipAvailable = false
     /// Decoded frame height — the only quality figure available from outside
@@ -200,8 +183,6 @@ struct WebView: UIViewRepresentable {
             },
             setVolume: { [weak coordinator = context.coordinator] percent in
                 let safe = min(max(percent, 0), 200)
-                SystemVolumeController.shared.set(percent: safe)
-                coordinator?.page.volumePercent = safe
                 coordinator?.callPlayer("setVolume(\(safe))")
             },
             selectTrack: { [weak coordinator = context.coordinator] index in
@@ -389,6 +370,7 @@ struct WebView: UIViewRepresentable {
             callTheaterFrame("window.__cp && window.__cp.exitTheater()")
             releaseHostPage()
             page.isTheater = false
+            page.mediaVolumeAvailable = false
         }
 
         /// Undoes `hostTheater()` in the main frame. Separate from
@@ -881,6 +863,7 @@ struct WebView: UIViewRepresentable {
             page.popupsBlocked = 0
             page.blockedExternal = nil
             page.isTheater = false
+            page.mediaVolumeAvailable = false
             // Not simply `false`: goToEpisode arms the resume and starts the
             // load, so this fires with the curtain already up. Deriving it from
             // the armed destination also drops the curtain when some *other*
@@ -1174,6 +1157,7 @@ struct WebView: UIViewRepresentable {
                 theaterFrame = frameInfo
                 endResume(keepingTheater: true)
                 page.isTheater = true
+                page.mediaVolumeAvailable = false
                 callPlayer("setVolume(\(page.volumePercent))")
                 page.playbackEnded = false
                 page.airplayAvailable = airplay
@@ -1219,6 +1203,7 @@ struct WebView: UIViewRepresentable {
                 }
                 releaseHostPage()
                 page.isTheater = false
+                page.mediaVolumeAvailable = false
                 stopWatching()
             // The agent gave up finding a video to resume into. Only the frame
             // that was actually asked reports this, so the curtain comes down
@@ -1263,8 +1248,9 @@ struct WebView: UIViewRepresentable {
                 if playing {
                     endResume(keepingTheater: true)
                 }
-            case .volume(let percent, _):
+            case .volume(let percent, _, let available):
                 page.volumePercent = percent
+                page.mediaVolumeAvailable = available
             case .time(let at, let duration, let live, let buffered, let rate):
                 page.currentTime = at
                 page.duration = duration
