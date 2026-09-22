@@ -11,7 +11,12 @@ import Foundation
 /// itself keeps — so the phone, the TV and the browser agree.
 public enum JellyfinAPI {
     public static let client = "Cliqx"
-    public static let version = "0.1"
+    /// The shipped version, so the server's Devices dashboard names the build
+    /// that actually connected. Hard-coding it meant the dashboard reported
+    /// 0.1 forever; VERSION is the one source, see tools/check-version.py.
+    public static let version =
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        ?? "0"
 
     /// `Authorization: MediaBrowser Client="…", Device="…", DeviceId="…",
     /// Version="…", Token="…"`. The token is omitted before sign-in; the rest

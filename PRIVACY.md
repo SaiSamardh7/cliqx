@@ -29,8 +29,10 @@ requests the filter lists block.
 - No device or advertising identifiers.
 - No location, contacts, photos, or health data.
 - No crash or usage analytics.
-- No third-party SDKs are linked into the app, so nothing is collected on
-  anyone else's behalf either.
+- No analytics, advertising or tracking SDKs are linked into the app, so
+  nothing is collected on anyone else's behalf either. The app links one
+  third-party component, VLCKit, which decodes video on this device; it
+  collects nothing and contacts nothing on its own. See `NOTICE.md`.
 
 ## Filter lists
 

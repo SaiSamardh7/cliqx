@@ -122,3 +122,10 @@ jobs:
       # quiet — INFOPLIST_KEY_UIBackgroundModes in particular looks correct and
       # is ignored outright.
       - run: python3 tools/check-plist.py
+
+      # Two configurations carried 0.1 and two carried 1.0, so which version
+      # shipped depended on which scheme was built.
+      - run: python3 tools/check-version.py
+
+      # The README claimed 66 Swift and 198 agent tests long after both moved.
+      - run: python3 tools/count-tests.py --check
