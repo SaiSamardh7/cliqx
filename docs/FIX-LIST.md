@@ -16,13 +16,18 @@ release checklist. Every ❌ and ⚠️ from that audit is here, ordered by seve
 Tick the box, keep the ID in the commit message (`S1-04: …`), and delete the
 row when it lands so the file stays a to-do list, not a history.
 
+**Status, 22 September 2026.** 15 of 19 S1 items are done. The four left are
+S1-02 (session-cookie override), S1-04 (page-controlled popup count), S1-09
+(the updater's dead code vs the privacy claim) and S1-12 (privacy URL and
+contact address — yours to supply, not mine to invent).
+
 ---
 
 ## S1 — Fix before anyone else installs it
 
 ### Security
 
-- [ ] **S1-01 Permanent HTTP credentials for any RFC1918/link-local host.**
+- [x] **S1-01 Permanent HTTP credentials for any RFC1918/link-local host.**
   `isOwnHost` returns true for every private IP, so a NAS password typed once is
   auto-replayed in Basic auth to whatever holds that IP on the next Wi-Fi.
   [BrowserModel.swift:256](../ios/App/CleanPlayerApp/BrowserModel.swift:256),
@@ -35,23 +40,23 @@ row when it lands so the file stays a to-do list, not a history.
   *Do:* opt-in "Stay signed in" toggle per pinned site; skip cookies with
   `Secure`+`HttpOnly` unless opted in; keep every original attribute.
   *Done when:* test rebuilds a cookie and diff of `properties` is only `expires`.
-- [ ] **S1-03 "Is this Jellyfin?" passes when `ProductName` is nil**, then POSTs
+- [x] **S1-03 "Is this Jellyfin?" passes when `ProductName` is nil**, then POSTs
   the password. [Jellyfin.swift:176](../ios/App/CleanPlayerApp/Jellyfin.swift:176).
   *Do:* `?? false`, and require `Id` + `Version` present.
 - [ ] **S1-04 Page controls a number in native UI.** `window.__cpPopupsBlocked`
   is page-writable and displayed. [WebView.swift:1293](../ios/App/CleanPlayerApp/WebView.swift:1293).
   *Do:* count only native-held popups, or move the counter to the isolated world
   and have the page-world guard report via a nonce'd `postMessage`. Clamp ≥ 0.
-- [ ] **S1-05 Any frame can write player state.** `time`, `playback`, `volume`,
+- [x] **S1-05 Any frame can write player state.** `time`, `playback`, `volume`,
   `tracks`, `video`, `airplay` are accepted from every frame of the current web
   view, not just `theaterFrame`. [WebView.swift:1310](../ios/App/CleanPlayerApp/WebView.swift:1310).
   *Do:* for those message kinds, require `message.frameInfo` to match
   `theaterFrame` (isMainFrame + request.url). *Done when:* Playwright spec with
   an ad iframe posting `time` does not move the seek bar.
-- [ ] **S1-06 Link-local (`169.254.x`) treated as trusted local.**
+- [x] **S1-06 Link-local (`169.254.x`) treated as trusted local.**
   [AddressResolver.swift:65](../ios/Sources/CleanPlayer/AddressResolver.swift:65).
   *Do:* drop `(169, 254)` from the trusted set; keep it http-default only.
-- [ ] **S1-07 Page-derived strings rendered unbounded in native UI** — scheme,
+- [x] **S1-07 Page-derived strings rendered unbounded in native UI** — scheme,
   host, realm, source/track labels, page title.
   [WebView.swift:930](../ios/App/CleanPlayerApp/WebView.swift:930), `case "video"`,
   `case "tracks"`. *Do:* one `sanitizedForUI(_:)` helper: ≤ 120 chars, strip
@@ -59,7 +64,7 @@ row when it lands so the file stays a to-do list, not a history.
 
 ### Claims that are false
 
-- [ ] **S1-08 VLCKit is a third-party SDK and is declared nowhere.**
+- [x] **S1-08 VLCKit is a third-party SDK and is declared nowhere.**
   [PRIVACY.md:33](../PRIVACY.md:33), [README.md:13](../README.md:13),
   [NOTICE.md](../NOTICE.md), [docs/APP-STORE.md](APP-STORE.md).
   *Do:* NOTICE entry (LGPL-2.1+, relink obligation, source URL, pinned version);
@@ -68,37 +73,37 @@ row when it lands so the file stays a to-do list, not a history.
   downloader.** [PRIVACY.md:41](../PRIVACY.md:41), [FilterListUpdater.swift](../ios/Sources/CleanPlayer/FilterListUpdater.swift).
   *Do:* either wire it (see S2-30) and update the policy, or delete the updater
   and its tests. Not both.
-- [ ] **S1-10 README says `DEVELOPMENT_TEAM` is committed empty; it isn't.**
+- [x] **S1-10 README says `DEVELOPMENT_TEAM` is committed empty; it isn't.**
   [project.pbxproj:226](../ios/App/CleanPlayerApp.xcodeproj/project.pbxproj:226), `:257`.
   *Do:* pick a policy, apply to all four configs, fix README.
-- [ ] **S1-11 Two `MARKETING_VERSION`s (0.1 and 1.0).**
+- [x] **S1-11 Two `MARKETING_VERSION`s (0.1 and 1.0).**
   [project.pbxproj:240](../ios/App/CleanPlayerApp.xcodeproj/project.pbxproj:240), `:338`.
   *Do:* one value, driven from a `VERSION` file; `JellyfinAPI.version` reads it.
 - [ ] **S1-12 Privacy policy has no contact address and no public URL.**
   [PRIVACY.md:56](../PRIVACY.md:56). *Do:* address + host the page; put URL in APP-STORE.md.
-- [ ] **S1-13 Test counts in README/ROADMAP are wrong** (says 66 XCTest / 198
+- [x] **S1-13 Test counts in README/ROADMAP are wrong** (says 66 XCTest / 198
   specs; repo has 126 / 165×2). *Do:* `tools/count-tests.sh` writes them; CI diffs.
 
 ### Crashes and data loss
 
-- [ ] **S1-14 Force-unwraps in the network layer.** `URLComponents(...)!`,
+- [x] **S1-14 Force-unwraps in the network layer.** `URLComponents(...)!`,
   `parts.url!`. [Jellyfin.swift:284-286](../ios/App/CleanPlayerApp/Jellyfin.swift:284).
   *Do:* return `nil`/throw `Failure.badURL`.
-- [ ] **S1-15 `try!` in a security helper.**
+- [x] **S1-15 `try!` in a security helper.**
   [EpisodeTransition.swift:49](../ios/Sources/CleanPlayer/EpisodeTransition.swift:49).
   *Do:* `try?` + fallback to a hand-escaped literal.
-- [ ] **S1-16 Corrupt store = silently empty library.** `try? decode` in
+- [x] **S1-16 Corrupt store = silently empty library.** `try? decode` in
   `BrowserModel.init`, `MediaLibrary.init`, `JellyfinServers.init`.
   *Do:* on decode failure, move the blob to `<key>.corrupt-<date>` and log; never
   overwrite it with `[]` on the next `persist()`.
-- [ ] **S1-17 Keychain write is delete-then-add.**
+- [x] **S1-17 Keychain write is delete-then-add.**
   [Jellyfin.swift:389](../ios/App/CleanPlayerApp/Jellyfin.swift:389).
   *Do:* `SecItemUpdate`, add on `errSecItemNotFound`.
-- [ ] **S1-18 Simulator Keychain shim stores tokens in UserDefaults and is keyed
+- [x] **S1-18 Simulator Keychain shim stores tokens in UserDefaults and is keyed
   on target, not `DEBUG`.** [Jellyfin.swift:361](../ios/App/CleanPlayerApp/Jellyfin.swift:361).
   *Do:* `protocol TokenStore` injected into `JellyfinServers`; real Keychain in
   the app, in-memory fake in tests. Delete the `#if`.
-- [ ] **S1-19 JS `alert()`/`confirm()`/`prompt()`/auth prompt never complete if
+- [x] **S1-19 JS `alert()`/`confirm()`/`prompt()`/auth prompt never complete if
   the presenter is busy** — WebKit's synchronous dialog then freezes the frame.
   [WebView.swift:1421](../ios/App/CleanPlayerApp/WebView.swift:1421).
   *Do:* a `DialogQueue` that waits for `presentedViewController == nil`; every
