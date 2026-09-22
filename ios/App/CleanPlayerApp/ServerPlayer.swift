@@ -27,6 +27,8 @@ final class ServerEngine: NSObject, ObservableObject, @preconcurrency VLCMediaPl
     private var didResume = false
     private var didReadTracks = false
     private var desiredRate: Float = 1
+    private let interruptions = AudioInterruptions()
+    private var wasPlayingBeforeInterruption = false
     var onClose: () -> Void = {}
 
     init(item: JellyfinItem, server: JellyfinServer, servers: JellyfinServers) {
@@ -58,6 +60,27 @@ final class ServerEngine: NSObject, ObservableObject, @preconcurrency VLCMediaPl
             retryFailedNavigation: {}
         )
         player.delegate = self
+        interruptions.start { [weak self] event in
+            MainActor.assumeIsolated { self?.handle(interruption: event) }
+        }
+    }
+
+    /// See the same handler in WebView: iOS pauses for an interruption and
+    /// says nothing, and headphones leaving must always pause.
+    private func handle(interruption event: AudioInterruptions.Event) {
+        switch event {
+        case .began:
+            wasPlayingBeforeInterruption = player.isPlaying
+            if player.isPlaying { player.pause() }
+        case .ended(let shouldResume):
+            guard shouldResume, wasPlayingBeforeInterruption, !player.isPlaying else { break }
+            wasPlayingBeforeInterruption = false
+            player.play()
+        case .outputDeviceLost:
+            wasPlayingBeforeInterruption = false
+            if player.isPlaying { player.pause() }
+        }
+        page.isPlaying = player.isPlaying
     }
 
     // MARK: Lifecycle
@@ -92,6 +115,7 @@ final class ServerEngine: NSObject, ObservableObject, @preconcurrency VLCMediaPl
     func close() {
         if !reportedStop { report(final: true) }
         player.stop()
+        MediaSession.deactivate()
         onClose()
     }
 
@@ -280,7 +304,10 @@ struct ServerPlayerView: View {
             engine.onClose = onClose
             engine.start()
         }
-        .onDisappear { engine.player.stop() }
+        .onDisappear {
+            engine.player.stop()
+            MediaSession.deactivate()
+        }
         .onReceive(NotificationCenter.default.publisher(
             for: UIApplication.didEnterBackgroundNotification)) { _ in
             engine.report(final: false)   // backgrounding is a save point

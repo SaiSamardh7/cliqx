@@ -58,12 +58,36 @@ final class LocalPlayerModel: NSObject, ObservableObject, @preconcurrency VLCMed
     /// Called with (positionMs, durationMs) on the plan's save points.
     var onProgress: (Int, Int) -> Void = { _, _ in }
 
+    private let interruptions = AudioInterruptions()
+    private var wasPlayingBeforeInterruption = false
+
     func start(url: URL, resumeMs: Int = 0) {
         pendingResumeMs = resumeMs
         didResume = resumeMs <= 0
         player.delegate = self
         player.media = VLCMedia(url: url)
         player.play()
+        // A call, an alarm, or headphones leaving. iOS pauses the audio for
+        // the first two and says nothing; the third must always pause.
+        interruptions.start { [weak self] event in
+            MainActor.assumeIsolated { self?.handle(interruption: event) }
+        }
+    }
+
+    private func handle(interruption event: AudioInterruptions.Event) {
+        switch event {
+        case .began:
+            wasPlayingBeforeInterruption = player.isPlaying
+            if player.isPlaying { player.pause() }
+        case .ended(let shouldResume):
+            guard shouldResume, wasPlayingBeforeInterruption, !player.isPlaying else { break }
+            wasPlayingBeforeInterruption = false
+            player.play()
+        case .outputDeviceLost:
+            wasPlayingBeforeInterruption = false
+            if player.isPlaying { player.pause() }
+        }
+        isPlaying = player.isPlaying
     }
 
     /// Save points from the plan: every 5s while playing, plus pause, PiP or
@@ -88,7 +112,10 @@ final class LocalPlayerModel: NSObject, ObservableObject, @preconcurrency VLCMed
         volumePercent = safe
     }
 
-    func stop() { player.stop() }
+    func stop() {
+        interruptions.stop()
+        player.stop()
+    }
 
     func togglePlay() { player.isPlaying ? player.pause() : player.play() }
 
@@ -312,6 +339,9 @@ struct LocalPlayerView: View {
             model.reportProgress()
             model.stop()
             if video.scoped { video.url.stopAccessingSecurityScopedResource() }
+            // Hand the audio session back so whatever was playing before can
+            // resume; .playback interrupted it and only this ends that.
+            MediaSession.deactivate()
         }
         // Backgrounding is a save point too.
         .onReceive(NotificationCenter.default.publisher(

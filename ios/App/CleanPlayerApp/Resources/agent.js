@@ -418,33 +418,59 @@ html[data-cp-unlock], html[data-cp-unlock] body {
   }
 
   // iOS exposes device output volume as read-only and ignores writes to
-  // HTMLMediaElement.volume. Route the in-app media control through Web Audio
-  // when the stream is CORS-safe; hardware buttons continue to own the device.
-  // Creating the graph while entering theater is important: watchClean runs in
-  // the site's real click, while a later native evaluateJavaScript call has no
-  // WebKit user activation and may leave AudioContext permanently suspended.
+  // HTMLMediaElement.volume, so the in-app level goes through Web Audio when
+  // the stream is CORS-safe. Hardware buttons continue to own the device.
+  //
+  // In TWO steps, deliberately. `createMediaElementSource` is irreversible for
+  // the element's lifetime, and an element routed through Web Audio does not
+  // follow AirPlay: the TV gets silence. Doing it on every theater entry meant
+  // the volume slider nobody touched broke the AirPlay button next to it.
+  //
+  // The AudioContext still has to be built during the entry gesture —
+  // watchClean runs in the site's real click, while a later native
+  // evaluateJavaScript call has no WebKit user activation and leaves a context
+  // suspended for good. So: context eagerly, routing only when a level other
+  // than 100 is actually asked for.
   const boostedAudio = new WeakMap();
-  function prepareVolume(video) {
-    const existing = boostedAudio.get(video);
-    if (existing) return existing;
+
+  function canRouteAudio(video) {
     const sourceURL = video.currentSrc || video.src || '';
-    let safeSource = sourceURL.startsWith('blob:') || sourceURL.startsWith('data:');
+    if (sourceURL.startsWith('blob:') || sourceURL.startsWith('data:')) return true;
     try {
       const parsed = new URL(sourceURL, location.href);
-      safeSource = safeSource || parsed.origin === location.origin || !!video.crossOrigin;
-    } catch (_) {}
+      return parsed.origin === location.origin || !!video.crossOrigin;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// The context alone, built inside the user gesture. No routing yet, so the
+  /// element still plays straight to the device and AirPlay still works.
+  function prepareAudioContext(video) {
+    if (boostedAudio.has(video)) return boostedAudio.get(video);
     const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-    if (!safeSource || !AudioContextClass) return null;
+    if (!canRouteAudio(video) || !AudioContextClass) return null;
     try {
-      const context = new AudioContextClass();
-      const source = context.createMediaElementSource(video);
-      const gain = context.createGain();
-      source.connect(gain);
-      gain.connect(context.destination);
-      const chain = { context, source, gain };
+      const chain = { context: new AudioContextClass(), source: null, gain: null };
       boostedAudio.set(video, chain);
-      // Confirm activation when a level is requested. Not every theater entry
-      // path carries a WebKit user gesture.
+      return chain;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Route the element through the graph. From here the element's audio
+  /// belongs to Web Audio and AirPlay can no longer carry it, which is why
+  /// nothing calls this until a level other than 100 is requested.
+  function prepareVolume(video) {
+    const chain = prepareAudioContext(video);
+    if (!chain) return null;
+    if (chain.gain) return chain;
+    try {
+      chain.source = chain.context.createMediaElementSource(video);
+      chain.gain = chain.context.createGain();
+      chain.source.connect(chain.gain);
+      chain.gain.connect(chain.context.destination);
       return chain;
     } catch (_) {
       return null;
@@ -454,6 +480,14 @@ html[data-cp-unlock], html[data-cp-unlock] body {
   function setVolume(percent) {
     if (!staged) return false;
     const wanted = Math.min(Math.max(Math.round(Number(percent) || 0), 0), 200);
+    // 100 is the element's own level: nothing to route, so the graph is not
+    // built and AirPlay keeps working for anyone who never moves the slider.
+    if (wanted === 100 && !(boostedAudio.get(staged) || {}).gain) {
+      staged.volume = 1;
+      post({ type: 'volume', percent: 100, boosted: false,
+             available: canRouteAudio(staged) });
+      return true;
+    }
     const chain = prepareVolume(staged);
     if (!chain) {
       // Cross-origin streams without CORS cannot be routed through Web Audio.
@@ -701,7 +735,7 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     suppressControls(video);
     staged = video;
     if (startMuted) video.muted = true;
-    prepareVolume(video);
+    prepareAudioContext(video);
     trackAirPlay(video);
     // Theater hides the page, and the page is where the player's own play
     // button lives. The native bar has to know whether it is showing play or

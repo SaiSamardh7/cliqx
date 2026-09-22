@@ -2510,3 +2510,67 @@ test.describe('interstitial blocking', () => {
     await expect(page.locator('#backdrop')).toBeHidden();
   });
 });
+
+test.describe('volume routing and AirPlay', () => {
+  // `createMediaElementSource` is irreversible for the element's lifetime, and
+  // an element routed through Web Audio does not follow AirPlay: the
+  // television gets silence. Theater used to build the graph on every entry,
+  // so the volume slider nobody touched broke the AirPlay button next to it.
+  async function stagedWithAudioSpy(page: Page) {
+    await serve(page, PLAYER);
+    await page.evaluate(() => {
+      (window as any).__routed = 0;
+      const Ctor: any = (window as any).AudioContext || (window as any).webkitAudioContext;
+      const original = Ctor.prototype.createMediaElementSource;
+      Ctor.prototype.createMediaElementSource = function (...args: any[]) {
+        (window as any).__routed++;
+        return original.apply(this, args);
+      };
+      const v = document.querySelector('video')! as any;
+      v.play = () => Promise.resolve();
+    });
+    await watchClean(page).click();
+  }
+
+  const routed = (page: Page) => page.evaluate(() => (window as any).__routed as number);
+
+  test('entering theater does not route the element through Web Audio',
+    async ({ page }) => {
+      await stagedWithAudioSpy(page);
+      expect(await routed(page)).toBe(0);
+    });
+
+  test('setting 100% leaves the element unrouted and reports it as available',
+    async ({ page }) => {
+      await stagedWithAudioSpy(page);
+      await page.evaluate(() => __cp.setVolume(100));
+      expect(await routed(page)).toBe(0);
+      expect((await posted(page)).filter((m: any) => m.type === 'volume').slice(-1)[0])
+        .toEqual(expect.objectContaining({ percent: 100, boosted: false, available: true }));
+    });
+
+  test('asking for a different level routes once and only once',
+    async ({ page }) => {
+      await stagedWithAudioSpy(page);
+      await page.evaluate(() => __cp.setVolume(50));
+      expect(await routed(page)).toBe(1);
+      await page.evaluate(() => __cp.setVolume(150));
+      await page.evaluate(() => __cp.setVolume(75));
+      expect(await routed(page)).toBe(1);
+    });
+
+  test('a cross-origin stream without CORS says the control is unavailable',
+    async ({ page }) => {
+      await serve(page, PLAYER);
+      await page.evaluate(() => {
+        const v = document.querySelector('video')! as any;
+        Object.defineProperty(v, 'currentSrc',
+          { get: () => 'https://elsewhere.test/a.mp4', configurable: true });
+        v.play = () => Promise.resolve();
+      });
+      await watchClean(page).click();
+      await page.evaluate(() => __cp.setVolume(150));
+      expect((await posted(page)).filter((m: any) => m.type === 'volume').slice(-1)[0])
+        .toEqual(expect.objectContaining({ available: false }));
+    });
+});

@@ -17,8 +17,10 @@ Tick the box, keep the ID in the commit message (`S1-04: …`), and delete the
 row when it lands so the file stays a to-do list, not a history.
 
 **Status, 22 September 2026.** S1 is done except S1-12, which is a privacy
-policy URL and a contact address — yours to supply, not mine to invent. S2 is
-next.
+policy URL and a contact address — yours to supply, not mine to invent. The S2
+audio group (01, 02, 03, 05, 06) has landed; S2-04 is folded into S2-02, since
+the volume control no longer touches system volume at all. Working down S2 from
+there.
 
 ---
 
@@ -114,16 +116,16 @@ next.
 
 ### Audio and media session
 
-- [ ] **S2-01 Audio session is never deactivated.** No `setActive(false)` in the
+- [x] **S2-01 Audio session is never deactivated.** No `setActive(false)` in the
   codebase; other apps' audio never resumes. [MediaSession.swift](../ios/Sources/CleanPlayer/MediaSession.swift).
   *Do:* `MediaSession.deactivate()` with `.notifyOthersOnDeactivation`, called
   from `exitTheater`, `ServerEngine.close`, local player close.
-- [ ] **S2-02 Web Audio boost breaks AirPlay and background audio.**
+- [x] **S2-02 Web Audio boost breaks AirPlay and background audio.**
   `createMediaElementSource` is irreversible for the element. [agent.js:406](../ios/App/CleanPlayerApp/Resources/agent.js:406).
   *Do:* only create the context when the user goes > 100; grey out 101–200 while
   `airplayAvailable` or in PiP; tear down on `unstage`; document the trade-off
   in the volume menu.
-- [ ] **S2-03 No interruption / route-change handling.** No
+- [x] **S2-03 No interruption / route-change handling.** No
   `AVAudioSession.interruptionNotification` or `routeChangeNotification`.
   *Do:* pause on interruption begin and on headphones-unplug (`oldDeviceUnavailable`);
   resume on `shouldResume`.
@@ -132,9 +134,9 @@ next.
   *Do:* decide: (a) drop 0–100 for web and show only boost, or (b) keep system
   volume but drive it through `MPVolumeView` as a real (hidden) view with
   `setVolumeThumbImage`-free interaction. No `subviews` walking.
-- [ ] **S2-05 Hearing-safety warning on first boost > 100.** One-time alert,
+- [x] **S2-05 Hearing-safety warning on first boost > 100.** One-time alert,
   remembered in settings.
-- [ ] **S2-06 Brightness not restored after playback.**
+- [x] **S2-06 Brightness not restored after playback.**
   [PlayerOverlay.swift:190](../ios/App/CleanPlayerApp/PlayerOverlay.swift:190), LocalMedia.
   *Do:* remember `UIScreen.main.brightness` on theater enter; restore on exit
   unless the user changed it outside the gesture.

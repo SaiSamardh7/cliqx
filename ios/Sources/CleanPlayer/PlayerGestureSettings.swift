@@ -16,6 +16,10 @@ public final class PlayerGestureSettings: ObservableObject {
     @Published public var temporaryFastForward: Bool {
         didSet { store.set(temporaryFastForward, forKey: Keys.temporaryFastForward) }
     }
+    /// Shown once, the first time someone amplifies past 100%.
+    @Published public var hasSeenBoostWarning: Bool {
+        didSet { store.set(hasSeenBoostWarning, forKey: Keys.hasSeenBoostWarning) }
+    }
     @Published public var swipeToDismiss: Bool {
         didSet { store.set(swipeToDismiss, forKey: Keys.swipeToDismiss) }
     }
@@ -26,6 +30,7 @@ public final class PlayerGestureSettings: ObservableObject {
         static let brightnessAndVolume = "player.gesture.brightnessAndVolume.v1"
         static let temporaryFastForward = "player.gesture.temporaryFastForward.v1"
         static let swipeToDismiss = "player.gesture.swipeToDismiss.v1"
+        static let hasSeenBoostWarning = "player.volume.boostWarningSeen.v1"
     }
 
     private let store: UserDefaults
@@ -37,6 +42,7 @@ public final class PlayerGestureSettings: ObservableObject {
         brightnessAndVolume = store.object(forKey: Keys.brightnessAndVolume) as? Bool ?? true
         temporaryFastForward = store.object(forKey: Keys.temporaryFastForward) as? Bool ?? true
         swipeToDismiss = store.object(forKey: Keys.swipeToDismiss) as? Bool ?? true
+        hasSeenBoostWarning = store.object(forKey: Keys.hasSeenBoostWarning) as? Bool ?? false
     }
 }
 

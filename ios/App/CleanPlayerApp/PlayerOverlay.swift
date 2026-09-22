@@ -29,6 +29,11 @@ struct PlayerOverlay: View {
     @State private var gestureBrightnessPercent: Int?
     @State private var gestureVolumePercent: Int?
     @State private var heldPreviousRate: Double?
+    /// The screen brightness before this player touched it, so it can be put
+    /// back. Without this, one swipe down during a dark scene left the phone
+    /// dim for everything the user did afterwards.
+    @State private var brightnessOnEntry: CGFloat?
+    @State private var showingBoostWarning = false
 
     var body: some View {
         ZStack {
@@ -64,6 +69,7 @@ struct PlayerOverlay: View {
         .animation(.easeInOut(duration: 0.18), value: chrome.areControlsVisible)
         .animation(.easeInOut(duration: 0.18), value: chrome.isLocked)
         .onAppear {
+            brightnessOnEntry = UIScreen.main.brightness
             // The three things the chrome initiates on its own. Everything
             // else is a button, and goes straight to `page.actions`.
             chrome.onAdvance = {
@@ -88,11 +94,28 @@ struct PlayerOverlay: View {
         // A new episode is a new video: whatever the user declined last time
         // has nothing to do with this one.
         .onChange(of: page.nextEpisode) { _, _ in chrome.itemChanged() }
-        .onDisappear { chrome.cancelEverything() }
+        .onDisappear {
+            chrome.cancelEverything()
+            // Put the screen back the way it was found. Only if nothing else
+            // changed it since — the user may have used Control Centre, and
+            // overriding that would be the same rudeness in reverse.
+            if let entry = brightnessOnEntry,
+               let last = lastBrightnessSet,
+               abs(UIScreen.main.brightness - last) < 0.01 {
+                UIScreen.main.brightness = entry
+            }
+        }
         .sheet(isPresented: $showingEpisodes) { episodeSheet }
         // Says what AirPlay will and will not do here, and names the thing
         // that does work. "AirPlay is broken" and "AirPlay cannot carry this
         // stream, mirroring can" are very different messages to receive.
+        .alert("Careful with your hearing", isPresented: $showingBoostWarning) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text("Above 100% amplifies the video's own audio on top of the "
+                 + "device volume. On headphones this gets loud quickly — turn "
+                 + "the hardware volume down before raising this.")
+        }
         .alert("Video can't be sent to a TV from this site",
                isPresented: $showingAirPlayHelp) {
             Button("OK", role: .cancel) { }
@@ -105,6 +128,23 @@ struct PlayerOverlay: View {
 
     /// Playing as the user would mean it: not paused, and with a picture.
     private var isShowingFrames: Bool { page.isPlaying && !page.isBuffering }
+
+    /// Amplification routes the element through Web Audio, which AirPlay
+    /// cannot forward. While a route could carry the picture, that trade is
+    /// not worth making silently.
+    /// The last brightness this view set, so it can tell its own change from
+    /// one the user made in Control Centre.
+    @State private var lastBrightnessSet: CGFloat?
+
+    private var boostWithheldForAirPlay: Bool {
+        page.airplayAvailable && page.airplayCanSendVideo
+    }
+
+    private var volumeLevels: [Int] {
+        boostWithheldForAirPlay
+            ? [0, 25, 50, 75, 100]
+            : [0, 25, 50, 75, 100, 125, 150, 175, 200]
+    }
 
     // MARK: Tap and double-tap
 
@@ -188,6 +228,7 @@ struct PlayerOverlay: View {
                     let change = -value.translation.height / max(size.height, 1)
                     let brightness = min(max(dragStartBrightness + change, 0), 1)
                     UIScreen.main.brightness = brightness
+                    lastBrightnessSet = brightness
                     gestureBrightnessPercent = Int((brightness * 100).rounded())
                     gestureVolumePercent = page.mediaVolumeAvailable
                         ? page.volumePercent : nil
@@ -663,14 +704,32 @@ struct PlayerOverlay: View {
             Menu {
                 Picker("Volume", selection: Binding(
                     get: { page.volumePercent },
-                    set: { page.actions.setVolume($0) }
+                    set: { level in
+                        // Once, the first time anyone amplifies. Above 100%
+                        // this is software gain on top of whatever the device
+                        // is already doing, and on headphones that is loud.
+                        if level > 100, !gestureSettings.hasSeenBoostWarning {
+                            gestureSettings.hasSeenBoostWarning = true
+                            showingBoostWarning = true
+                        }
+                        page.actions.setVolume(level)
+                    }
                 )) {
-                    ForEach([0, 25, 50, 75, 100, 125, 150, 175, 200], id: \.self) { level in
+                    // Boost is withheld while a route could carry the
+                    // picture: amplifying means routing the element through
+                    // Web Audio, and a routed element does not follow AirPlay
+                    // — the television would get silence. The plain levels
+                    // still work, because they do not route anything.
+                    ForEach(volumeLevels, id: \.self) { level in
                         Text(level > 100 ? "\(level)% Boost" : "\(level)%").tag(level)
                     }
                 }
                 Divider()
-                Text("Above 100% may distort loud audio")
+                if boostWithheldForAirPlay {
+                    Text("Boost is off while AirPlay can send this video")
+                } else {
+                    Text("Above 100% may distort loud audio")
+                }
             } label: {
                 Label("Volume \(page.volumePercent)%",
                       systemImage: page.volumePercent > 100
@@ -680,6 +739,7 @@ struct PlayerOverlay: View {
             .accessibilityHint(page.mediaVolumeAvailable
                 ? "Controls this video's audio level"
                 : "Unavailable for this stream; use the hardware volume buttons")
+
             Divider()
             Button {
                 page.actions.setObjectFit(page.objectFit == "cover" ? "contain" : "cover")

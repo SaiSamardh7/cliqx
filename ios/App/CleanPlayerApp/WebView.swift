@@ -329,6 +329,12 @@ struct WebView: UIViewRepresentable {
         private var resumeArmTask: Task<Void, Never>?
         private var observations: [NSKeyValueObservation] = []
 
+        /// Calls, alarms, and headphones being pulled out.
+        private let interruptions = AudioInterruptions()
+        /// Playing when an interruption began, so resuming is only offered to
+        /// a video that was actually running.
+        private var wasPlayingBeforeInterruption = false
+
         /// Per-frame totals prevent a zero from one iframe erasing blocks
         /// reported by every other iframe. The keys also address each frame
         /// when overlay blocking is toggled.
@@ -377,6 +383,9 @@ struct WebView: UIViewRepresentable {
             self.rules = rules
             self.settings = settings
             super.init()
+            interruptions.start { [weak self] event in
+                MainActor.assumeIsolated { self?.handle(interruption: event) }
+            }
             // A second web view is the first thing to give up under pressure.
             // Only when nobody is waiting on it: then it is the transition.
             memoryWarning = NotificationCenter.default.addObserver(
@@ -393,6 +402,27 @@ struct WebView: UIViewRepresentable {
         private var memoryWarning: NSObjectProtocol?
         deinit {
             if let memoryWarning { NotificationCenter.default.removeObserver(memoryWarning) }
+        }
+
+        /// iOS pauses the audio for an interruption and tells nobody, so a
+        /// player that does not listen comes back claiming to play over
+        /// silence. Headphones leaving is the one route change with a rule:
+        /// always pause, because the alternative is the video suddenly playing
+        /// out loud in a quiet room.
+        private func handle(interruption event: AudioInterruptions.Event) {
+            guard page.isTheater else { return }
+            switch event {
+            case .began:
+                wasPlayingBeforeInterruption = page.isPlaying
+                if page.isPlaying { togglePlay() }
+            case .ended(let shouldResume):
+                guard shouldResume, wasPlayingBeforeInterruption, !page.isPlaying else { break }
+                wasPlayingBeforeInterruption = false
+                togglePlay()
+            case .outputDeviceLost:
+                wasPlayingBeforeInterruption = false
+                if page.isPlaying { togglePlay() }
+            }
         }
 
         func observe(_ webView: WKWebView) {
@@ -452,6 +482,10 @@ struct WebView: UIViewRepresentable {
             releaseHostPage()
             page.isTheater = false
             page.mediaVolumeAvailable = false
+            // Nothing is playing now, so give the session back: .playback
+            // interrupted whatever else was making sound, and only this ends
+            // the interruption.
+            MediaSession.deactivate()
         }
 
         /// Undoes `hostTheater()` in the main frame. Separate from
@@ -1503,6 +1537,9 @@ struct WebView: UIViewRepresentable {
                 }
             case .theaterEnded:
                 theaterFrame = nil
+                // Not during an episode handoff: the next player is moments
+                // away and bouncing the session would duck the audio twice.
+                if resumeTheaterFor == nil { MediaSession.deactivate() }
                 if resumeTheaterFor != nil {
                     Self.transitionLog.notice("Old player frame ended; preserving theater transition")
                     stopWatching()
