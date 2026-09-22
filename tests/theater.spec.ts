@@ -2688,3 +2688,57 @@ test.describe('subtitles a player paints itself', () => {
       document.querySelector('.jw-captions')!.hasAttribute('data-cp-caption'))).toBe(false);
   });
 });
+
+test.describe('one definition of same site', () => {
+  // The agent refused anything off `location.origin`; native accepted anything
+  // on the same registrable domain. A site serving its player from
+  // player.example.com and its episodes from www.example.com therefore got no
+  // episode discovery at all — while the very same URLs passed native's check
+  // when a navigation was attempted. Native has the Public Suffix List and is
+  // the authority; it tells the agent the site.
+
+  test('without a site from native, only the exact host is same-site',
+    async ({ page }) => {
+      await serve(page, PLAYER);
+      expect(await page.evaluate(() => __cp.sameSiteHost('example.test'))).toBe(true);
+      expect(await page.evaluate(() => __cp.sameSiteHost('www.example.test'))).toBe(false);
+      expect(await page.evaluate(() => __cp.sameSiteHost('evil.test'))).toBe(false);
+    });
+
+  test('a site from native admits its subdomains', async ({ page }) => {
+    await serve(page, PLAYER);
+    await page.evaluate(() => __cp.setSite('example.test'));
+    expect(await page.evaluate(() => __cp.sameSiteHost('www.example.test'))).toBe(true);
+    expect(await page.evaluate(() => __cp.sameSiteHost('player.example.test'))).toBe(true);
+    expect(await page.evaluate(() => __cp.sameSiteHost('example.test'))).toBe(true);
+  });
+
+  test('a lookalike host is not admitted by the suffix rule', async ({ page }) => {
+    await serve(page, PLAYER);
+    await page.evaluate(() => __cp.setSite('example.test'));
+    // Not `.endsWith('example.test')` — that would admit this.
+    expect(await page.evaluate(() => __cp.sameSiteHost('notexample.test'))).toBe(false);
+    expect(await page.evaluate(() => __cp.sameSiteHost('example.test.evil.com'))).toBe(false);
+  });
+
+  test('episode links on a sibling subdomain are found once the site is known',
+    async ({ page }) => {
+      await serve(page, `${HEAD}<video></video>
+        <a href="https://www.example.test/watch/ep-1">Episode 1</a>
+        <a href="https://www.example.test/watch/ep-2">Episode 2</a>`);
+      expect(await page.evaluate(() => __cp.episodeList().length)).toBe(0);
+
+      await page.evaluate(() => __cp.setSite('example.test'));
+      expect(await page.evaluate(() => __cp.episodeList().length)).toBe(2);
+    });
+
+  test('a cross-site link is still refused after the site is known',
+    async ({ page }) => {
+      await serve(page, `${HEAD}<video></video>
+        <a href="https://elsewhere.test/watch/ep-2">Episode 2</a>`);
+      await page.evaluate(() => __cp.setSite('example.test'));
+      expect(await page.evaluate(() => __cp.episodeList().length)).toBe(0);
+      expect(await page.evaluate(() =>
+        __cp.navigateEpisode('https://elsewhere.test/watch/ep-2'))).toBe(false);
+    });
+});

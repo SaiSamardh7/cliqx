@@ -922,7 +922,8 @@ struct WebView: UIViewRepresentable {
         /// it is offered, exactly like next/previous.
         func refreshEpisodeList() {
             guard let webView = page.webView else { return }
-            let js = "JSON.stringify(window.__cp ? window.__cp.episodeList() : [])"
+            let js = siteScript(for: webView)
+                + "JSON.stringify(window.__cp ? window.__cp.episodeList() : [])"
             webView.evaluateJavaScript(js, in: nil, in: BrowserSetup.world) { [weak self] result in
                 guard let self,
                       case .success(let value) = result,
@@ -932,12 +933,18 @@ struct WebView: UIViewRepresentable {
                         as? [[String: Any]]
                 else { return }
 
-                let host = webView.url?.host()
+                let here = webView.url
                 self.page.episodes = parsed.compactMap { entry in
                     guard let href = entry["href"] as? String,
                           let label = entry["label"] as? String,
                           let url = URL(string: href),
-                          url.host() == host          // page-supplied, re-checked
+                          // Page-supplied, re-checked — and checked the SAME
+                          // way everything else is. An exact host comparison
+                          // here meant a site serving its player from
+                          // player.example.com and its episodes from
+                          // www.example.com got an empty list, while the very
+                          // same URLs passed the check in goToEpisode.
+                          HostKey.isSameSite(url, as: here)
                     else { return nil }
                     return PageState.Episode(
                         id: href, label: Self.sanitizedForUI(label, limit: 60),
@@ -946,10 +953,24 @@ struct WebView: UIViewRepresentable {
             }
         }
 
+        /// The registrable domain, handed to the agent so it and native agree
+        /// on what "same site" means. The agent cannot work it out — that
+        /// needs the Public Suffix List — so it stays at hostname equality
+        /// until this arrives.
+        private func siteScript(for webView: WKWebView) -> String {
+            guard let host = webView.url?.host(),
+                  let domain = HostKey.registrableDomain(host),
+                  let encoded = try? JSONEncoder().encode(domain),
+                  let json = String(data: encoded, encoding: .utf8)
+            else { return "" }
+            return "window.__cp && window.__cp.setSite(\(json)); "
+        }
+
         /// Episode discovery always asks the MAIN frame — that is where the
         /// site's next/previous links live, not inside the player iframe.
         private func refreshEpisodes(_ webView: WKWebView) {
-            let js = "JSON.stringify(window.__cp ? window.__cp.findEpisodes() : {})"
+            let js = siteScript(for: webView)
+                + "JSON.stringify(window.__cp ? window.__cp.findEpisodes() : {})"
             webView.evaluateJavaScript(js, in: nil, in: BrowserSetup.world) { [weak self] result in
                 guard let self,
                       case .success(let value) = result,
@@ -957,10 +978,19 @@ struct WebView: UIViewRepresentable {
                       let data = json.data(using: .utf8),
                       let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
                 else { return }
-                self.page.nextEpisode = (parsed["next"] as? String).flatMap(URL.init(string:))
-                self.page.previousEpisode = (parsed["prev"] as? String).flatMap(URL.init(string:))
-                self.page.nextEpisodeIsEpisodic =
-                    ["rel", "list"].contains(parsed["nextSource"] as? String ?? "")
+                // Validated here, not merely where a navigation happens. These
+                // URLs are page-supplied and go straight into the chrome; the
+                // standby also loads whatever `nextEpisode` holds.
+                let here = webView.url
+                let sameSite = { (raw: String?) -> URL? in
+                    guard let url = raw.flatMap(URL.init(string:)),
+                          HostKey.isSameSite(url, as: here) else { return nil }
+                    return url
+                }
+                self.page.nextEpisode = sameSite(parsed["next"] as? String)
+                self.page.previousEpisode = sameSite(parsed["prev"] as? String)
+                self.page.nextEpisodeIsEpisodic = self.page.nextEpisode != nil
+                    && ["rel", "list"].contains(parsed["nextSource"] as? String ?? "")
             }
         }
 

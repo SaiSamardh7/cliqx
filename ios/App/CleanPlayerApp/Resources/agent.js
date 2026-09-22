@@ -1209,6 +1209,35 @@ html[data-cp-unlock], html[data-cp-unlock] body {
             el.textContent || '').replace(/\s+/g, ' ').trim();
   }
 
+  /// The registrable domain of the page, as native computed it.
+  ///
+  /// The agent cannot work this out for itself: it needs the Public Suffix
+  /// List to know that `bbc.co.uk` is a site and `co.uk` is not, and that list
+  /// is 200KB. Native has it, so native says. Null until it does.
+  let siteDomain = null;
+  function setSite(domain) {
+    siteDomain = (typeof domain === 'string' && domain) ? domain.toLowerCase() : null;
+  }
+
+  /// Whether a hostname belongs to the page's site.
+  ///
+  /// Exact origin was the old rule, and it is wrong for the shape these sites
+  /// actually take: the player on `player.example.com`, the episode list on
+  /// `www.example.com`. Those got no episode discovery at all, while the very
+  /// same URLs passed native's check when a navigation was attempted — two
+  /// definitions of "same site" in one feature.
+  ///
+  /// Without a site from native this stays at hostname equality rather than
+  /// guessing: a suffix rule invented here would call `evil.co.uk` and
+  /// `bank.co.uk` the same site. Native re-validates everything this produces
+  /// against the real list, so being conservative costs a fallback, not safety.
+  function sameSiteHost(hostname) {
+    const host = hostname.toLowerCase();
+    if (host === location.hostname.toLowerCase()) return true;
+    if (!siteDomain) return false;
+    return host === siteDomain || host.endsWith('.' + siteDomain);
+  }
+
   /// Resolves a link and refuses anything off-site. Keeps a link to the
   /// current page, which the episode list needs: that entry is the one it
   /// marks, and the one the neighbours are measured from.
@@ -1218,7 +1247,7 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     let url;
     try { url = new URL(href, location.href); } catch (_) { return null; }
     if (url.protocol !== 'https:' && url.protocol !== 'http:') return null;
-    if (url.origin !== location.origin) return null;      // never leave the site
+    if (!sameSiteHost(url.hostname)) return null;         // never leave the site
     return url.href;
   }
 
@@ -1243,7 +1272,7 @@ html[data-cp-unlock], html[data-cp-unlock] body {
   function navigateEpisode(href) {
     let wanted;
     try { wanted = new URL(href, location.href); } catch (_) { return false; }
-    if (wanted.origin !== location.origin) return false;
+    if (!sameSiteHost(wanted.hostname)) return false;
     const key = pageKey(wanted.href);
     if (key === pageKey(location.href)) return false;
 
@@ -2153,7 +2182,7 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     togglePlay, seek, skip, beginScrub, setRate, setVolume, setMuted,
     armEpisodeTransition,
     textTracks, selectTextTrack, setObjectFit, selectSource, togglePiP,
-    findEpisodes, episodeList, navigateEpisode,
+    findEpisodes, episodeList, navigateEpisode, setSite, sameSiteHost,
     largestVideo, allVideos, resumeCandidate, scan,
     checkStaged,
     showAirPlay, nativeFullscreen, untrackAirPlay, isManifestURL,

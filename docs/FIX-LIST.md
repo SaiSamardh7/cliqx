@@ -20,8 +20,9 @@ row when it lands so the file stays a to-do list, not a history.
 policy URL and a contact address — yours to supply, not mine to invent. The S2
 audio group (01, 02, 03, 05, 06) has landed; S2-04 is folded into S2-02, since
 the volume control no longer touches system volume at all. The episode group
-(07, 08, 10, 11, 12, 13) has landed too. S2-09 is still open: the agent and
-native still disagree about what "same site" means.
+(07-13) has landed, S2-09 included: native is now the single authority on what
+"same site" means and hands the agent the registrable domain. Next is the
+browser group (S2-14 onwards).
 
 ---
 
@@ -154,7 +155,7 @@ native still disagree about what "same site" means.
   distinct pages. [AddressResolver.swift:119](../ios/Sources/CleanPlayer/AddressResolver.swift:119).
   *Do:* strip `t`/`start`/`time_continue` only when the value looks like seconds
   (`^\d+s?$|^\d+m\d+s$`); never strip `ref`/`si`. Add the false-positive test.
-- [ ] **S2-09 `sameOriginURL` uses exact origin; native uses registrable site.**
+- [x] **S2-09 `sameOriginURL` uses exact origin; native uses registrable site.**
   [agent.js:1079](../ios/App/CleanPlayerApp/Resources/agent.js:1079),
   [WebView.swift:747](../ios/App/CleanPlayerApp/WebView.swift:747).
   *Do:* one definition. Native re-validation with `HostKey.isSameSite`; agent
