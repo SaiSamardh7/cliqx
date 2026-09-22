@@ -490,6 +490,20 @@ struct HomeView: View {
                 Label(model.isPinned(site) ? "Unpin" : "Pin",
                       systemImage: model.isPinned(site) ? "pin.slash" : "pin")
             }
+            // Only for a pinned site, and off by default: this gives the
+            // site's session cookies an expiry the server did not set, so it
+            // has to be something the user asked for rather than something
+            // pinning did to them.
+            if model.isPinned(site) {
+                Button {
+                    model.setStaySignedIn(!model.keepsSignIn(site.host), for: site)
+                } label: {
+                    Label(model.keepsSignIn(site.host)
+                            ? "Don't stay signed in" : "Stay signed in",
+                          systemImage: model.keepsSignIn(site.host)
+                            ? "person.badge.minus" : "person.badge.key")
+                }
+            }
             Button {
                 UIPasteboard.general.string = site.url.absoluteString
             } label: {

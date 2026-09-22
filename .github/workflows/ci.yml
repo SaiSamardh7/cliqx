@@ -129,3 +129,8 @@ jobs:
 
       # The README claimed 66 Swift and 198 agent tests long after both moved.
       - run: python3 tools/count-tests.py --check
+
+      # PRIVACY.md says no server is contacted for filter rules. True only
+      # while FilterListUpdater has no caller, which is the kind of fact that
+      # rots silently.
+      - run: python3 tools/check-no-network-rules.py

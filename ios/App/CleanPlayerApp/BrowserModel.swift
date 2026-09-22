@@ -15,6 +15,14 @@ struct Site: Codable, Hashable, Identifiable {
     /// array position, so replaying something old moves it to the front no
     /// matter what pinning or removal did to the list.
     var lastPlayed: Date?
+    /// Keep this site's login across launches, by giving its session cookies
+    /// an expiry the server did not.
+    ///
+    /// Off unless the user asks. A session cookie is short-lived because the
+    /// server said so; overriding that silently means a stolen unlocked phone
+    /// holds a month of logins the server believed had ended. Optional so
+    /// existing payloads migrate; nil reads as off.
+    var staySignedIn: Bool?
     /// Visible grouping metadata. Optional so the existing recents.v1 payload
     /// migrates without a decoding break.
     var seriesKey: String?
@@ -242,6 +250,22 @@ final class BrowserModel: ObservableObject {
     func isPinnedHost(_ host: String) -> Bool {
         guard let wanted = HostKey.canonical(host) else { return false }
         return pinned.contains { $0.url.host().flatMap(HostKey.canonical) == wanted }
+    }
+
+    /// Pinned AND asked to stay signed in. Only these sites have their session
+    /// cookies given an expiry.
+    func keepsSignIn(_ host: String) -> Bool {
+        guard let wanted = HostKey.canonical(host) else { return false }
+        return pinned.contains {
+            $0.staySignedIn == true
+                && $0.url.host().flatMap(HostKey.canonical) == wanted
+        }
+    }
+
+    func setStaySignedIn(_ on: Bool, for site: Site) {
+        guard let index = pinned.firstIndex(where: { $0.url == site.url }) else { return }
+        pinned[index].staySignedIn = on
+        persistPinned()
     }
 
     /// Pinned, or on the local network: where a saved password may live in

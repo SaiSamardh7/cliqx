@@ -39,6 +39,12 @@ requests the filter lists block.
 The blocking rules are bundled with the app and update when the app updates.
 The app does not contact any server to fetch them.
 
+The code that *would* download rule updates is present in the app but is not
+wired to anything, because the format it fetches is not the format the app
+reads. A check in CI fails the build if that ever changes without this policy
+changing with it. If rule updating is switched on in a future version, this
+section will say so before it ships.
+
 ## Private browsing
 
 With private browsing on, cookies, cache and site storage are held in memory

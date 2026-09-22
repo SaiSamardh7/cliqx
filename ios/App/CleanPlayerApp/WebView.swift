@@ -82,8 +82,26 @@ final class PageState: ObservableObject {
     @Published var previousEpisode: URL?
     @Published var overlayBlocking = true
     @Published var blockedCount = 0
-    /// Popups stopped in either the page or native navigation layer.
+    /// Popups stopped in the native navigation layer: a cross-site window, a
+    /// cancelled redirect. Native witnessed each of these itself, so the
+    /// number is trustworthy.
     @Published var popupsBlocked = 0
+    /// Popups the page-world guard says it stopped.
+    ///
+    /// Advisory, and it cannot be made otherwise: `popupguard.js` has to run in
+    /// the page's own world to replace `window.open`, so any channel it uses to
+    /// report is a channel the page can use too. Native validates the message
+    /// and counts increments rather than accepting a total — a page can no
+    /// longer set the badge to -40 or 9,999,999 — but it can still claim
+    /// blocks that did not happen, so the claim is capped per document and
+    /// kept apart from the number native is sure of.
+    @Published var pageReportedPopups = 0
+    /// Highest number of page-claimed blocks one document may contribute.
+    static let pageReportedPopupCap = 100
+
+    /// What the shield badge shows: elements hidden, plus popups from both
+    /// sources. The page's share is bounded; see `pageReportedPopups`.
+    var blockedTotal: Int { blockedCount + popupsBlocked + pageReportedPopups }
     /// A cross-origin window the page tried to open. Held rather than followed,
     /// so the user decides whether to leave the page they are watching.
     @Published var blockedExternal: URLRequest?
@@ -1078,13 +1096,15 @@ struct WebView: UIViewRepresentable {
 
         /// WKWebView drops session cookies (no expiry) when the app quits, so a
         /// media server that keeps its login in one — Synology, Nextcloud, a
-        /// NAS's web UI — asks for it again every launch. On servers the user
-        /// has PINNED, the cookie is re-set with an expiry so the login
-        /// survives. Pinned, not merely local: a session cookie is short-lived
-        /// because the server said so, and overriding that for every device on
-        /// the Wi-Fi is not the user's decision to make by accident. Nothing
-        /// changes for any other site, and private browsing never registers
-        /// this observer.
+        /// NAS's web UI — asks for it again every launch.
+        ///
+        /// Cliqx will override that, but only where the user asked: a pinned
+        /// site with "Stay signed in" switched on. Pinning alone was not
+        /// enough. A session cookie is short-lived because the SERVER said so,
+        /// and quietly giving a month's expiry to every auth and CSRF cookie
+        /// on a pinned host means a stolen unlocked phone holds logins the
+        /// server believed had ended. Nothing changes for any other site, and
+        /// private browsing never registers this observer.
         ///
         /// ponytail: every cookie change re-reads the whole jar. Fine at this
         /// scale; index by domain if a site ever churns cookies fast enough to
@@ -1094,7 +1114,7 @@ struct WebView: UIViewRepresentable {
                 let cookies = await store.allCookies()
                 for cookie in cookies where cookie.isSessionOnly {
                     let domain = cookie.domain.hasPrefix(".") ? String(cookie.domain.dropFirst()) : cookie.domain
-                    guard model.isPinnedHost(domain),
+                    guard model.keepsSignIn(domain),
                           var properties = cookie.properties else { continue }
                     properties[.expires] = Date(timeIntervalSinceNow: 30 * 24 * 3600)
                     properties.removeValue(forKey: .discard)
@@ -1148,6 +1168,7 @@ struct WebView: UIViewRepresentable {
             clearFrameCapabilities()
             page.blockedCount = 0
             page.popupsBlocked = 0
+            page.pageReportedPopups = 0
             page.blockedExternal = nil
             page.isTheater = false
             page.mediaVolumeAvailable = false
@@ -1510,7 +1531,8 @@ struct WebView: UIViewRepresentable {
                 blockedByFrame.update(frameID: frameID, count: count)
                 page.blockedCount = blockedByFrame.total
             case .popupBlocked:
-                page.popupsBlocked += 1
+                page.pageReportedPopups = min(page.pageReportedPopups + 1,
+                                              PageState.pageReportedPopupCap)
             case .playback(let playing, let buffering, let armed):
                 page.isPlaying = playing
                 page.isBuffering = buffering

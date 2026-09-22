@@ -282,8 +282,8 @@ struct BrowserView: View {
                       ? "shield.lefthalf.filled" : "shield.slash")
                     .frame(width: 44, height: 44)
                     .overlay(alignment: .topTrailing) {
-                        if page.overlayBlocking && page.blockedCount + page.popupsBlocked > 0 {
-                            Text("\(page.blockedCount + page.popupsBlocked)")
+                        if page.overlayBlocking && page.blockedTotal > 0 {
+                            Text("\(page.blockedTotal)")
                                 .accessibilityHidden(true)
                                 .font(.system(size: 10, weight: .bold))
                                 .foregroundStyle(.white)
@@ -298,7 +298,7 @@ struct BrowserView: View {
             // uncountable; this badge is only what the page agent hid.
             .accessibilityLabel(page.overlayBlocking
                                 ? "Overlay blocking on, "
-                                  + "\(page.blockedCount + page.popupsBlocked) "
+                                  + "\(page.blockedTotal) "
                                   + "overlays and popups hidden"
                                 : "Overlay blocking off")
             Spacer()

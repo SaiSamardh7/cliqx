@@ -16,10 +16,9 @@ release checklist. Every ❌ and ⚠️ from that audit is here, ordered by seve
 Tick the box, keep the ID in the commit message (`S1-04: …`), and delete the
 row when it lands so the file stays a to-do list, not a history.
 
-**Status, 22 September 2026.** 15 of 19 S1 items are done. The four left are
-S1-02 (session-cookie override), S1-04 (page-controlled popup count), S1-09
-(the updater's dead code vs the privacy claim) and S1-12 (privacy URL and
-contact address — yours to supply, not mine to invent).
+**Status, 22 September 2026.** S1 is done except S1-12, which is a privacy
+policy URL and a contact address — yours to supply, not mine to invent. S2 is
+next.
 
 ---
 
@@ -34,7 +33,7 @@ contact address — yours to supply, not mine to invent).
   [WebView.swift:1053](../ios/App/CleanPlayerApp/WebView.swift:1053).
   *Do:* `isOwnHost` = pinned only. *Done when:* package test asserts an
   unpinned `192.168.1.1` challenge gets `.forSession`.
-- [ ] **S1-02 Session cookies made persistent for pinned hosts.** Server said
+- [x] **S1-02 Session cookies made persistent for pinned hosts.** Server said
   "die on close"; app rewrites with 30-day expiry, including auth/CSRF cookies.
   [WebView.swift:1081](../ios/App/CleanPlayerApp/WebView.swift:1081).
   *Do:* opt-in "Stay signed in" toggle per pinned site; skip cookies with
@@ -43,7 +42,7 @@ contact address — yours to supply, not mine to invent).
 - [x] **S1-03 "Is this Jellyfin?" passes when `ProductName` is nil**, then POSTs
   the password. [Jellyfin.swift:176](../ios/App/CleanPlayerApp/Jellyfin.swift:176).
   *Do:* `?? false`, and require `Id` + `Version` present.
-- [ ] **S1-04 Page controls a number in native UI.** `window.__cpPopupsBlocked`
+- [x] **S1-04 Page controls a number in native UI.** `window.__cpPopupsBlocked`
   is page-writable and displayed. [WebView.swift:1293](../ios/App/CleanPlayerApp/WebView.swift:1293).
   *Do:* count only native-held popups, or move the counter to the isolated world
   and have the page-world guard report via a nonce'd `postMessage`. Clamp ≥ 0.
@@ -69,7 +68,7 @@ contact address — yours to supply, not mine to invent).
   [NOTICE.md](../NOTICE.md), [docs/APP-STORE.md](APP-STORE.md).
   *Do:* NOTICE entry (LGPL-2.1+, relink obligation, source URL, pinned version);
   reword "no third-party SDKs" → "no analytics or tracking SDKs; VLCKit for playback".
-- [ ] **S1-09 Privacy policy says rules are never fetched; the binary links a
+- [x] **S1-09 Privacy policy says rules are never fetched; the binary links a
   downloader.** [PRIVACY.md:41](../PRIVACY.md:41), [FilterListUpdater.swift](../ios/Sources/CleanPlayer/FilterListUpdater.swift).
   *Do:* either wire it (see S2-30) and update the policy, or delete the updater
   and its tests. Not both.
