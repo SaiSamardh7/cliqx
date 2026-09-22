@@ -189,9 +189,11 @@ struct PlayerOverlay: View {
                     let brightness = min(max(dragStartBrightness + change, 0), 1)
                     UIScreen.main.brightness = brightness
                     gestureBrightnessPercent = Int((brightness * 100).rounded())
-                    gestureVolumePercent = page.volumePercent
+                    gestureVolumePercent = page.mediaVolumeAvailable
+                        ? page.volumePercent : nil
                 case .volume:
-                    guard gestureSettings.brightnessAndVolume else { return }
+                    guard gestureSettings.brightnessAndVolume,
+                          page.mediaVolumeAvailable else { return }
                     let change = Int((-value.translation.height
                                       / max(size.height, 1) * 200).rounded())
                     let volume = min(max(dragStartVolume + change, 0), 200)
@@ -674,6 +676,10 @@ struct PlayerOverlay: View {
                       systemImage: page.volumePercent > 100
                         ? "speaker.wave.3.fill" : "speaker.wave.2.fill")
             }
+            .disabled(!page.mediaVolumeAvailable)
+            .accessibilityHint(page.mediaVolumeAvailable
+                ? "Controls this video's audio level"
+                : "Unavailable for this stream; use the hardware volume buttons")
             Divider()
             Button {
                 page.actions.setObjectFit(page.objectFit == "cover" ? "contain" : "cover")

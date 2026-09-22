@@ -70,10 +70,43 @@ html[data-cp-unlock], html[data-cp-unlock] body {
   let staged = null;                  // the video currently in theater
   let hosted = null;                  // the player frame this page is staging
   let airplayAvailable = false;
+  // `crypto.randomUUID` is secure-context only, and a home server on the LAN
+  // is plain http — where it is undefined and a bare call throws out of this
+  // whole IIFE, taking window.__cp with it. `getRandomValues` has no such
+  // restriction; the shape has to stay a UUID because native parses it as one.
+  const FRAME_ID = (() => {
+    if (typeof crypto?.randomUUID === 'function') return crypto.randomUUID();
+    const bytes = crypto.getRandomValues(new Uint8Array(16));
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;      // version 4
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;      // variant 1
+    const hex = [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('');
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}`
+         + `-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  })();
+
+  function frameMetrics() {
+    const width = Math.max(0, Math.round(window.innerWidth));
+    const height = Math.max(0, Math.round(window.innerHeight));
+    return {
+      width,
+      height,
+      visible: document.visibilityState !== 'hidden' && width > 0 && height > 0,
+    };
+  }
 
   function post(payload) {
-    try { window.webkit?.messageHandlers?.cp?.postMessage(payload); } catch (_) {}
+    try {
+      window.webkit?.messageHandlers?.cp?.postMessage(
+        { ...payload, v: 1, fid: FRAME_ID });
+    } catch (_) {}
   }
+
+  // popupguard has to patch the page world, where the named bridge is not
+  // visible. A DOM event crosses content worlds without leaving a readable
+  // counter or string-named property behind on `window`.
+  document.addEventListener('cliqx:popup-blocked', () => {
+    post({ type: 'popupBlocked' });
+  });
 
   /// Shadow DOM encapsulates styles, so a stylesheet in the document does not
   /// reach a button appended inside a shadow root. Each root that holds a
@@ -384,8 +417,9 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     return true;
   }
 
-  // iOS ignores writes to HTMLMediaElement.volume. Route every requested level
-  // through Web Audio when the stream is CORS-safe, not only the boosted range.
+  // iOS exposes device output volume as read-only and ignores writes to
+  // HTMLMediaElement.volume. Route the in-app media control through Web Audio
+  // when the stream is CORS-safe; hardware buttons continue to own the device.
   // Creating the graph while entering theater is important: watchClean runs in
   // the site's real click, while a later native evaluateJavaScript call has no
   // WebKit user activation and may leave AudioContext permanently suspended.
@@ -422,28 +456,23 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     const wanted = Math.min(Math.max(Math.round(Number(percent) || 0), 0), 200);
     const chain = prepareVolume(staged);
     if (!chain) {
-      // Native owns 0...100 through MPVolumeView. Cross-origin streams without
-      // CORS cannot be routed through Web Audio, so boost honestly caps at 100.
-      if (wanted <= 100) {
-        post({ type: 'volume', percent: wanted, boosted: false });
-        return true;
-      }
-      post({ type: 'volume', percent: 100, boosted: false });
+      // Cross-origin streams without CORS cannot be routed through Web Audio.
+      // Say so instead of moving a control that has no effect.
+      post({ type: 'volume', percent: 100, boosted: false, available: false });
       return false;
     }
     staged.volume = 1;
-    // Native already attenuates 0...100. Applying that level here too would
-    // turn 50% into 25%, so Web Audio is boost-only.
-    chain.gain.gain.value = Math.max(wanted / 100, 1);
+    chain.gain.gain.value = wanted / 100;
     Promise.resolve(chain.context.resume()).then(() => {
       if (chain.context.state && chain.context.state !== 'running') {
-        post({ type: 'volume', percent: Math.min(wanted, 100), boosted: false });
+        chain.gain.gain.value = 1;
+        post({ type: 'volume', percent: 100, boosted: false, available: false });
         return;
       }
-      post({ type: 'volume', percent: wanted, boosted: wanted > 100 });
+      post({ type: 'volume', percent: wanted, boosted: wanted > 100, available: true });
     }).catch(() => {
       chain.gain.gain.value = 1;
-      post({ type: 'volume', percent: Math.min(wanted, 100), boosted: false });
+      post({ type: 'volume', percent: 100, boosted: false, available: false });
     });
     return true;
   }
@@ -685,7 +714,7 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     video.addEventListener('durationchange', reportTime);
     video.addEventListener('progress', onTimeUpdate);
 
-    post({ type: 'theater', airplay: airplayAvailable, pip: canPiP() });
+    post({ type: 'theater', airplay: airplayAvailable, pip: canPiP(), ...frameMetrics() });
     reportPlayback();
     reportTime();
     reportTracks();
@@ -1896,8 +1925,18 @@ html[data-cp-unlock], html[data-cp-unlock] body {
   function announce() {
     if (announced) return;
     announced = true;
-    post({ type: 'ready' });
+    post({ type: 'ready', ...frameMetrics() });
   }
+
+  // A subframe navigation has no frame-specific WKNavigationDelegate callback.
+  // Tell native while this document still owns its fid so per-frame state can
+  // be removed. A page restored from the back-forward cache announces again.
+  addEventListener('pagehide', () => post({ type: 'frameGone' }));
+  addEventListener('pageshow', (event) => {
+    if (!event.persisted) return;
+    announced = false;
+    announce();
+  });
 
   domObserver = new MutationObserver((records) => {
     let structural = false;

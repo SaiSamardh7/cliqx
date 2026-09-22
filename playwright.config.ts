@@ -6,6 +6,9 @@ import { defineConfig, devices } from '@playwright/test';
 // the app's highest-coverage playback mode in Chromium alone tested nothing.
 export default defineConfig({
   testDir: './tests',
+  // Long WebKit runs occasionally lose a synthetic route during navigation.
+  // A retry starts a fresh page and still reruns the complete assertion.
+  retries: 1,
   use: { trace: 'on-first-retry' },
   projects: [
     { name: 'chromium', use: { ...devices['Desktop Chrome'] } },

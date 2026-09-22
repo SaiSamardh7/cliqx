@@ -147,7 +147,8 @@ test.describe('theater mode', () => {
       expect.objectContaining({ type: 'theater' }));
 
     await page.evaluate(() => __cp.exitTheater());
-    expect(await posted(page)).toContainEqual({ type: 'theaterEnded' });
+    expect(await posted(page)).toContainEqual(
+      expect.objectContaining({ v: 1, type: 'theaterEnded' }));
   });
 
   // WebKit draws a full second set of controls inside a viewport-sized <video>
@@ -489,7 +490,8 @@ test.describe('AirPlay source for MSE', () => {
       });
 
       const report = (await posted(page)).filter((m: any) => m.type === 'airplay').pop();
-      expect(report).toEqual({ type: 'airplay', available: true, source: 'mse' });
+      expect(report).toEqual(expect.objectContaining(
+        { v: 1, type: 'airplay', available: true, source: 'mse' }));
     });
 
   // Ranking, not guessing. A manifest with segments behind it was fetched from
@@ -632,7 +634,8 @@ test.describe('playback control', () => {
 
       await page.evaluate(() => document.querySelector('video')!.dispatchEvent(new Event('play')));
       expect(await posted(page)).toContainEqual(
-        { type: 'playback', playing: true, buffering: true });
+        expect.objectContaining(
+          { v: 1, type: 'playback', playing: true, buffering: true }));
     });
 
   test('togglePlay drives the staged video both ways', async ({ page }) => {
@@ -662,7 +665,7 @@ test.describe('playback control', () => {
     expect(await page.evaluate(() => __cp.togglePlay())).toBe(false);
   });
 
-  test('volume up to 100 percent is acknowledged for native hardware control', async ({ page }) => {
+  test('disables media volume when a cross-origin stream cannot use Web Audio', async ({ page }) => {
     await serve(page, PLAYER);
     await page.evaluate(() => {
       const video = document.querySelector('video')!;
@@ -671,9 +674,9 @@ test.describe('playback control', () => {
       video.src = 'https://media.example/episode.mp4';
       __cp.enterTheater(video);
     });
-    expect(await page.evaluate(() => __cp.setVolume(50))).toBe(true);
-    expect(await posted(page)).toContainEqual(
-      { type: 'volume', percent: 50, boosted: false });
+    expect(await page.evaluate(() => __cp.setVolume(50))).toBe(false);
+    expect(await posted(page)).toContainEqual(expect.objectContaining(
+      { v: 1, type: 'volume', percent: 100, boosted: false, available: false }));
   });
 
   test('all website volume levels use the primed gain node and cap at 200 percent', async ({ page }) => {
@@ -694,14 +697,14 @@ test.describe('playback control', () => {
     });
 
     expect(await page.evaluate(() => __cp.setVolume(50))).toBe(true);
-    expect(await page.evaluate(() => (window as any).__gain.gain.value)).toBe(1);
-    expect(await posted(page)).toContainEqual(
-      { type: 'volume', percent: 50, boosted: false });
+    expect(await page.evaluate(() => (window as any).__gain.gain.value)).toBe(0.5);
+    expect(await posted(page)).toContainEqual(expect.objectContaining(
+      { v: 1, type: 'volume', percent: 50, boosted: false, available: true }));
 
     expect(await page.evaluate(() => __cp.setVolume(250))).toBe(true);
     expect(await page.evaluate(() => (window as any).__gain.gain.value)).toBe(2);
-    expect(await posted(page)).toContainEqual(
-      { type: 'volume', percent: 200, boosted: true });
+    expect(await posted(page)).toContainEqual(expect.objectContaining(
+      { v: 1, type: 'volume', percent: 200, boosted: true, available: true }));
   });
 
   test('does not claim boost when WebKit rejects audio activation', async ({ page }) => {
@@ -722,8 +725,8 @@ test.describe('playback control', () => {
     });
 
     expect(await page.evaluate(() => __cp.setVolume(175))).toBe(true);
-    await expect.poll(() => posted(page)).toContainEqual(
-      { type: 'volume', percent: 100, boosted: false });
+    await expect.poll(() => posted(page)).toContainEqual(expect.objectContaining(
+      { v: 1, type: 'volume', percent: 100, boosted: false, available: false }));
     expect(await page.evaluate(() => (window as any).__gain.gain.value)).toBe(1);
   });
 });
@@ -738,6 +741,57 @@ test.describe('frame announcement', () => {
     await serve(page, PLAYER);
     const ready = (await posted(page)).filter((m: any) => m.type === 'ready');
     expect(ready).toHaveLength(1);
+    expect(ready[0]).toEqual(expect.objectContaining({
+      v: 1,
+      fid: expect.stringMatching(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i),
+      width: expect.any(Number),
+      height: expect.any(Number),
+      visible: true,
+    }));
+  });
+
+  test('uses one stable identity per frame', async ({ page }) => {
+    await serve(page, PLAYER);
+    const mainMessages = await posted(page);
+    const mainID = mainMessages[0].fid;
+    expect(mainMessages.every((message: any) => message.fid === mainID)).toBe(true);
+
+    await page.evaluate(() => {
+      const iframe = document.createElement('iframe');
+      iframe.name = 'identity-fixture';
+      iframe.srcdoc = '<!doctype html><video></video>';
+      document.body.appendChild(iframe);
+    });
+    const iframe = await page.waitForSelector('iframe[name="identity-fixture"]');
+    const child = await iframe.contentFrame();
+    if (!child) throw new Error('identity fixture frame did not attach');
+    await child.evaluate(() => {
+      (window as any).__posted = [];
+      (window as any).webkit = {
+        messageHandlers: { cp: { postMessage: (message: any) =>
+          (window as any).__posted.push(message) } },
+      };
+    });
+    await child.addScriptTag({ content: AGENT });
+    const childMessages = await child.evaluate(() => (window as any).__posted);
+    const childID = childMessages[0].fid;
+
+    expect(childMessages.every((message: any) => message.fid === childID)).toBe(true);
+    expect(childID).not.toBe(mainID);
+  });
+
+  test('retires its identity when the document leaves the frame', async ({ page }) => {
+    await serve(page, PLAYER);
+    const frameID = (await posted(page))[0].fid;
+
+    await page.evaluate(() => dispatchEvent(new Event('pagehide')));
+
+    expect(await posted(page)).toContainEqual(expect.objectContaining({
+      v: 1,
+      fid: frameID,
+      type: 'frameGone',
+    }));
   });
 
   test('autoTheater stages the video in the frame it runs in', async ({ page }) => {
@@ -782,7 +836,8 @@ test.describe('resuming theater after an episode change', () => {
       // Once the source changed, the frame is no longer the outgoing one.
       await page.evaluate(() => document.querySelector('video')!.dispatchEvent(new Event('play')));
       expect((await posted(page)).filter((m: any) => m.type === 'playback').slice(-1)[0])
-        .toEqual({ type: 'playback', playing: false, buffering: false });
+        .toEqual(expect.objectContaining(
+          { v: 1, type: 'playback', playing: false, buffering: false }));
     });
 
   test('waits for a video inserted by a delayed AJAX player lifecycle',
@@ -1312,6 +1367,51 @@ test.describe('episode neighbours', () => {
     const list = await page.evaluate(() => __cp.episodeList());
     expect(list.filter((e: any) => e.current).map((e: any) => e.number)).toEqual([3]);
     expect(await page.evaluate(() => __cp.findEpisodes().next)).toBe(`${SHOW}/ep-4`);
+  });
+});
+
+test.describe('popup guard fingerprint', () => {
+  test('leaves no string-named __cp property in the page world', async ({ page }) => {
+    await page.setContent(PLAYER);
+    await page.addScriptTag({ content: POPUPGUARD });
+
+    expect(await page.evaluate(() =>
+      Object.getOwnPropertyNames(window).filter((name) => name.startsWith('__cp'))))
+      .toEqual([]);
+  });
+
+  test('reports blocked popups through the versioned bridge', async ({ page }) => {
+    await serve(page, PLAYER);
+    await page.addScriptTag({ content: POPUPGUARD });
+
+    await page.evaluate(() => window.open('https://advertisement.test'));
+
+    expect(await posted(page)).toContainEqual(expect.objectContaining({
+      v: 1,
+      fid: expect.any(String),
+      type: 'popupBlocked',
+    }));
+    expect(await page.evaluate(() =>
+      Object.prototype.hasOwnProperty.call(window, '__cpPopupsBlocked'))).toBe(false);
+  });
+
+  test('does not stack wrappers when injected twice', async ({ page }) => {
+    await serve(page, PLAYER);
+    await page.addScriptTag({ content: POPUPGUARD });
+    await page.addScriptTag({ content: POPUPGUARD });
+
+    await page.evaluate(() => window.open('https://advertisement.test'));
+
+    expect((await posted(page)).filter((message: any) => message.type === 'popupBlocked'))
+      .toHaveLength(1);
+  });
+
+  test('makes the wrapped window.open resemble the native function', async ({ page }) => {
+    await page.setContent(PLAYER);
+    await page.addScriptTag({ content: POPUPGUARD });
+
+    expect(await page.evaluate(() => window.open.toString()))
+      .toBe('function open() { [native code] }');
   });
 });
 

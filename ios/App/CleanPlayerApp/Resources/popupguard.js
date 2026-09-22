@@ -7,11 +7,14 @@
 // file-level copyleft and would attach to any file copied in).
 (() => {
   'use strict';
-  if (window.__cpPopupGuard) return;
-  window.__cpPopupGuard = true;
-  window.__cpPopupsBlocked = 0;
+  const installedKey = Symbol.for('cliqx.popupguard.installed');
+  if (window.open && window.open[installedKey]) return;
 
   const nativeOpen = window.open;
+
+  function reportBlocked() {
+    document.dispatchEvent(new Event('cliqx:popup-blocked'));
+  }
 
   /// A popunder fires from a handler bound to the whole document, so "a click
   /// happened recently" is not enough to tell it from a real link. The thing
@@ -37,13 +40,18 @@
     };
   }
 
-  window.open = function (url, name, features) {
+  const guardedOpen = function (url, name, features) {
     if (!fromRealLink()) {
-      window.__cpPopupsBlocked++;
+      reportBlocked();
       return stubWindow();
     }
     return nativeOpen.call(window, url, name, features);
   };
+  Object.defineProperty(guardedOpen, installedKey, { value: true });
+  Object.defineProperty(guardedOpen, 'toString', {
+    value: () => 'function open() { [native code] }',
+  });
+  window.open = guardedOpen;
 
   // While theater is showing, the page must not be able to take the screen.
   //
@@ -83,7 +91,7 @@
   HTMLElement.prototype.click = function () {
     if (this instanceof HTMLAnchorElement &&
         this.target === '_blank' && !this.isConnected) {
-      window.__cpPopupsBlocked++;
+      reportBlocked();
       return;
     }
     return nativeClick.call(this);

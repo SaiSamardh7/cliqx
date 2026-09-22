@@ -87,6 +87,12 @@ final class AddressResolverTests: XCTestCase {
         XCTAssertEqual(resolve("8.8.8.8")?.scheme, "https")
         XCTAssertEqual(resolve("172.32.0.1")?.scheme, "https")
         XCTAssertEqual(resolve("193.168.1.1")?.scheme, "https")
+        XCTAssertEqual(resolve("169.254.20.30")?.scheme, "https")
+    }
+
+    func testLinkLocalAddressIsNotTreatedAsTrustedLocalHost() {
+        XCTAssertFalse(AddressResolver.isLocalHost("169.254.20.30"))
+        XCTAssertTrue(AddressResolver.isLocalHost("192.168.20.30"))
     }
 
     /// An explicit scheme is always obeyed, local or not.

@@ -56,15 +56,17 @@ public enum AddressResolver {
         return beforePath.split(separator: ":").first.map(String.init) ?? beforePath
     }
 
-    /// Private, link-local and `.local` hosts — the ones behind the router,
-    /// where a trusted certificate is the exception rather than the rule.
+    /// Private and `.local` hosts — the ones controlled by the user, where a
+    /// trusted certificate is the exception rather than the rule. Link-local
+    /// addresses are deliberately excluded because peers can claim them on a
+    /// shared network.
     public static func isLocalHost(_ host: String) -> Bool {
         let name = host.lowercased()
         if name == "localhost" || name.hasSuffix(".local") { return true }
         let parts = name.split(separator: ".").compactMap { Int($0) }
         guard parts.count == 4, parts.allSatisfy({ (0...255).contains($0) }) else { return false }
         switch (parts[0], parts[1]) {
-        case (10, _), (192, 168), (169, 254), (127, _): return true
+        case (10, _), (192, 168), (127, _): return true
         case (172, 16...31): return true
         default: return false
         }
