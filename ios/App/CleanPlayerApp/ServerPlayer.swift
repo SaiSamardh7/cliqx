@@ -133,10 +133,14 @@ final class ServerEngine: NSObject, ObservableObject, @preconcurrency VLCMediaPl
         guard let index = siblings.firstIndex(where: { $0.id == item.id }) else {
             page.nextEpisode = nil
             page.previousEpisode = nil
+            page.nextEpisodeIsEpisodic = false
             return
         }
         page.previousEpisode = index > 0 ? Self.key(siblings[index - 1]) : nil
         page.nextEpisode = index + 1 < siblings.count ? Self.key(siblings[index + 1]) : nil
+        // These come from the season's own item list, so they are episodes in
+        // the sense the countdown needs — not a link that says "next".
+        page.nextEpisodeIsEpisodic = page.nextEpisode != nil
         if !page.episodes.isEmpty { publishEpisodes() }
     }
 

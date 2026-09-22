@@ -19,8 +19,9 @@ row when it lands so the file stays a to-do list, not a history.
 **Status, 22 September 2026.** S1 is done except S1-12, which is a privacy
 policy URL and a contact address — yours to supply, not mine to invent. The S2
 audio group (01, 02, 03, 05, 06) has landed; S2-04 is folded into S2-02, since
-the volume control no longer touches system volume at all. Working down S2 from
-there.
+the volume control no longer touches system volume at all. The episode group
+(07, 08, 10, 11, 12, 13) has landed too. S2-09 is still open: the agent and
+native still disagree about what "same site" means.
 
 ---
 
@@ -143,13 +144,13 @@ there.
 
 ### Episode discovery and resume
 
-- [ ] **S2-07 Pagination links become "Next episode" and auto-advance.**
+- [x] **S2-07 Pagination links become "Next episode" and auto-advance.**
   `NEXT_RE = /\bnext\b/i`, `EPISODE_RE` matches bare numbers.
   [agent.js:1067](../ios/App/CleanPlayerApp/Resources/agent.js:1067).
   *Do:* the up-next countdown requires an *episode signal* (`rel=next`, a
   numbered list ≥ 2, or a site control). Text-only matches populate the button
   but never the countdown. Fixture: docs page with "Next »".
-- [ ] **S2-08 `resumeKey` strips `t`, `ref`, `si`, `start` globally**, merging
+- [x] **S2-08 `resumeKey` strips `t`, `ref`, `si`, `start` globally**, merging
   distinct pages. [AddressResolver.swift:119](../ios/Sources/CleanPlayer/AddressResolver.swift:119).
   *Do:* strip `t`/`start`/`time_continue` only when the value looks like seconds
   (`^\d+s?$|^\d+m\d+s$`); never strip `ref`/`si`. Add the false-positive test.
@@ -158,23 +159,23 @@ there.
   [WebView.swift:747](../ios/App/CleanPlayerApp/WebView.swift:747).
   *Do:* one definition. Native re-validation with `HostKey.isSameSite`; agent
   compares `hostname` suffix against a PSL-derived site passed in at injection.
-- [ ] **S2-10 Warm standby loads the next page with autoplay on, invisibly.**
+- [x] **S2-10 Warm standby loads the next page with autoplay on, invisibly.**
   Ad frames can play audio; sites may count a view or post progress.
   [WebView.swift:648](../ios/App/CleanPlayerApp/WebView.swift:648).
   *Do:* standby gets its own `WKWebViewConfiguration` copy with
   `mediaTypesRequiringUserActionForPlayback = .all` plus a page-world
   `play()` guard at document start; un-guard on promote.
-- [ ] **S2-11 Theater hides sibling-rendered subtitles.**
+- [x] **S2-11 Theater hides sibling-rendered subtitles.**
   [agent.js:153](../ios/App/CleanPlayerApp/Resources/agent.js:153).
   *Do:* in `stage()`, keep siblings that look like caption layers
   (`.vjs-text-track-display, .jw-captions, [class*=caption], [class*=subtitle]`
   or a text-only absolutely-positioned overlay inside the player box).
   Fixture with a JW-style caption div.
-- [ ] **S2-12 Only one of four theater marks is defended.**
+- [x] **S2-12 Only one of four theater marks is defended.**
   [agent.js:1338](../ios/App/CleanPlayerApp/Resources/agent.js:1338).
   *Do:* add `data-cp-hidden`, `data-cp-stage`, `data-cp-theater` to
   `attributeFilter`; re-assert on removal.
-- [ ] **S2-13 DRM / protected video gives no message.** *Do:* on `encrypted`
+- [x] **S2-13 DRM / protected video gives no message.** *Do:* on `encrypted`
   event or `error.code === MEDIA_ERR_SRC_NOT_SUPPORTED` with EME present, post
   `theaterFailed(reason: 'drm')`; native shows "This site uses DRM Cliqx can't play."
 

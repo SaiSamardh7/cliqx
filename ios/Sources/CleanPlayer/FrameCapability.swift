@@ -61,6 +61,7 @@ public enum BridgeMessageKind: Hashable, Sendable {
     case theater
     case theaterEnded
     case theaterFailed
+    case mediaError
     case ended
     case watchCleanTapped
     case blocked
@@ -153,7 +154,7 @@ public struct FrameCapabilityModel: Sendable {
             else { return false }
             playerFrameID = frameID
             return true
-        case .theaterEnded, .theaterFailed, .ended, .playback,
+        case .theaterEnded, .theaterFailed, .mediaError, .ended, .playback,
              .episodeSourceChanged, .volume, .time, .video, .tracks,
              .airplay, .airplaySupport:
             return playerFrameID == frameID

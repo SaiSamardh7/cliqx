@@ -184,7 +184,7 @@ test.describe('episode discovery', () => {
   test('hides nothing when the page offers no episode links', async ({ page }) => {
     await serve(page, PLAYER);
     expect(await page.evaluate(() => __cp.findEpisodes()))
-      .toEqual({ next: null, prev: null });
+      .toEqual(expect.objectContaining({ next: null, prev: null }));
   });
 
   test('prefers rel=next and rel=prev over link text', async ({ page }) => {
@@ -194,9 +194,10 @@ test.describe('episode discovery', () => {
       <a href="/decoy">Next thing entirely</a>
       <video id="v" playsinline></video>`);
 
-    expect(await page.evaluate(() => __cp.findEpisodes())).toEqual({
+    expect(await page.evaluate(() => __cp.findEpisodes()))
+      .toEqual(expect.objectContaining({
       next: `${ORIGIN}/ep/2`, prev: `${ORIGIN}/ep/0`,
-    });
+    }));
   });
 
   test('falls back to accessible names', async ({ page }) => {
@@ -205,9 +206,10 @@ test.describe('episode discovery', () => {
       <a href="/ep/2" aria-label="Next episode">&rarr;</a>
       <video id="v" playsinline></video>`);
 
-    expect(await page.evaluate(() => __cp.findEpisodes())).toEqual({
+    expect(await page.evaluate(() => __cp.findEpisodes()))
+      .toEqual(expect.objectContaining({
       next: `${ORIGIN}/ep/2`, prev: `${ORIGIN}/ep/0`,
-    });
+    }));
   });
 
   test('uses the site episode link so an in-place player router can handle Next',
@@ -263,10 +265,11 @@ test.describe('episode discovery', () => {
       <a href="#/ep/0">Previous episode</a>
       <video id="v" playsinline></video>`, `${ORIGIN}/web/index.html#/ep/1`);
 
-    expect(await page.evaluate(() => __cp.findEpisodes())).toEqual({
+    expect(await page.evaluate(() => __cp.findEpisodes()))
+      .toEqual(expect.objectContaining({
       next: `${ORIGIN}/web/index.html#/ep/2`,
       prev: `${ORIGIN}/web/index.html#/ep/0`,
-    });
+    }));
   });
 
   test('a plain anchor is still not a page', async ({ page }) => {
@@ -285,10 +288,11 @@ test.describe('episode discovery', () => {
 
     const list = await page.evaluate(() => __cp.episodeList());
     expect(list.map(e => e.current)).toEqual([false, true, false]);
-    expect(await page.evaluate(() => __cp.findEpisodes())).toEqual({
+    expect(await page.evaluate(() => __cp.findEpisodes()))
+      .toEqual(expect.objectContaining({
       next: `${ORIGIN}/web/index.html#!/item?ep=3`,
       prev: `${ORIGIN}/web/index.html#!/item?ep=1`,
-    });
+    }));
   });
 });
 
@@ -2573,4 +2577,114 @@ test.describe('volume routing and AirPlay', () => {
       expect((await posted(page)).filter((m: any) => m.type === 'volume').slice(-1)[0])
         .toEqual(expect.objectContaining({ available: false }));
     });
+});
+
+test.describe('what counts as a next episode', () => {
+  // The player advances on its own when a video ends. `/\bnext\b/` matches
+  // "Next »" in a forum footer, a docs page, any gallery — so on those pages
+  // finishing a video carried the user somewhere they never chose. The button
+  // is still offered; only the countdown is withheld.
+  const discovery = (page: Page) =>
+    page.evaluate(() => JSON.parse(JSON.stringify(__cp.findEpisodes())));
+
+  test('rel=next is an episode signal', async ({ page }) => {
+    await serve(page, `${HEAD}<link rel="next" href="/ep/2"><video></video>`);
+    expect(await discovery(page)).toMatchObject({ nextSource: 'rel' });
+  });
+
+  test('a numbered episode list is an episode signal', async ({ page }) => {
+    await serve(page, `${HEAD}<video></video>
+      <a href="/watch/ep-1">Episode 1</a>
+      <a href="/watch/ep-2">Episode 2</a>
+      <a href="/watch/ep-3">Episode 3</a>`, `${ORIGIN}/watch/ep-2`);
+    const found = await discovery(page);
+    expect(found.nextSource).toBe('list');
+    expect(found.next).toContain('/watch/ep-3');
+  });
+
+  test('pagination is offered as a button but is NOT an episode signal',
+    async ({ page }) => {
+      await serve(page, `${HEAD}<video></video>
+        <a href="/thread?page=1">Previous</a>
+        <a href="/thread?page=3">Next »</a>`, `${ORIGIN}/thread?page=2`);
+      const found = await discovery(page);
+      expect(found.next).toContain('page=3');
+      expect(found.nextSource).toBe('text');
+    });
+
+  test('a docs footer link is not an episode signal', async ({ page }) => {
+    await serve(page, `${HEAD}<video></video>
+      <nav><a href="/guide/installing">Next: Installing</a></nav>`, `${ORIGIN}/guide/intro`);
+    expect(await discovery(page)).toMatchObject({ nextSource: 'text' });
+  });
+
+  test('rel beats text when a page has both', async ({ page }) => {
+    await serve(page, `${HEAD}<link rel="next" href="/ep/2"><video></video>
+      <a href="/unrelated">Next »</a>`);
+    const found = await discovery(page);
+    expect(found.nextSource).toBe('rel');
+    expect(found.next).toContain('/ep/2');
+  });
+});
+
+test.describe('subtitles a player paints itself', () => {
+  // Video.js, JW, Shaka and most of the players this app meets render captions
+  // into a sibling <div> over the video, not into the element's text tracks.
+  // Theater hides every sibling on the way up, so it deleted the subtitles —
+  // and textTracks() sees nothing for those players either, so the native menu
+  // could not offer them back.
+  const visible = (page: Page, selector: string) =>
+    page.evaluate((s) => {
+      const el = document.querySelector(s)!;
+      return getComputedStyle(el).display !== 'none';
+    }, selector);
+
+  test('a video.js caption display survives theater', async ({ page }) => {
+    await serve(page, `${HEAD}<div class="player">
+      <video></video>
+      <div class="vjs-text-track-display">Hello there</div>
+      <div class="advert">Buy this</div>
+    </div>`);
+    await watchClean(page).click();
+    expect(await visible(page, '.vjs-text-track-display')).toBe(true);
+    expect(await visible(page, '.advert')).toBe(false);
+  });
+
+  test('a JW captions layer survives theater', async ({ page }) => {
+    await serve(page, `${HEAD}<div class="player">
+      <video></video><div class="jw-captions">Subtitle line</div>
+    </div>`);
+    await watchClean(page).click();
+    expect(await visible(page, '.jw-captions')).toBe(true);
+  });
+
+  test('an unnamed overlay holding only text is treated as captions',
+    async ({ page }) => {
+      await serve(page, `${HEAD}<div class="player" style="position:relative">
+        <video></video>
+        <div id="cues" style="position:absolute;bottom:0">Ceci est un test</div>
+      </div>`);
+      await watchClean(page).click();
+      expect(await visible(page, '#cues')).toBe(true);
+    });
+
+  test('an overlay holding an image is not captions and is still hidden',
+    async ({ page }) => {
+      await serve(page, `${HEAD}<div class="player" style="position:relative">
+        <video></video>
+        <div id="banner" style="position:absolute;inset:0"><img src="x.png">Ad</div>
+      </div>`);
+      await watchClean(page).click();
+      expect(await visible(page, '#banner')).toBe(false);
+    });
+
+  test('closing theater leaves the caption layer as it was', async ({ page }) => {
+    await serve(page, `${HEAD}<div class="player">
+      <video></video><div class="jw-captions">Subtitle line</div>
+    </div>`);
+    await watchClean(page).click();
+    await page.evaluate(() => __cp.exitTheater());
+    expect(await page.evaluate(() =>
+      document.querySelector('.jw-captions')!.hasAttribute('data-cp-caption'))).toBe(false);
+  });
 });

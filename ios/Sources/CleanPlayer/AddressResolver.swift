@@ -108,20 +108,49 @@ public enum AddressResolver {
         var path = parts.path
         if path.count > 1, path.hasSuffix("/") { path.removeLast() }
         parts.queryItems = parts.queryItems?.filter { item in
-            let name = item.name.lowercased()
-            return !(name.hasPrefix("utm_") || ignoredQuery.contains(name))
+            !isNoise(item)
         }
         let query = (parts.queryItems?.isEmpty == false) ? "?" + (parts.percentEncodedQuery ?? "") : ""
         let fragment = parts.fragment.map { "#" + $0 } ?? ""
         return host + port + path + query + fragment
     }
 
-    /// Share-sheet noise and the "start at" parameters that would otherwise
-    /// make every deep link a different video.
-    private static let ignoredQuery: Set<String> = [
-        "fbclid", "gclid", "msclkid", "igshid", "mc_cid", "mc_eid", "ref", "ref_src",
-        "t", "start", "time_continue", "feature", "si",
+    /// Share-sheet and referrer noise: these carry no content identity, so
+    /// they go whatever their value.
+    private static let alwaysNoise: Set<String> = [
+        "fbclid", "gclid", "msclkid", "igshid", "mc_cid", "mc_eid",
+        "ref", "ref_src", "si", "feature",
     ]
+
+    /// "Start at" parameters, dropped only when the VALUE looks like a time.
+    ///
+    /// `t` is a timestamp on YouTube and a thread id on a dozen forums; the
+    /// name alone cannot tell them apart, but `120`, `1h2m3s` and `90s` are
+    /// not content ids.
+    private static let timeLike: Set<String> = ["t", "start", "time_continue", "starttime"]
+
+    /// `90`, `90s`, `1h2m3s`, `2m30s`, `00:01:30`.
+    private static let timeValue = try? NSRegularExpression(
+        pattern: #"^(\d+s?|(\d+h)?(\d+m)?(\d+s)?|\d{1,2}(:\d{2}){1,2})$"#,
+        options: [.caseInsensitive])
+
+    private static func isNoise(_ item: URLQueryItem) -> Bool {
+        let name = item.name.lowercased()
+        if name.hasPrefix("utm_") || alwaysNoise.contains(name) { return true }
+        guard timeLike.contains(name) else { return false }
+        guard let value = item.value, !value.isEmpty else { return true }
+        return looksLikeTime(value)
+    }
+
+    static func looksLikeTime(_ value: String) -> Bool {
+        guard let timeValue else { return false }
+        let range = NSRange(value.startIndex..., in: value)
+        guard let match = timeValue.firstMatch(in: value, range: range),
+              match.range == range else { return false }
+        // The empty alternation matches an empty string; a value that is only
+        // letters ("abc") cannot reach here, but "s" alone would.
+        return value.contains(where: \.isNumber)
+    }
 
     private static func query(_ text: String, on engine: URL) -> URL? {
         var components = URLComponents(url: engine, resolvingAgainstBaseURL: false)

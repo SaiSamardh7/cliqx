@@ -41,6 +41,13 @@
 
 [data-cp-theater] { overflow: hidden !important; }
 
+/* A caption layer the player paints itself. Kept visible and lifted over the
+   staged video, which sits at z-index 2147483646. */
+[data-cp-caption] {
+  z-index: 2147483646 !important;
+  pointer-events: none !important;
+}
+
 .${BTN_CLASS} {
   all: unset;
   box-sizing: border-box;
@@ -183,6 +190,32 @@ html[data-cp-unlock], html[data-cp-unlock] body {
   ///
   /// Works on the <video> in the frame that owns it, and on the player <iframe>
   /// in the page that hosts it — the walk is the same either way.
+  /// Subtitles a player paints itself, rather than through a <track>.
+  ///
+  /// Video.js, JW, Shaka and most of the players this app meets render
+  /// captions into a sibling <div> positioned over the video, NOT into the
+  /// element's own text tracks. Theater hides every sibling on the way up, so
+  /// it deleted the subtitles — and `textTracks()` sees nothing for those
+  /// players either, so the native menu could not offer them back. The one
+  /// feature people need most on a foreign-language video, silently gone.
+  const CAPTION_SELECTOR = [
+    '.vjs-text-track-display', '.jw-captions', '.shaka-text-container',
+    '.plyr__captions', '.captions', '.subtitles', '.subtitle',
+    '[class*="caption" i]', '[class*="subtitle" i]', '[id*="caption" i]',
+  ].join(',');
+
+  function isCaptionLayer(el) {
+    if (!el || el.nodeType !== 1) return false;
+    if (el.matches(CAPTION_SELECTOR)) return true;
+    // A player that names nothing usefully still gives itself away: a box
+    // positioned over the video that holds text and no media of its own.
+    const cs = getComputedStyle(el);
+    if (cs.position !== 'absolute' && cs.position !== 'fixed') return false;
+    if (el.querySelector('video,iframe,canvas,img')) return false;
+    const text = (el.textContent || '').trim();
+    return text.length > 0 && text.length < 300;
+  }
+
   function stage(el) {
     ensureStyle();
     unstage();                        // only one stage at a time
@@ -192,6 +225,11 @@ html[data-cp-unlock], html[data-cp-unlock] body {
       const parent = node.parentElement;
       for (const sib of parent.children) {
         if (sib !== node && !sib.hasAttribute('data-cp-keep')) {
+          // A caption layer belongs to the video, not to the page around it.
+          if (isCaptionLayer(sib)) {
+            sib.dataset.cpCaption = '1';
+            continue;
+          }
           sib.dataset.cpHidden = '1';
         }
       }
@@ -215,11 +253,15 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     // a shadow root. A document-only query leaves those marks in place, and the
     // marks are what make the video full-screen-fixed and its siblings
     // display:none — so the page stays bricked after Close.
-    for (const el of allDeep('[data-cp-hidden],[data-cp-untrap],[data-cp-stage]')) {
+    for (const el of allDeep(
+      '[data-cp-hidden],[data-cp-untrap],[data-cp-stage],[data-cp-caption]')) {
+      forgetMark(el);
       delete el.dataset.cpHidden;
       delete el.dataset.cpUntrap;
       delete el.dataset.cpStage;
+      delete el.dataset.cpCaption;
     }
+    forgetMark(document.documentElement);
     delete document.documentElement.dataset.cpTheater;
     for (const b of allButtons()) delete b.dataset.cpStaged;
   }
@@ -267,6 +309,29 @@ html[data-cp-unlock], html[data-cp-unlock] body {
   function restoreControls(video) {
     if (video.__cpHadControls) video.setAttribute('controls', '');
     delete video.__cpHadControls;
+  }
+
+  let reportedProtected = false;
+
+  function reportProtected() {
+    if (reportedProtected) return;
+    reportedProtected = true;
+    post({ type: 'mediaError', reason: 'drm' });
+  }
+
+  /// Only the failures a person can act on. A decode error on one of several
+  /// sources is the site's business; a source nothing here can open is not.
+  function reportMediaError() {
+    if (!staged || !staged.error) return;
+    const code = staged.error.code;
+    if (code === 4 /* MEDIA_ERR_SRC_NOT_SUPPORTED */) {
+      // EME present and a source that will not open is almost always
+      // protected content rather than a broken file.
+      post({ type: 'mediaError',
+             reason: navigator.requestMediaKeySystemAccess ? 'drm' : 'unsupported' });
+    } else if (code === 2 /* MEDIA_ERR_NETWORK */) {
+      post({ type: 'mediaError', reason: 'network' });
+    }
   }
 
   /// Distinct from the `pause` that follows it. "Finished" is the only state
@@ -734,6 +799,7 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     allowInline(video);
     suppressControls(video);
     staged = video;
+    reportedProtected = false;
     if (startMuted) video.muted = true;
     prepareAudioContext(video);
     trackAirPlay(video);
@@ -744,6 +810,13 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     video.addEventListener('pause', reportPlayback);
     for (const name of BUFFERING_EVENTS) video.addEventListener(name, reportPlayback);
     video.addEventListener('ended', reportEnded);
+    // A protected stream cannot play here, and until now said nothing: the
+    // curtain came up on a black rectangle with working-looking controls.
+    // `encrypted` fires when the stream carries DRM initialisation data;
+    // MEDIA_ERR_SRC_NOT_SUPPORTED with EME present is the same story arriving
+    // as a failure instead.
+    video.addEventListener('encrypted', reportProtected);
+    video.addEventListener('error', reportMediaError);
     video.addEventListener('timeupdate', onTimeUpdate);
     video.addEventListener('durationchange', reportTime);
     video.addEventListener('progress', onTimeUpdate);
@@ -1193,15 +1266,26 @@ html[data-cp-unlock], html[data-cp-unlock] body {
   /// incrementing a number in the path — that silently sends people to the
   /// wrong page or a 404.
   function findEpisodes() {
-    const found = { next: null, prev: null };
+    // `source` records WHERE each link came from, because the three signals
+    // are not equally trustworthy and one of them decides whether the player
+    // will navigate on its own when the video ends.
+    //
+    //   rel  — <link rel="next">. The standard, and unambiguous.
+    //   list — the neighbour in a list of numbered episodes on this page.
+    //   text — an anchor whose text matches /\bnext\b/.
+    //
+    // The last one matches "Next »" on page 2 of a forum, a docs footer, any
+    // gallery. Good enough to offer a button the user may press; NOT good
+    // enough to move them off the page by itself while they are not looking.
+    const found = { next: null, prev: null, nextSource: null, prevSource: null };
 
     for (const el of document.querySelectorAll('link[rel~="next"],a[rel~="next"]')) {
       found.next = sameOriginHref(el);
-      if (found.next) break;
+      if (found.next) { found.nextSource = 'rel'; break; }
     }
     for (const el of document.querySelectorAll('link[rel~="prev"],a[rel~="prev"]')) {
       found.prev = sameOriginHref(el);
-      if (found.prev) break;
+      if (found.prev) { found.prevSource = 'rel'; break; }
     }
 
     if (!found.next || !found.prev) {
@@ -1210,9 +1294,11 @@ html[data-cp-unlock], html[data-cp-unlock] body {
         if (!name || name.length > 40) continue;
         if (!found.next && NEXT_RE.test(name) && !PREV_RE.test(name)) {
           found.next = sameOriginHref(a);
+          if (found.next) found.nextSource = 'text';
         }
         if (!found.prev && PREV_RE.test(name)) {
           found.prev = sameOriginHref(a);
+          if (found.prev) found.prevSource = 'text';
         }
         if (found.next && found.prev) break;
       }
@@ -1227,8 +1313,14 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     // far more reliable source than matching words.
     if (!found.next || !found.prev) {
       const neighbours = episodeNeighbours();
-      found.next = found.next || neighbours.next;
-      found.prev = found.prev || neighbours.prev;
+      if (!found.next && neighbours.next) {
+        found.next = neighbours.next;
+        found.nextSource = neighbours.source;
+      }
+      if (!found.prev && neighbours.prev) {
+        found.prev = neighbours.prev;
+        found.prevSource = neighbours.source;
+      }
     }
     return found;
   }
@@ -1236,7 +1328,7 @@ html[data-cp-unlock], html[data-cp-unlock] body {
   /// The entries either side of the current one in the episode list.
   function episodeNeighbours() {
     const list = episodeList();
-    if (list.length < 2) return { next: null, prev: null };
+    if (list.length < 2) return { next: null, prev: null, source: null };
 
     // Episode lists are usually in order already, but a site that renders them
     // newest-first would give the wrong neighbours. When every entry carries a
@@ -1247,10 +1339,13 @@ html[data-cp-unlock], html[data-cp-unlock] body {
       : list;
 
     const at = ordered.findIndex(e => e.current);
-    if (at < 0) return { next: null, prev: null };
+    if (at < 0) return { next: null, prev: null, source: null };
     return {
       next: at + 1 < ordered.length ? ordered[at + 1].href : null,
       prev: at - 1 >= 0 ? ordered[at - 1].href : null,
+      // A list whose every entry carries an episode number is a real episode
+      // list. One matched only by position could be any set of links.
+      source: numbered ? 'list' : 'text',
     };
   }
 
@@ -1392,16 +1487,44 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     return out;
   }
 
+  /// Marks this code removed itself. The observer reports our own writes the
+  /// same way it reports the page's, and a mark restored after `unstage()`
+  /// leaves the page bricked behind a video that is no longer there.
+  const clearedByUs = new WeakSet();
+
+  function forgetMark(el) { clearedByUs.add(el); }
+
+  /// Puts a theater mark back after the PAGE removed it. Returns whether it
+  /// did, so the caller can skip a full pass for a change it has answered.
+  function restoreTheaterMark(el, attributeName, previous) {
+    if (previous === null || previous === undefined) return false;   // freshly added
+    if (el.hasAttribute(attributeName)) return false;                // still there
+    if (clearedByUs.has(el)) { clearedByUs.delete(el); return false; }
+    if (attributeName === 'data-cp-stage' && el !== staged) return false;
+    if (attributeName === 'data-cp-theater' && el !== document.documentElement) return false;
+    el.setAttribute(attributeName, previous);
+    return true;
+  }
+
   const OBSERVE = {
     childList: true, subtree: true,
-    // Three attributes, not all of them. `data-cp-blocked` because a page that
-    // strips our mark would otherwise stay unblocked until something else
-    // happened to move a node; `open` because a <dialog> interstitial arrives
-    // by attribute, not by insertion; `style` because the usual way to show an
-    // ad is to flip the display on markup that was already in the document.
-    // `class` is left out deliberately — players churn it every frame.
+    // `attributeOldValue` so a mark can be restored to what it was, and so
+    // our own removals (old value present, new value absent, set BY us) are
+    // distinguishable from the page's.
+    attributeOldValue: true,
     attributes: true,
-    attributeFilter: ['data-cp-blocked', 'open', 'style'],
+    // `data-cp-blocked` because a page that strips our mark would otherwise
+    // stay unblocked until something else happened to move a node; the three
+    // theater marks for the same reason — removing `data-cp-hidden` from an
+    // overlay put it straight back on top of the video, and nothing was
+    // watching for it; `open` because a <dialog> interstitial arrives by
+    // attribute, not by insertion; `style` because the usual way to show an ad
+    // is to flip the display on markup that was already in the document.
+    // `class` is left out deliberately — players churn it every frame.
+    attributeFilter: [
+      'data-cp-blocked', 'data-cp-hidden', 'data-cp-stage', 'data-cp-theater',
+      'open', 'style',
+    ],
   };
   const watchedRoots = new WeakSet();
   let domObserver = null;
@@ -1986,6 +2109,18 @@ html[data-cp-unlock], html[data-cp-unlock] body {
       if (rec.attributeName === 'style' && rec.target.nodeType === 1
           && rec.target.hasAttribute('data-cp-blocked')) {
         hideHard(rec.target);
+        continue;
+      }
+      // A theater mark was taken off something theater had marked. Put it
+      // back at once rather than at the next pass: a quarter second of the
+      // page's header over the video, several times a second, is the page
+      // winning. Only while theater is actually showing, and only for the
+      // element that lost the mark, so this cannot fight a legitimate exit.
+      if (staged && rec.target.nodeType === 1
+          && (rec.attributeName === 'data-cp-hidden'
+              || rec.attributeName === 'data-cp-stage'
+              || rec.attributeName === 'data-cp-theater')
+          && restoreTheaterMark(rec.target, rec.attributeName, rec.oldValue)) {
         continue;
       }
       needsPass = true;

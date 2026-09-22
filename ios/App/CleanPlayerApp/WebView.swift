@@ -15,6 +15,9 @@ final class PageState: ObservableObject {
     /// A failed load must say why. Otherwise every failure looks identical:
     /// a blank screen.
     @Published var loadError: String?
+    /// The staged video will not play — DRM, an unopenable format, a stalled
+    /// download. Distinct from `loadError`, which is about the page.
+    @Published var mediaError: String?
 
     @Published var isTheater = false
     /// An episode change is in flight and theater is expected to come back.
@@ -80,6 +83,15 @@ final class PageState: ObservableObject {
     @Published var airplayPickerSupported = false
     @Published var nextEpisode: URL?
     @Published var previousEpisode: URL?
+    /// Whether `nextEpisode` came from a real episode signal — `rel="next"` or
+    /// a list of numbered episodes — rather than an anchor whose text happens
+    /// to say "next".
+    ///
+    /// The button is offered either way; only this decides whether the player
+    /// will navigate ON ITS OWN when the video ends. "Next »" in a forum
+    /// footer or a docs page matches the text rule, and auto-advancing on it
+    /// carries the user off the page they were watching.
+    @Published var nextEpisodeIsEpisodic = false
     @Published var overlayBlocking = true
     @Published var blockedCount = 0
     /// Popups stopped in the native navigation layer: a cross-site window, a
@@ -740,7 +752,12 @@ struct WebView: UIViewRepresentable {
             // The primary's configuration, so rule lists, user scripts, the
             // bridge and the data store are all shared: the standby is filtered
             // and reports to this same handler, distinguished by `message.webView`.
-            let view = WKWebView(frame: container.bounds, configuration: primary.configuration)
+            // Media is gated behind a gesture there, though — see
+            // makeStandbyConfiguration. It is off screen, and nothing off
+            // screen should be making noise.
+            let view = WKWebView(
+                frame: container.bounds,
+                configuration: BrowserSetup.makeStandbyConfiguration(from: primary.configuration))
             view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
             let navigation = StandbyNavigation(site: next) { [weak self] in
                 Self.transitionLog.notice("Standby failed to load; dropping it")
@@ -836,6 +853,10 @@ struct WebView: UIViewRepresentable {
             new.navigationDelegate = self
             new.uiDelegate = self
             new.allowsBackForwardNavigationGestures = true
+            // On screen now, and the user asked for this episode: the gesture
+            // requirement the standby carried would otherwise block the play
+            // that makes the cut look instant.
+            new.configuration.mediaTypesRequiringUserActionForPlayback = []
             page.webView = new
             observe(new)
             theaterFrame = frame
@@ -938,6 +959,8 @@ struct WebView: UIViewRepresentable {
                 else { return }
                 self.page.nextEpisode = (parsed["next"] as? String).flatMap(URL.init(string:))
                 self.page.previousEpisode = (parsed["prev"] as? String).flatMap(URL.init(string:))
+                self.page.nextEpisodeIsEpisodic =
+                    ["rel", "list"].contains(parsed["nextSource"] as? String ?? "")
             }
         }
 
@@ -1206,6 +1229,7 @@ struct WebView: UIViewRepresentable {
             page.blockedExternal = nil
             page.isTheater = false
             page.mediaVolumeAvailable = false
+            page.mediaError = nil
             // Not simply `false`: goToEpisode arms the resume and starts the
             // load, so this fires with the curtain already up. Deriving it from
             // the armed destination also drops the curtain when some *other*
@@ -1231,6 +1255,7 @@ struct WebView: UIViewRepresentable {
             page.airplayCanSendVideo = true
             page.nextEpisode = nil
             page.previousEpisode = nil
+            page.nextEpisodeIsEpisodic = false
         }
 
         func webView(_ webView: WKWebView,
@@ -1516,6 +1541,7 @@ struct WebView: UIViewRepresentable {
                 endResume(keepingTheater: true)
                 page.isTheater = true
                 page.mediaVolumeAvailable = false
+                page.mediaError = nil
                 callPlayer("setVolume(\(page.volumePercent))")
                 page.playbackEnded = false
                 page.airplayAvailable = airplay
@@ -1552,6 +1578,11 @@ struct WebView: UIViewRepresentable {
             // The agent gave up finding a video to resume into. Only the frame
             // that was actually asked reports this, so the curtain comes down
             // on a real answer rather than on the watchdog's deadline.
+            case .mediaError(let reason):
+                // The curtain came up on a black rectangle with working-looking
+                // controls. Say what happened instead.
+                page.mediaError = reason.message
+                endResume()
             case .theaterFailed:
                 // Stay covered and armed. This is usually the main document,
                 // while the real player iframe announces later. Revealing the

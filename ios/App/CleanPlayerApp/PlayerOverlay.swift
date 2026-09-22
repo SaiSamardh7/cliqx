@@ -52,13 +52,16 @@ struct PlayerOverlay: View {
                 .transition(.opacity)
             }
 
+            if let message = page.mediaError { mediaErrorCard(message) }
+
             if let flash = chrome.seekFlash { seekFlashLabel(flash) }
 
             if gestureBrightnessPercent != nil || gestureVolumePercent != nil {
                 levelHUDs
             }
 
-            if let remaining = chrome.countdown, let next = page.nextEpisode {
+            if let remaining = chrome.countdown, let next = page.nextEpisode,
+               page.nextEpisodeIsEpisodic {
                 upNextCard(remaining: remaining, next: next)
             }
         }
@@ -89,7 +92,11 @@ struct PlayerOverlay: View {
         }
         .onChange(of: page.playbackEnded) { _, ended in
             guard ended else { return }
-            chrome.playbackEnded(hasNext: page.nextEpisode != nil)
+            // Only a real episode signal starts the countdown. A "Next »" in a
+            // forum footer gives a button, not a reason to leave the page
+            // while the user is looking away.
+            chrome.playbackEnded(
+                hasNext: page.nextEpisode != nil && page.nextEpisodeIsEpisodic)
         }
         // A new episode is a new video: whatever the user declined last time
         // has nothing to do with this one.
@@ -124,6 +131,26 @@ struct PlayerOverlay: View {
                  + "only the sound would reach the TV.\n\nUse Screen Mirroring "
                  + "from Control Centre instead — it sends the picture as well.")
         }
+    }
+
+    /// Said plainly, over the black. A protected stream used to give a black
+    /// rectangle with a full set of controls that did nothing.
+    private func mediaErrorCard(_ message: String) -> some View {
+        VStack(spacing: 14) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.largeTitle)
+                .foregroundStyle(.secondary)
+            Text(message)
+                .multilineTextAlignment(.center)
+                .font(.callout)
+                .foregroundStyle(.white)
+            Button("Close") { page.actions.exitTheater() }
+                .buttonStyle(.borderedProminent)
+        }
+        .padding(28)
+        .frame(maxWidth: 380)
+        .background(.black.opacity(0.82), in: .rect(cornerRadius: 18))
+        .accessibilityElement(children: .combine)
     }
 
     /// Playing as the user would mean it: not paused, and with a picture.

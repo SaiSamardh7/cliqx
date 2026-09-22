@@ -9,6 +9,26 @@ public enum BridgeMessage: Codable, Equatable, Sendable {
     public static let protocolVersion = 1
     public static let maximumStringLength = 2_048
 
+    /// Why a staged video will not play. Closed set, so the message the user
+    /// sees is written here and never taken from the page.
+    public enum MediaErrorReason: String, Codable, Equatable, Sendable {
+        case drm
+        case unsupported
+        case network
+
+        public var message: String {
+            switch self {
+            case .drm:
+                "This video is protected by DRM, which Cliqx can't play. "
+                + "Try the site's own app, or Safari."
+            case .unsupported:
+                "This video is in a format Cliqx can't play."
+            case .network:
+                "The video stopped downloading. Check your connection."
+            }
+        }
+    }
+
     public struct MediaChoice: Codable, Equatable, Sendable {
         public let index: Int
         public let label: String
@@ -53,6 +73,8 @@ public enum BridgeMessage: Codable, Equatable, Sendable {
     case theater(airplay: Bool, pip: Bool)
     case theaterEnded
     case theaterFailed
+    /// The staged video cannot play here and the user should be told why.
+    case mediaError(reason: MediaErrorReason)
     case ended
     case watchCleanTapped
     case blocked(count: Int)
@@ -73,6 +95,7 @@ public enum BridgeMessage: Codable, Equatable, Sendable {
         case .theater: .theater
         case .theaterEnded: .theaterEnded
         case .theaterFailed: .theaterFailed
+        case .mediaError: .mediaError
         case .ended: .ended
         case .watchCleanTapped: .watchCleanTapped
         case .blocked: .blocked
@@ -99,6 +122,7 @@ public enum BridgeMessage: Codable, Equatable, Sendable {
         case airplay
         case pip
         case count
+        case reason
         case playing
         case buffering
         case armed
@@ -161,6 +185,11 @@ public enum BridgeMessage: Codable, Equatable, Sendable {
             self = .theaterEnded
         case "theaterFailed":
             self = .theaterFailed
+        case "mediaError":
+            guard let reason = MediaErrorReason(
+                rawValue: try values.decode(String.self, forKey: .reason))
+            else { throw ValidationError.unknownType("mediaError.reason") }
+            self = .mediaError(reason: reason)
         case "ended":
             self = .ended
         case "blocked":
@@ -258,6 +287,9 @@ public enum BridgeMessage: Codable, Equatable, Sendable {
             try values.encode("theaterEnded", forKey: .type)
         case .theaterFailed:
             try values.encode("theaterFailed", forKey: .type)
+        case .mediaError(let reason):
+            try values.encode("mediaError", forKey: .type)
+            try values.encode(reason.rawValue, forKey: .reason)
         case .ended:
             try values.encode("ended", forKey: .type)
         case .watchCleanTapped:
