@@ -1,3 +1,4 @@
+import CleanPlayer
 import CryptoKit
 import Foundation
 
@@ -62,6 +63,9 @@ final class MediaLibrary: ObservableObject {
 
     private let store: URL
     private let deviceID: String
+    /// The file would not decode. Writing an empty list over it is what turns
+    /// one bad payload into a Continue Watching list that is gone for good.
+    private var unreadable = false
 
     init() {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -76,8 +80,14 @@ final class MediaLibrary: ObservableObject {
             UserDefaults.standard.set(deviceID, forKey: key)
         }
 
-        if let data = try? Data(contentsOf: store),
-           let saved = try? JSONDecoder().decode([MediaProgress].self, from: data) {
+        if let saved = StoreRecovery.decode([MediaProgress].self,
+                                           from: try? Data(contentsOf: store),
+                                           named: "media-progress",
+                                           didQuarantine: { kept in
+                                               unreadable = true
+                                               StoreHealth.shared.record(
+                                                   store: "media-progress", keptAt: kept)
+                                           }) {
             items = saved
         }
     }
@@ -120,7 +130,7 @@ final class MediaLibrary: ObservableObject {
     }
 
     private func persist() {
-        guard let data = try? JSONEncoder().encode(items) else { return }
+        guard !unreadable, let data = try? JSONEncoder().encode(items) else { return }
         try? data.write(to: store, options: .atomic)
     }
 

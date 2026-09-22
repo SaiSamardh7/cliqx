@@ -414,7 +414,7 @@ struct WebView: UIViewRepresentable {
             routeRefresh = Task { [weak self] in
                 try? await Task.sleep(for: .seconds(1))
                 guard !Task.isCancelled, let self, let webView = self.page.webView else { return }
-                self.page.title = webView.title ?? self.page.title
+                self.page.title = webView.title.map { Self.sanitizedForUI($0) } ?? self.page.title
                 self.refreshEpisodes(webView)
             }
         }
@@ -867,7 +867,7 @@ struct WebView: UIViewRepresentable {
                           url.host() == host          // page-supplied, re-checked
                     else { return nil }
                     return PageState.Episode(
-                        id: href, label: label,
+                        id: href, label: Self.sanitizedForUI(label, limit: 60),
                         current: entry["current"] as? Bool ?? false)
                 }
             }
@@ -934,7 +934,8 @@ struct WebView: UIViewRepresentable {
             // Never hand an unexpected scheme to another app.
             guard scheme == "https" || scheme == "http" || scheme == "about" else {
                 if navigationAction.targetFrame?.isMainFrame == true {
-                    page.loadError = "Blocked a link using the \(scheme): scheme. "
+                    page.loadError = "Blocked a link using the "
+                        + "\(Self.sanitizedForUI(scheme, limit: 24)): scheme. "
                         + "Only web pages are opened."
                 }
                 decisionHandler(.cancel)
@@ -1033,7 +1034,7 @@ struct WebView: UIViewRepresentable {
             let where_ = space.port == 80 || space.port == 443
                 ? space.host : "\(space.host):\(space.port)"
             let message = [
-                space.realm.flatMap { $0.isEmpty ? nil : $0 },
+                space.realm.flatMap { $0.isEmpty ? nil : Self.sanitizedForUI($0) },
                 CredentialPolicy.warning(for: space),
             ].compactMap { $0 }.joined(separator: "\n\n")
             let alert = UIAlertController(
@@ -1132,6 +1133,9 @@ struct WebView: UIViewRepresentable {
         func webView(_ webView: WKWebView,
                      didStartProvisionalNavigation navigation: WKNavigation!) {
             page.loadError = nil
+            // The document that asked is going away; answer anything still
+            // queued so no WebKit completion handler is left uncalled.
+            drainDialogs()
             if let url = pendingMainFrameRequest?.url ?? webView.url {
                 primeLocalNetwork(for: url)
             }
@@ -1291,7 +1295,7 @@ struct WebView: UIViewRepresentable {
             }
             pendingMainFrameRequest = nil
             page.host = Self.displayHost(url)
-            page.title = webView.title ?? ""
+            page.title = Self.sanitizedForUI(webView.title ?? "")
             page.isSecure = url?.scheme?.lowercased() == "https"
             // Recents are videos you watched, not pages you visited — the
             // entry is recorded when theater opens, not on navigation.
@@ -1563,12 +1567,16 @@ struct WebView: UIViewRepresentable {
                 page.objectFit = info.fit
                 page.sources = info.sources.map { source in
                     PageState.VideoSource(
-                        id: source.index, label: source.label, active: source.active)
+                        id: source.index,
+                        label: Self.sanitizedForUI(source.label, limit: 40),
+                        active: source.active)
                 }
             case .tracks(let tracks):
                 page.textTracks = tracks.map { track in
                     PageState.TextTrack(
-                        id: track.index, label: track.label, active: track.active)
+                        id: track.index,
+                        label: Self.sanitizedForUI(track.label, limit: 40),
+                        active: track.active)
                 }
             case .airplay(let available, let source):
                 page.airplayAvailable = available
@@ -1586,47 +1594,129 @@ struct WebView: UIViewRepresentable {
         func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String,
                      initiatedByFrame frame: WKFrameInfo,
                      completionHandler: @escaping () -> Void) {
-            guard let presenter = Self.presenter(for: webView) else {
-                completionHandler(); return
-            }
-            let alert = UIAlertController(title: Self.dialogTitle(for: frame),
-                                          message: message, preferredStyle: .alert)
-            alert.addAction(UIAlertAction(title: "OK", style: .default) { _ in completionHandler() })
-            presenter.present(alert, animated: true)
+            var answered = false
+            let answer = { if !answered { answered = true; completionHandler() } }
+            let alert = UIAlertController(
+                title: Self.dialogTitle(for: frame),
+                message: Self.sanitizedForUI(message), preferredStyle: .alert)
+            alert.addAction(UIAlertAction(title: "OK", style: .default) { [weak self] _ in
+                answer()
+                self?.dialogFinished()
+            })
+            presentDialog(alert, completing: answer)
         }
 
         func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String,
                      initiatedByFrame frame: WKFrameInfo,
                      completionHandler: @escaping (Bool) -> Void) {
-            guard let presenter = Self.presenter(for: webView) else {
-                completionHandler(false); return
+            var answered = false
+            let answer = { (value: Bool) in
+                if !answered { answered = true; completionHandler(value) }
             }
-            let alert = UIAlertController(title: Self.dialogTitle(for: frame),
-                                          message: message, preferredStyle: .alert)
-            alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { _ in completionHandler(false) })
-            alert.addAction(UIAlertAction(title: "OK", style: .default) { _ in completionHandler(true) })
-            presenter.present(alert, animated: true)
+            let alert = UIAlertController(
+                title: Self.dialogTitle(for: frame),
+                message: Self.sanitizedForUI(message), preferredStyle: .alert)
+            alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { [weak self] _ in
+                answer(false)
+                self?.dialogFinished()
+            })
+            alert.addAction(UIAlertAction(title: "OK", style: .default) { [weak self] _ in
+                answer(true)
+                self?.dialogFinished()
+            })
+            presentDialog(alert) { answer(false) }
         }
 
         func webView(_ webView: WKWebView, runJavaScriptTextInputPanelWithPrompt prompt: String,
                      defaultText: String?, initiatedByFrame frame: WKFrameInfo,
                      completionHandler: @escaping (String?) -> Void) {
-            guard let presenter = Self.presenter(for: webView) else {
-                completionHandler(nil); return
+            var answered = false
+            let answer = { (value: String?) in
+                if !answered { answered = true; completionHandler(value) }
             }
-            let alert = UIAlertController(title: Self.dialogTitle(for: frame),
-                                          message: prompt, preferredStyle: .alert)
-            alert.addTextField { $0.text = defaultText }
-            alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { _ in completionHandler(nil) })
-            alert.addAction(UIAlertAction(title: "OK", style: .default) { [weak alert] _ in
-                completionHandler(alert?.textFields?.first?.text)
+            let alert = UIAlertController(
+                title: Self.dialogTitle(for: frame),
+                message: Self.sanitizedForUI(prompt), preferredStyle: .alert)
+            alert.addTextField { $0.text = defaultText.map { Self.sanitizedForUI($0) } }
+            alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { [weak self] _ in
+                answer(nil)
+                self?.dialogFinished()
             })
-            presenter.present(alert, animated: true)
+            alert.addAction(UIAlertAction(title: "OK", style: .default) { [weak self, weak alert] _ in
+                answer(alert?.textFields?.first?.text)
+                self?.dialogFinished()
+            })
+            presentDialog(alert) { answer(nil) }
+        }
+
+        /// Page-supplied text for native UI. See `PageText`.
+        static func sanitizedForUI(_ value: String, limit: Int = 120) -> String {
+            PageText.sanitized(value, limit: limit)
         }
 
         private static func dialogTitle(for frame: WKFrameInfo) -> String {
             let host = frame.request.url?.host().flatMap(HostKey.canonical) ?? "this page"
             return "Message from \(host)"
+        }
+
+        /// One dialog at a time, and every completion handler called exactly
+        /// once.
+        ///
+        /// WebKit's `alert()` is synchronous: the frame's JavaScript is
+        /// suspended until the handler runs. UIKit refuses to present over a
+        /// controller that is already presenting, so a second dialog — another
+        /// frame, a sheet mid-transition, an auth challenge arriving during an
+        /// alert — logged "already presenting" and dropped the presentation,
+        /// and with it the handler. That frame was then frozen for good.
+        private var dialogQueue: [(UIViewController, () -> Void)] = []
+        private var dialogShowing = false
+
+        /// Presents now, or waits for the one on screen to finish. `fallback`
+        /// runs if the dialog can never be shown, so the page is answered
+        /// rather than left waiting.
+        private func presentDialog(_ alert: UIAlertController,
+                                   completing fallback: @escaping () -> Void) {
+            dialogQueue.append((alert, fallback))
+            presentNextDialog()
+        }
+
+        private func presentNextDialog() {
+            guard !dialogShowing, !dialogQueue.isEmpty else { return }
+            let (alert, fallback) = dialogQueue.removeFirst()
+            guard let presenter = Self.presenter(for: page.webView),
+                  presenter.presentedViewController == nil else {
+                // Still busy: put it back and wait for the current one to go.
+                // A presenter that never frees up is covered by the page's own
+                // dismissal, since the queue is drained on navigation.
+                if Self.presenter(for: page.webView) == nil {
+                    fallback()
+                    presentNextDialog()
+                } else {
+                    dialogQueue.insert((alert, fallback), at: 0)
+                }
+                return
+            }
+            dialogShowing = true
+            presenter.present(alert, animated: true)
+        }
+
+        /// Called from every action, after the handler the action carries.
+        private func dialogFinished() {
+            dialogShowing = false
+            presentNextDialog()
+        }
+
+        /// A navigation replaces the document that asked. Answer anything still
+        /// queued so no handler is dropped.
+        private func drainDialogs() {
+            let pending = dialogQueue
+            dialogQueue.removeAll()
+            for (_, fallback) in pending { fallback() }
+        }
+
+        private static func presenter(for webView: WKWebView?) -> UIViewController? {
+            guard let webView else { return nil }
+            return presenter(for: webView)
         }
 
         private static func presenter(for webView: WKWebView) -> UIViewController? {

@@ -71,13 +71,23 @@ final class BrowserModel: ObservableObject {
     private let episodeProgressKey = "episode-progress.v1"
     private var episodeProgress: [String: EpisodeProgress] = [:]
 
+    /// A store that would not decode. Nothing may be written back over it:
+    /// persisting an empty list is what turns one unreadable payload into a
+    /// library that is gone for good.
+    private var unreadable: Set<String> = []
+
+    private func load<T: Decodable>(_ type: T.Type, key: String) -> T? {
+        StoreRecovery.decode(type, from: store.data(forKey: key), named: key) { kept in
+            self.unreadable.insert(key)
+            StoreHealth.shared.record(store: key, keptAt: kept)
+        }
+    }
+
     init() {
-        if let data = store.data(forKey: recentsKey),
-           let saved = try? JSONDecoder().decode([Site].self, from: data) {
+        if let saved = load([Site].self, key: recentsKey) {
             recents = saved
         }
-        if let data = store.data(forKey: episodeProgressKey),
-           let saved = try? JSONDecoder().decode([String: EpisodeProgress].self, from: data) {
+        if let saved = load([String: EpisodeProgress].self, key: episodeProgressKey) {
             // Keys used to be absolute URL strings. Fold each onto its
             // normalised key; where two collapse, keep the further position.
             for (key, progress) in saved {
@@ -86,8 +96,7 @@ final class BrowserModel: ObservableObject {
                 episodeProgress[folded] = progress
             }
         }
-        if let data = store.data(forKey: pinnedKey),
-           let saved = try? JSONDecoder().decode([Site].self, from: data) {
+        if let saved = load([Site].self, key: pinnedKey) {
             pinned = saved
         }
         migrateAndCollapseRecents()
@@ -257,18 +266,25 @@ final class BrowserModel: ObservableObject {
     }
 
     private func persist() {
-        guard let data = try? JSONEncoder().encode(recents) else { return }
-        store.set(data, forKey: recentsKey)
+        write(recents, key: recentsKey)
     }
 
     private func persistPinned() {
-        guard let data = try? JSONEncoder().encode(pinned) else { return }
-        store.set(data, forKey: pinnedKey)
+        write(pinned, key: pinnedKey)
     }
 
     private func persistEpisodeProgress() {
-        guard let data = try? JSONEncoder().encode(episodeProgress) else { return }
-        store.set(data, forKey: episodeProgressKey)
+        write(episodeProgress, key: episodeProgressKey)
+    }
+
+    /// Never writes over a payload that failed to decode this launch.
+    private func write<T: Encodable>(_ value: T, key: String) {
+        guard !unreadable.contains(key) else { return }
+        guard let data = try? JSONEncoder().encode(value) else {
+            StoreHealth.shared.record(store: key, keptAt: nil)
+            return
+        }
+        store.set(data, forKey: key)
     }
 
     private func seriesIdentity(for site: Site) -> String {

@@ -6,12 +6,26 @@ final class JellyfinAPITests: XCTestCase {
 
     /// The header grammar is what the server parses first; a stray quote in
     /// a device name must not break it.
+    ///
+    /// The version is NOT asserted as a literal. It used to be hard-coded to
+    /// "0.1" in both the source and this test, so the server's device
+    /// dashboard named that build forever; it now comes from the bundle, and a
+    /// test that pins a literal is the thing that let the two drift.
     func testAuthorizationHeaderShape() {
         let anonymous = JellyfinAPI.authorization(deviceID: "abc", deviceName: "Sai's \"iPhone\"")
         XCTAssertEqual(anonymous,
-            "MediaBrowser Client=\"Cliqx\", Device=\"Sai's 'iPhone'\", DeviceId=\"abc\", Version=\"0.1\"")
+            "MediaBrowser Client=\"Cliqx\", Device=\"Sai's 'iPhone'\", DeviceId=\"abc\", "
+            + "Version=\"\(JellyfinAPI.version)\"")
         let signedIn = JellyfinAPI.authorization(deviceID: "abc", deviceName: "iPhone", token: "tok")
         XCTAssertTrue(signedIn.hasSuffix(", Token=\"tok\""))
+    }
+
+    /// Whatever the bundle reports, it has to be a usable header value: the
+    /// grammar has no escape for a quote in the version.
+    func testVersionIsAPlausibleHeaderValue() {
+        XCTAssertFalse(JellyfinAPI.version.isEmpty)
+        XCTAssertFalse(JellyfinAPI.version.contains("\""))
+        XCTAssertFalse(JellyfinAPI.version.contains(","))
     }
 
     func testStreamURLCarriesTokenAndAsksForNoTranscode() {

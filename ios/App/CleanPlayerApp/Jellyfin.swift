@@ -155,12 +155,17 @@ struct JellyfinClient {
         case notAJellyfinServer
         case badCredentials
         case http(Int)
+        /// A path or query that will not form a URL. Was a force-unwrap, so a
+        /// server address with a stray character crashed inside the network
+        /// layer instead of showing a message.
+        case badURL
 
         var errorDescription: String? {
             switch self {
             case .notAJellyfinServer: "That address didn't answer like a Jellyfin server."
             case .badCredentials: "Wrong username or password."
             case .http(let code): "The server answered \(code)."
+            case .badURL: "That server address can't be used."
             }
         }
     }
@@ -179,6 +184,11 @@ struct JellyfinClient {
     private struct PublicInfo: Decodable {
         var Id: String
         var ServerName: String
+        /// Required here although the schema marks it nullable: together with
+        /// Id it is what separates a Jellyfin public-info response from any
+        /// other JSON object with an id, and this is the reply that decides
+        /// whether the password is sent.
+        var Version: String
         var ProductName: String?
     }
     private struct AuthResult: Decodable {
@@ -200,7 +210,14 @@ struct JellyfinClient {
         } catch {
             throw Failure.notAJellyfinServer
         }
-        guard info.ProductName?.contains("Jellyfin") ?? true else { throw Failure.notAJellyfinServer }
+        // `?? true` meant a missing ProductName PASSED, so anything returning
+        // JSON with an Id was "a Jellyfin server" — and then got the password.
+        // The field is genuinely nullable, so absence cannot be fatal; what it
+        // must not do is name something else. Id and Version carry the rest of
+        // the proof, and failing to decode them is itself a rejection.
+        if let product = info.ProductName, !product.contains("Jellyfin") {
+            throw Failure.notAJellyfinServer
+        }
 
         let body = ["Username": username, "Pw": password]
         let auth: AuthResult
@@ -285,7 +302,8 @@ struct JellyfinClient {
     }
 
     func setFavorite(userID: String, itemID: String, _ on: Bool) {
-        var req = request("UserFavoriteItems/\(itemID)", query: ["userId": userID])
+        guard var req = try? request("UserFavoriteItems/\(itemID)", query: ["userId": userID])
+        else { return }
         req.httpMethod = on ? "POST" : "DELETE"
         URLSession.shared.dataTask(with: req).resume()
     }
@@ -311,10 +329,13 @@ struct JellyfinClient {
 
     // MARK: Plumbing
 
-    private func request(_ path: String, query: [String: String] = [:]) -> URLRequest {
-        var parts = URLComponents(url: server.appendingPathComponent(path), resolvingAgainstBaseURL: false)!
+    private func request(_ path: String, query: [String: String] = [:]) throws -> URLRequest {
+        guard var parts = URLComponents(url: server.appendingPathComponent(path),
+                                        resolvingAgainstBaseURL: false)
+        else { throw Failure.badURL }
         if !query.isEmpty { parts.queryItems = query.map { URLQueryItem(name: $0.key, value: $0.value) } }
-        var request = URLRequest(url: parts.url!)
+        guard let url = parts.url else { throw Failure.badURL }
+        var request = URLRequest(url: url)
         request.timeoutInterval = 15
         request.setValue(JellyfinAPI.authorization(deviceID: Self.deviceID,
                                                    deviceName: UIDevice.current.name,
@@ -339,13 +360,13 @@ struct JellyfinClient {
     }()
 
     private func get<T: Decodable>(_ path: String, query: [String: String] = [:]) async throws -> T {
-        let (data, response) = try await URLSession.shared.data(for: request(path, query: query))
+        let (data, response) = try await URLSession.shared.data(for: try request(path, query: query))
         try Self.check(response)
         return try Self.decoder.decode(T.self, from: data)
     }
 
     private func post<T: Decodable>(_ path: String, body: [String: Any]) async throws -> T {
-        var req = request(path)
+        var req = try request(path)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
@@ -356,7 +377,7 @@ struct JellyfinClient {
 
     /// Progress reports: best effort, no result, never blocks the player.
     private func fire(_ path: String, _ body: [String: Any]) {
-        var req = request(path)
+        guard var req = try? request(path) else { return }
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try? JSONSerialization.data(withJSONObject: body)
@@ -378,10 +399,21 @@ struct JellyfinClient {
 final class JellyfinServers: ObservableObject {
     @Published private(set) var servers: [JellyfinServer] = []
     private let key = "servers.v1"
+    private let tokens: TokenStore
 
-    init() {
-        if let data = UserDefaults.standard.data(forKey: key),
-           let saved = try? JSONDecoder().decode([JellyfinServer].self, from: data) {
+    /// The saved list would not decode. Writing over it would drop every
+    /// server the user added, silently.
+    private var unreadable = false
+
+    init(tokens: TokenStore = Keychain()) {
+        self.tokens = tokens
+        if let saved = StoreRecovery.decode([JellyfinServer].self,
+                                            from: UserDefaults.standard.data(forKey: key),
+                                            named: key,
+                                            didQuarantine: { kept in
+                                                self.unreadable = true
+                                                StoreHealth.shared.record(store: key, keptAt: kept)
+                                            }) {
             servers = saved
         }
     }
@@ -394,11 +426,11 @@ final class JellyfinServers: ObservableObject {
             for index in servers.indices
             where servers[index].serverID == nil && servers[index].id == serverID
                 && servers[index].userID == server.userID {
-                Keychain.delete(servers[index].id)
+                tokens.delete(servers[index].id)
                 servers[index].serverID = serverID
             }
         }
-        Keychain.set(token, for: server.tokenKey)
+        tokens.set(token, for: server.tokenKey)
         servers.removeAll { $0.id == server.id }
         servers.append(server)
         persist()
@@ -409,42 +441,53 @@ final class JellyfinServers: ObservableObject {
         // The token outlives this row while another address of the same
         // account still uses it.
         if !servers.contains(where: { $0.tokenKey == server.tokenKey }) {
-            Keychain.delete(server.tokenKey)
+            tokens.delete(server.tokenKey)
         }
         persist()
     }
 
     func client(for server: JellyfinServer) -> JellyfinClient {
-        JellyfinClient(server: server.url, token: Keychain.get(server.tokenKey))
+        JellyfinClient(server: server.url, token: tokens.get(server.tokenKey))
     }
 
     private func persist() {
-        guard let data = try? JSONEncoder().encode(servers) else { return }
+        guard !unreadable, let data = try? JSONEncoder().encode(servers) else { return }
         UserDefaults.standard.set(data, forKey: key)
     }
 }
 
-/// Generic-password items under one service. ponytail: the three calls the
-/// store needs, nothing else.
+/// Where access tokens live.
 ///
-/// Simulator builds are deliberately unsigned (`CODE_SIGNING_ALLOWED` is off
-/// for that SDK so CI needs no identity), and an unsigned process has no
-/// keychain: every SecItem call returns -34018. There the token goes to
-/// UserDefaults instead, plainly and only there. A device build is signed
-/// and uses the real keychain.
-enum Keychain {
+/// A protocol rather than a free enum so the real keychain path is the one the
+/// app always takes, and tests inject a fake instead. It used to be swapped out
+/// by `#if targetEnvironment(simulator)`, which meant the code that ships had
+/// never run in CI — and that a Release simulator build wrote tokens to a plist.
+protocol TokenStore: Sendable {
+    func set(_ value: String, for account: String)
+    func get(_ account: String) -> String?
+    func delete(_ account: String)
+}
+
+/// Generic-password items under one service.
+///
+/// An unsigned process has no keychain and every SecItem call returns -34018.
+/// That is the simulator's default (`CODE_SIGNING_ALLOWED` is off for that SDK
+/// so CI needs no identity). Rather than compile a different store there, the
+/// failure is detected at runtime and an in-memory store takes over for the
+/// session: the device path is then the only one in the binary, and a token
+/// never lands on disk in the clear.
+struct Keychain: TokenStore {
     private static let service = "com.saisamardh.cleanplayer.jellyfin"
-#if targetEnvironment(simulator)
-    static func set(_ value: String, for account: String) {
-        UserDefaults.standard.set(value, forKey: service + "." + account)
+    private static let log = Logger(subsystem: Bundle.main.bundleIdentifier ?? "cliqx",
+                                    category: "Keychain")
+
+    /// Populated only when the keychain is unavailable to this process.
+    private static let fallback = InMemoryTokenStore()
+    private static let keychainUnavailable = OSAllocatedUnfairLock(initialState: false)
+
+    private static var usingFallback: Bool {
+        keychainUnavailable.withLock { $0 }
     }
-    static func get(_ account: String) -> String? {
-        UserDefaults.standard.string(forKey: service + "." + account)
-    }
-    static func delete(_ account: String) {
-        UserDefaults.standard.removeObject(forKey: service + "." + account)
-    }
-#else
 
     private static func query(_ account: String) -> [String: Any] {
         [kSecClass as String: kSecClassGenericPassword,
@@ -452,32 +495,88 @@ enum Keychain {
          kSecAttrAccount as String: account]
     }
 
-    private static let log = Logger(subsystem: Bundle.main.bundleIdentifier ?? "cliqx", category: "Keychain")
+    /// Update in place, add when there is nothing to update. Delete-then-add
+    /// loses the token outright if the process dies between the two.
+    func set(_ value: String, for account: String) {
+        if Self.usingFallback { return Self.fallback.set(value, for: account) }
+        let data = Data(value.utf8)
+        let updated = SecItemUpdate(
+            Self.query(account) as CFDictionary,
+            [kSecValueData as String: data] as CFDictionary)
+        if updated == errSecSuccess { return }
 
-    static func set(_ value: String, for account: String) {
-        delete(account)
-        var item = query(account)
-        item[kSecValueData as String] = Data(value.utf8)
+        var item = Self.query(account)
+        item[kSecValueData as String] = data
         item[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        let status = SecItemAdd(item as CFDictionary, nil)
-        if status != errSecSuccess { log.error("SecItemAdd failed: \(status)") }
+        let added = SecItemAdd(item as CFDictionary, nil)
+        guard added != errSecSuccess else { return }
+        if Self.isUnavailable(added) {
+            Self.useFallback(after: added)
+            Self.fallback.set(value, for: account)
+        } else {
+            Self.log.error("SecItemAdd failed: \(added)")
+        }
     }
 
-    static func get(_ account: String) -> String? {
-        var item = query(account)
+    func get(_ account: String) -> String? {
+        if Self.usingFallback { return Self.fallback.get(account) }
+        var item = Self.query(account)
         item[kSecReturnData as String] = true
         item[kSecMatchLimit as String] = kSecMatchLimitOne
         var out: CFTypeRef?
         let status = SecItemCopyMatching(item as CFDictionary, &out)
-        guard status == errSecSuccess, let data = out as? Data else {
-            log.error("SecItemCopyMatching failed: \(status)")
-            return nil
+        if status == errSecSuccess, let data = out as? Data {
+            return String(data: data, encoding: .utf8)
         }
-        return String(data: data, encoding: .utf8)
+        if Self.isUnavailable(status) {
+            Self.useFallback(after: status)
+            return Self.fallback.get(account)
+        }
+        if status != errSecItemNotFound { Self.log.error("SecItemCopyMatching failed: \(status)") }
+        return nil
     }
 
-    static func delete(_ account: String) {
-        SecItemDelete(query(account) as CFDictionary)
+    func delete(_ account: String) {
+        if Self.usingFallback { return Self.fallback.delete(account) }
+        let status = SecItemDelete(Self.query(account) as CFDictionary)
+        if Self.isUnavailable(status) {
+            Self.useFallback(after: status)
+            Self.fallback.delete(account)
+        }
     }
-#endif
+
+    /// -34018 errSecMissingEntitlement, -25291 errSecNotAvailable: the
+    /// process has no keychain at all, as opposed to this item being absent.
+    private static func isUnavailable(_ status: OSStatus) -> Bool {
+        status == -34018 || status == errSecNotAvailable
+    }
+
+    private static func useFallback(after status: OSStatus) {
+        let firstTime = keychainUnavailable.withLock { flag -> Bool in
+            defer { flag = true }
+            return !flag
+        }
+        guard firstTime else { return }
+        log.error("""
+            Keychain unavailable (\(status)); tokens are kept in memory for             this session only.
+            """)
+    }
+}
+
+/// Tokens for a process with no keychain, and for tests. Never touches disk.
+final class InMemoryTokenStore: TokenStore, @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [String: String] = [:]
+
+    func set(_ value: String, for account: String) {
+        lock.withLock { values[account] = value }
+    }
+
+    func get(_ account: String) -> String? {
+        lock.withLock { values[account] }
+    }
+
+    func delete(_ account: String) {
+        lock.withLock { _ = values.removeValue(forKey: account) }
+    }
 }
