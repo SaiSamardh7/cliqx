@@ -6,14 +6,35 @@ import os
 
 // MARK: - Models
 
-/// A server the user added. The access token lives in the keychain, keyed by
-/// the server's id; everything else is plain and goes in UserDefaults.
+/// A server the user added. The access token lives in the keychain; everything
+/// else is plain and goes in UserDefaults.
+///
+/// A row is server + user + address, not the server's own Id alone. Keyed on
+/// that alone, adding the same Jellyfin by a second address (the LAN IP and
+/// the domain), or a second account on it, silently replaced the first row —
+/// "adding any other server makes the previous one disappear".
+///
+/// The token is keyed by server + user, and shared by every address of the
+/// same account: Jellyfin revokes a user's earlier token for this DeviceId
+/// when they sign in again, so two rows holding separate tokens would break
+/// each other at the second sign-in.
 struct JellyfinServer: Codable, Identifiable, Hashable {
-    var id: String            // the server's own Id, from /System/Info/Public
+    var id: String
     var name: String
     var url: URL
     var userID: String
     var username: String
+    /// The server's own Id. Nil on rows saved before rows were keyed by
+    /// address; there `id` is the server Id, and the token key is `id`.
+    var serverID: String?
+
+    var tokenKey: String { serverID.map { "\($0)|\(userID)" } ?? id }
+
+    static func identity(serverID: String, userID: String, url: URL) -> String {
+        let host = url.host()?.lowercased() ?? ""
+        let port = url.port.map { ":\($0)" } ?? ""
+        return "\(serverID)|\(userID)|\(host)\(port)"
+    }
 }
 
 /// One library, folder, movie, season or episode. The same shape for all of
@@ -121,6 +142,12 @@ struct JellyfinItem: Codable, Identifiable, Hashable {
 
 /// The handful of calls the shelf needs. `URLSession.shared`, JSON, no SDK.
 ///
+/// Paths are the user-scoped forms that take `userId` as a query parameter
+/// (`UserViews`, `Items/Latest`, `UserItems/Resume`, …). The older
+/// `Users/{id}/…` routes were removed from the server; a 404 on `Latest` was
+/// swallowed by the shelf and simply left every Recently Added row out.
+/// The query forms exist from 10.9 on, so older servers still answer.
+///
 /// ponytail: five endpoints, no retry, no cache. Add `ETag` handling when a
 /// library is big enough for the grid to feel slow.
 struct JellyfinClient {
@@ -182,22 +209,26 @@ struct JellyfinClient {
         } catch Failure.http(401), Failure.http(403) {
             throw Failure.badCredentials
         }
-        let record = JellyfinServer(id: info.Id, name: info.ServerName, url: server,
-                                    userID: auth.User.Id, username: auth.User.Name)
+        let record = JellyfinServer(id: JellyfinServer.identity(serverID: info.Id, userID: auth.User.Id,
+                                                                url: server),
+                                    name: info.ServerName, url: server,
+                                    userID: auth.User.Id, username: auth.User.Name,
+                                    serverID: info.Id)
         return (record, auth.AccessToken)
     }
 
     /// The user's libraries. Empty means the account can see none — the
     /// answer to "why are there no movies", straight from the server.
     func views(userID: String) async throws -> [JellyfinItem] {
-        let page: Page = try await get("Users/\(userID)/Views")
+        let page: Page = try await get("UserViews", query: ["userId": userID])
         return page.Items
     }
 
     /// Children of a library or folder, ordered the way the server would
     /// show them; episodes by number, everything else by name.
     func items(userID: String, parentID: String) async throws -> [JellyfinItem] {
-        let page: Page = try await get("Users/\(userID)/Items", query: [
+        let page: Page = try await get("Items", query: [
+            "userId": userID,
             "ParentId": parentID,
             "SortBy": "IsFolder,SortName",
             "SortOrder": "Ascending",
@@ -209,7 +240,7 @@ struct JellyfinClient {
     /// Where the film was left, so the next screen can offer Resume without
     /// another round trip. Keeps the server the source of truth for position.
     func item(userID: String, id: String) async throws -> JellyfinItem {
-        try await get("Users/\(userID)/Items/\(id)")
+        try await get("Items/\(id)", query: ["userId": userID])
     }
 
     // MARK: The home rows, same endpoints the web client uses
@@ -218,8 +249,8 @@ struct JellyfinClient {
 
     /// Continue Watching: anything left partway through.
     func resume(userID: String) async throws -> [JellyfinItem] {
-        let page: Page = try await get("Users/\(userID)/Items/Resume", query: [
-            "Limit": "12", "MediaTypes": "Video", "Fields": Self.homeFields,
+        let page: Page = try await get("UserItems/Resume", query: [
+            "userId": userID, "Limit": "12", "MediaTypes": "Video", "Fields": Self.homeFields,
             "EnableImageTypes": "Primary,Backdrop,Thumb",
         ])
         return page.Items
@@ -236,8 +267,8 @@ struct JellyfinClient {
 
     /// Recently Added in one library. This endpoint returns a bare array.
     func latest(userID: String, parentID: String) async throws -> [JellyfinItem] {
-        try await get("Users/\(userID)/Items/Latest", query: [
-            "ParentId": parentID, "Limit": "12", "Fields": Self.homeFields,
+        try await get("Items/Latest", query: [
+            "userId": userID, "ParentId": parentID, "Limit": "12", "Fields": Self.homeFields,
             "EnableImageTypes": "Primary,Backdrop,Logo",
         ])
     }
@@ -245,8 +276,8 @@ struct JellyfinClient {
     /// The hero. First: something to pick back up. Else: an unwatched film,
     /// chosen at random so the shelf changes between visits.
     func recommended(userID: String) async throws -> JellyfinItem? {
-        let page: Page = try await get("Users/\(userID)/Items", query: [
-            "IncludeItemTypes": "Movie", "Recursive": "true", "Filters": "IsUnplayed",
+        let page: Page = try await get("Items", query: [
+            "userId": userID, "IncludeItemTypes": "Movie", "Recursive": "true", "Filters": "IsUnplayed",
             "SortBy": "Random", "Limit": "1", "Fields": Self.homeFields,
             "EnableImageTypes": "Primary,Backdrop,Logo", "ImageTypeLimit": "1",
         ])
@@ -254,7 +285,7 @@ struct JellyfinClient {
     }
 
     func setFavorite(userID: String, itemID: String, _ on: Bool) {
-        var req = request("Users/\(userID)/FavoriteItems/\(itemID)")
+        var req = request("UserFavoriteItems/\(itemID)", query: ["userId": userID])
         req.httpMethod = on ? "POST" : "DELETE"
         URLSession.shared.dataTask(with: req).resume()
     }
@@ -356,20 +387,35 @@ final class JellyfinServers: ObservableObject {
     }
 
     func add(_ server: JellyfinServer, token: String) {
-        Keychain.set(token, for: server.id)
+        // An old row for this same account was keyed by server Id alone and
+        // holds a token the server has just revoked. Move it onto the shared
+        // key so it keeps working, rather than dying at the next request.
+        if let serverID = server.serverID {
+            for index in servers.indices
+            where servers[index].serverID == nil && servers[index].id == serverID
+                && servers[index].userID == server.userID {
+                Keychain.delete(servers[index].id)
+                servers[index].serverID = serverID
+            }
+        }
+        Keychain.set(token, for: server.tokenKey)
         servers.removeAll { $0.id == server.id }
         servers.append(server)
         persist()
     }
 
     func remove(_ server: JellyfinServer) {
-        Keychain.delete(server.id)
         servers.removeAll { $0.id == server.id }
+        // The token outlives this row while another address of the same
+        // account still uses it.
+        if !servers.contains(where: { $0.tokenKey == server.tokenKey }) {
+            Keychain.delete(server.tokenKey)
+        }
         persist()
     }
 
     func client(for server: JellyfinServer) -> JellyfinClient {
-        JellyfinClient(server: server.url, token: Keychain.get(server.id))
+        JellyfinClient(server: server.url, token: Keychain.get(server.tokenKey))
     }
 
     private func persist() {
