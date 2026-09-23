@@ -36,23 +36,20 @@ final class EpisodeTransitionTests: XCTestCase {
         //
         // The `defer` keeps the window alive; nothing else refers to it once
         // the web view is added, and releasing it takes the web view back out.
-        // Attached to a real scene where there is one. A window with no
-        // windowScene is not on screen as far as the system is concerned, and
-        // an off-screen web view is what WebKit refuses an assertion for.
-        let scene = UIApplication.shared.connectedScenes
-            .compactMap { $0 as? UIWindowScene }
-            .first { $0.activationState == .foregroundActive }
-            ?? UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
-        let window = scene.map { UIWindow(windowScene: $0) } ?? UIWindow(frame: frame)
-        window.frame = frame
+        // Exactly the pattern RuleActivationTests uses, because that one does
+        // load pages on this CI and this one does not. A key window with no
+        // root view controller is its own problem, so it is not made key.
+        let window = UIWindow(frame: frame)
+        window.isHidden = false
         window.addSubview(webView)
-        window.makeKeyAndVisible()
         defer {
             webView.removeFromSuperview()
             window.isHidden = true
         }
 
 
+        let recorder = NavigationRecorder()
+        webView.navigationDelegate = recorder
         webView.loadHTMLString("""
         <button class="ctrl forward next">Next</button>
         <iframe id="player"></iframe>
@@ -73,7 +70,7 @@ final class EpisodeTransitionTests: XCTestCase {
         // machine is not overloaded.
         try await waitForPage(
             "!!document.querySelector('.ctrl.forward.next') && !!document.querySelector('#player')",
-            in: webView, timeout: 60)
+            in: webView, timeout: 60, recorder: recorder)
         let handled: Bool = try await withCheckedThrowingContinuation { continuation in
             webView.evaluateJavaScript(
                 EpisodeTransition.siteControlScript(for: .next),

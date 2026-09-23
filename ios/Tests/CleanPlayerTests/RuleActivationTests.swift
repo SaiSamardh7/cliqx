@@ -394,6 +394,7 @@ final class RuleActivationTests: XCTestCase {
 @MainActor
 func waitForPage(_ javaScript: String, in webView: WKWebView,
                  timeout: TimeInterval = 30,
+                 recorder: NavigationRecorder? = nil,
                  file: StaticString = #filePath, line: UInt = #line) async throws {
     let deadline = Date().addingTimeInterval(timeout)
     while Date() < deadline {
@@ -422,8 +423,57 @@ func waitForPage(_ javaScript: String, in webView: WKWebView,
             """)
     }
 
-    XCTFail("page never satisfied: \(javaScript)", file: file, line: line)
+    let url = webView.url?.absoluteString ?? "nil"
+    let readyState = await withCheckedContinuation { continuation in
+        webView.evaluateJavaScript("document.readyState") { value, _ in
+            continuation.resume(returning: (value as? String) ?? "unknown")
+        }
+    }
+    XCTFail("""
+        page never satisfied: \(javaScript)
+        url: \(url), readyState: \(readyState)
+        \(recorder?.report ?? "no navigation recorder attached")
+        """, file: file, line: line)
     throw LoadWaiter.TimedOut()
+}
+
+/// Records what a navigation did, so a test that times out can say WHY rather
+/// than leaving the next person to guess from a deadline.
+final class NavigationRecorder: NSObject, WKNavigationDelegate {
+    private(set) var finished = false
+    private(set) var failure: Error?
+    private(set) var committed = false
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        finished = true
+    }
+
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        committed = true
+    }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!,
+                 withError error: Error) {
+        failure = error
+    }
+
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!,
+                 withError error: Error) {
+        failure = error
+    }
+
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        failure = NSError(domain: "NavigationRecorder", code: -1, userInfo: [
+            NSLocalizedDescriptionKey: "the web content process terminated",
+        ])
+    }
+
+    var report: String {
+        if let failure { return "navigation failed: \(failure)" }
+        if finished { return "navigation finished but the document lacked it" }
+        if committed { return "navigation committed but never finished" }
+        return "navigation never committed"
+    }
 }
 
 /// A boolean from the page, or nil when the evaluation itself failed — which
