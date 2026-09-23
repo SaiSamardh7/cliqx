@@ -36,13 +36,22 @@ final class EpisodeTransitionTests: XCTestCase {
         //
         // The `defer` keeps the window alive; nothing else refers to it once
         // the web view is added, and releasing it takes the web view back out.
-        let window = UIWindow(frame: frame)
-        window.isHidden = false
+        // Attached to a real scene where there is one. A window with no
+        // windowScene is not on screen as far as the system is concerned, and
+        // an off-screen web view is what WebKit refuses an assertion for.
+        let scene = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .first { $0.activationState == .foregroundActive }
+            ?? UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
+        let window = scene.map { UIWindow(windowScene: $0) } ?? UIWindow(frame: frame)
+        window.frame = frame
         window.addSubview(webView)
+        window.makeKeyAndVisible()
         defer {
             webView.removeFromSuperview()
             window.isHidden = true
         }
+
 
         webView.loadHTMLString("""
         <button class="ctrl forward next">Next</button>

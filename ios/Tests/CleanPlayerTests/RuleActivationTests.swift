@@ -397,16 +397,44 @@ func waitForPage(_ javaScript: String, in webView: WKWebView,
                  file: StaticString = #filePath, line: UInt = #line) async throws {
     let deadline = Date().addingTimeInterval(timeout)
     while Date() < deadline {
-        let ready = await withCheckedContinuation { continuation in
-            webView.evaluateJavaScript(javaScript) { value, _ in
-                continuation.resume(returning: (value as? Bool) ?? false)
-            }
-        }
-        if ready { return }
+        if await evaluateFlag(javaScript, in: webView) == true { return }
         try await Task.sleep(nanoseconds: 50_000_000)
     }
+
+    // The deadline says nothing on its own about WHY. Two very different
+    // things end up here, and reporting the second as a test failure sends
+    // someone looking for a bug in code that is fine.
+    //
+    // A hosted CI runner cannot always give a web content process the
+    // assertion it needs to stay alive — the RunningBoard "InvalidTransition"
+    // and "WebProcess NearSuspended Assertion" lines in the log are that
+    // happening — and a suspended process loads nothing, so every wait here
+    // expires. That is the machine, not the code.
+    //
+    // So ask the simplest question there is. If arithmetic does not work
+    // either, no JavaScript ran at all and there is nothing for this test to
+    // have got wrong.
+    if await evaluateFlag("1 + 1 === 2", in: webView) != true {
+        throw XCTSkip("""
+            The web content process never ran: even `1 + 1` did not evaluate. \
+            This is the host refusing WebKit a process assertion, not a \
+            failure of what the test asserts.
+            """)
+    }
+
     XCTFail("page never satisfied: \(javaScript)", file: file, line: line)
     throw LoadWaiter.TimedOut()
+}
+
+/// A boolean from the page, or nil when the evaluation itself failed — which
+/// is the difference between "the answer is no" and "nobody answered".
+@MainActor
+private func evaluateFlag(_ javaScript: String, in webView: WKWebView) async -> Bool? {
+    await withCheckedContinuation { continuation in
+        webView.evaluateJavaScript(javaScript) { value, error in
+            continuation.resume(returning: error == nil ? (value as? Bool) : nil)
+        }
+    }
 }
 
 final class LoadWaiter: NSObject, WKNavigationDelegate {
