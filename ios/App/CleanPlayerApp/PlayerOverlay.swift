@@ -34,6 +34,11 @@ struct PlayerOverlay: View {
     /// dim for everything the user did afterwards.
     @State private var brightnessOnEntry: CGFloat?
     @State private var showingBoostWarning = false
+    /// Whether the rotate button narrowed the app's supported orientations, so
+    /// exiting knows whether it has anything to put back, and what the
+    /// interface was showing before it did.
+    @State private var didNarrowOrientation = false
+    @State private var orientationBeforeRotate: UIInterfaceOrientation?
 
     var body: some View {
         ZStack {
@@ -103,6 +108,7 @@ struct PlayerOverlay: View {
         .onChange(of: page.nextEpisode) { _, _ in chrome.itemChanged() }
         .onDisappear {
             chrome.cancelEverything()
+            restoreOrientation()
             // Put the screen back the way it was found. Only if nothing else
             // changed it since — the user may have used Control Centre, and
             // overriding that would be the same rudeness in reverse.
@@ -876,11 +882,54 @@ struct PlayerOverlay: View {
             ? "Rotate to portrait" : "Rotate to landscape"
     }
 
+    /// Turn the screen, and remember that we narrowed what the app supports.
+    ///
+    /// `requestGeometryUpdate` REPLACES the scene's supported orientations
+    /// rather than simply rotating: after asking for `.landscape` the scene no
+    /// longer follows the device, and it stayed that way after the player
+    /// closed — the whole app stuck in landscape until it was relaunched.
     private func rotatePlayer() {
         guard let scene = foregroundScene else { return }
-        let orientation: UIInterfaceOrientationMask = scene.interfaceOrientation.isLandscape
-            ? .portrait : .landscape
-        scene.requestGeometryUpdate(.iOS(interfaceOrientations: orientation))
+        if !didNarrowOrientation { orientationBeforeRotate = scene.interfaceOrientation }
+        didNarrowOrientation = true
+        scene.requestGeometryUpdate(
+            .iOS(interfaceOrientations:
+                    InterfaceOrientationPolicy.flipped(from: scene.interfaceOrientation)))
+    }
+
+    /// Give the app back every orientation it declares in its Info.plist.
+    ///
+    /// Only when this player narrowed it. A user who rotated the device by
+    /// hand, or who has Portrait Orientation Lock on, chose that — and asking
+    /// for a geometry update they did not ask for is the same rudeness in the
+    /// other direction.
+    private func restoreOrientation() {
+        guard didNarrowOrientation, let scene = foregroundScene else { return }
+        didNarrowOrientation = false
+        let declared = InterfaceOrientationPolicy.declared()
+
+        // Two steps, and the first one is the point.
+        //
+        // Widening back to everything the app allows does NOT undo the rotate
+        // button: landscape is still in that set, so UIKit has no reason to
+        // leave it and waits for a device-orientation change that never comes
+        // for a phone already being held still. So send the interface to where
+        // the device actually is first...
+        if let target = InterfaceOrientationPolicy.restoreTarget(
+            device: UIDevice.current.orientation,
+            before: orientationBeforeRotate,
+            allowed: declared) {
+            scene.requestGeometryUpdate(.iOS(interfaceOrientations: target))
+        }
+        orientationBeforeRotate = nil
+        // ...then hand every orientation back, so nothing is left locked — this
+        // widening keeps whatever the step above settled on.
+        DispatchQueue.main.async {
+            scene.requestGeometryUpdate(.iOS(interfaceOrientations: declared))
+            for window in scene.windows {
+                window.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
+            }
+        }
     }
 
     private func circleLabel(_ symbol: String, size: CGFloat = 15) -> some View {

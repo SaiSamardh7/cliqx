@@ -1,5 +1,6 @@
 import CleanPlayer
 import SwiftUI
+import UIKit
 
 @main
 struct CleanPlayerApp: App {
@@ -27,6 +28,12 @@ struct CleanPlayerApp: App {
                 // navigation — is what keeps that cost off the critical path.
                 rules.begin(settings.level)
                 Diagnostics.start()
+                // `UIDevice.current.orientation` reads `.unknown` until this is
+                // asked for. The player's rotate button needs it: undoing that
+                // button means sending the interface back to where the device
+                // actually is, and "unknown" would leave it stuck in the
+                // orientation the button chose.
+                UIDevice.current.beginGeneratingDeviceOrientationNotifications()
             }
         }
     }
