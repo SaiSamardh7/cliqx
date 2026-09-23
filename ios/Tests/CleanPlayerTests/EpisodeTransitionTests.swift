@@ -46,7 +46,7 @@ final class EpisodeTransitionTests: XCTestCase {
 
         webView.loadHTMLString("""
         <button class="ctrl forward next">Next</button>
-        <iframe id="player" src="about:blank"></iframe>
+        <iframe id="player"></iframe>
         <script>
           document.querySelector('.ctrl.forward.next').addEventListener('click', () => {
             document.body.dataset.transition = 'ajax';
@@ -58,9 +58,13 @@ final class EpisodeTransitionTests: XCTestCase {
         // Not `didFinish`: the fixture holds an <iframe>, so that waits on the
         // frame as well and has timed out on CI while the button this test is
         // about had been in the document for seconds.
+        // 60s, because this suite has been measured on CI taking nine seconds
+        // to run a single pure-logic assertion. The wait returns the moment
+        // the document is there, so a generous deadline costs nothing when the
+        // machine is not overloaded.
         try await waitForPage(
             "!!document.querySelector('.ctrl.forward.next') && !!document.querySelector('#player')",
-            in: webView)
+            in: webView, timeout: 60)
         let handled: Bool = try await withCheckedThrowingContinuation { continuation in
             webView.evaluateJavaScript(
                 EpisodeTransition.siteControlScript(for: .next),

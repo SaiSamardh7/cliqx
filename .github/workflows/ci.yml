@@ -1,17 +1,33 @@
 name: CI
 
+# Once per commit, not twice.
+#
+# `push` and `pull_request` both fire for a branch with a PR open, and their
+# refs differ — refs/heads/x against refs/pull/N/merge — so the concurrency
+# group did not collapse them. Two full macOS matrices then ran at the same
+# time on the same account's runners and fought for them: the failures that
+# came out of it were "Timed out while launching application via Xcode",
+# "Failed to terminate", and unit tests taking nine seconds to run a single
+# pure-logic assertion. None of those were the code under test.
+#
+# Branches are covered by their pull request; main is covered by its push.
 on:
   push:
+    branches: [main]
   pull_request:
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # By PR number where there is one, so a second push to the same PR replaces
+  # the run in flight rather than queueing behind it. Keyed on the ref for
+  # main, so a merge never cancels the run that is verifying it.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   swift:
     name: Swift tests (iOS Simulator)
     runs-on: macos-15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
 
@@ -47,6 +63,7 @@ jobs:
   app:
     name: App UI tests
     runs-on: macos-15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v5
       - name: Select Xcode
@@ -79,6 +96,7 @@ jobs:
   agent:
     name: Page agent (Chromium + WebKit)
     runs-on: macos-15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -104,6 +122,7 @@ jobs:
   rules:
     name: Rule data, ad coverage, icon and Info.plist
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v5
 
