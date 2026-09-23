@@ -286,7 +286,7 @@ browser group (S2-14 onwards).
 - [ ] **S2-44 Audio-track selection for web and server.** Agent: `audioTracks`
   API where WebKit exposes it; ServerEngine: `audioTrackIndexes/Names`.
 - [ ] **S2-45 Gesture sensitivity + region width settings** (currently on/off only).
-- [ ] **S2-46 Every unsupported control says why.** Menu rows that are hidden
+- [x] **S2-46 Every unsupported control says why.** Menu rows that are hidden
   because the site doesn't expose the capability get a disabled row with
   "Not available on this site" instead of vanishing.
 

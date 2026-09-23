@@ -122,22 +122,36 @@ final class ServerEngine: NSObject, ObservableObject, @preconcurrency VLCMediaPl
     /// The other episodes of this season, for Next / Previous and the list.
     /// A film has none, and the chrome hides the controls.
     private func loadSiblings() async {
-        guard item.type == "Episode" else { return }
+        guard item.type == "Episode" else {
+            page.episodeUnavailableReason = item.type == "Movie"
+                ? "Films don't have episodes."
+                : nil
+            return
+        }
         // By series, with the season as a filter rather than a requirement.
         // This used to list the season FOLDER, which needs a SeasonId — and an
         // episode opened from Continue Watching or Next Up need not carry one,
         // so those had no next or previous at all.
-        if let series = item.seriesId,
-           let found = try? await client.episodes(userID: server.userID,
-                                                  seriesID: series,
-                                                  seasonID: item.seasonId),
-           !found.isEmpty {
-            siblings = found
+        var failure: String?
+        if let series = item.seriesId {
+            do {
+                let found = try await client.episodes(userID: server.userID,
+                                                      seriesID: series,
+                                                      seasonID: item.seasonId)
+                siblings = found
+                if found.isEmpty { failure = "\(server.name) returned no episodes for this show." }
+            } catch {
+                failure = "Couldn't load the episode list: \(error.localizedDescription)"
+            }
         } else if let season = item.seasonId {
             // Older servers, or an episode that somehow has a season but no
             // series: the folder listing still works.
             siblings = (try? await client.items(userID: server.userID, parentID: season)) ?? []
+            if siblings.isEmpty { failure = "\(server.name) returned no episodes for this season." }
+        } else {
+            failure = "This episode arrived without a series, so there is nothing to page through."
         }
+        page.episodeUnavailableReason = failure
         publishNeighbours()
     }
 
@@ -148,10 +162,19 @@ final class ServerEngine: NSObject, ObservableObject, @preconcurrency VLCMediaPl
             page.nextEpisode = nil
             page.previousEpisode = nil
             page.nextEpisodeIsEpisodic = false
+            if !siblings.isEmpty {
+                page.episodeUnavailableReason =
+                    "This episode isn't in its own show's episode list on \(server.name)."
+            }
             return
         }
         page.previousEpisode = index > 0 ? Self.key(siblings[index - 1]) : nil
         page.nextEpisode = index + 1 < siblings.count ? Self.key(siblings[index + 1]) : nil
+        if page.nextEpisode == nil && page.previousEpisode == nil {
+            page.episodeUnavailableReason = "This is the only episode in the list."
+        } else {
+            page.episodeUnavailableReason = nil
+        }
         // These come from the season's own item list, so they are episodes in
         // the sense the countdown needs — not a link that says "next".
         page.nextEpisodeIsEpisodic = page.nextEpisode != nil

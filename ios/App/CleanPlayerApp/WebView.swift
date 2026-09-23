@@ -92,6 +92,13 @@ final class PageState: ObservableObject {
     /// footer or a docs page matches the text rule, and auto-advancing on it
     /// carries the user off the page they were watching.
     @Published var nextEpisodeIsEpisodic = false
+    /// Why there is no next or previous, when there is none.
+    ///
+    /// A disabled button says "not here" and nothing else, which is the same
+    /// thing whether the server refused the request, the show has one episode,
+    /// or this is a page the app could find no episode links on. Those want
+    /// different actions from the user, so the player says which it is.
+    @Published var episodeUnavailableReason: String?
     @Published var overlayBlocking = true
     @Published var blockedCount = 0
     /// Popups stopped in the native navigation layer: a cross-site window, a
@@ -989,6 +996,20 @@ struct WebView: UIViewRepresentable {
                 }
                 self.page.nextEpisode = sameSite(parsed["next"] as? String)
                 self.page.previousEpisode = sameSite(parsed["prev"] as? String)
+                // Say which of the two silences this is. A site whose player
+                // draws Next with JavaScript and no link — Jellyfin's own web
+                // client among them — looks exactly like a page with one
+                // episode, and the user can act on the difference.
+                if self.page.nextEpisode == nil && self.page.previousEpisode == nil {
+                    let offered = (parsed["next"] as? String) ?? (parsed["prev"] as? String)
+                    self.page.episodeUnavailableReason = offered == nil
+                        ? "No episode links on this page. Some sites draw Next "
+                          + "and Previous with scripts rather than links, and "
+                          + "those can't be found from here."
+                        : "The episode links on this page point to another site."
+                } else {
+                    self.page.episodeUnavailableReason = nil
+                }
                 self.page.nextEpisodeIsEpisodic = self.page.nextEpisode != nil
                     && ["rel", "list"].contains(parsed["nextSource"] as? String ?? "")
             }
@@ -1286,6 +1307,7 @@ struct WebView: UIViewRepresentable {
             page.nextEpisode = nil
             page.previousEpisode = nil
             page.nextEpisodeIsEpisodic = false
+            page.episodeUnavailableReason = nil
         }
 
         func webView(_ webView: WKWebView,

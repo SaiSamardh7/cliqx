@@ -618,7 +618,8 @@ struct PlayerOverlay: View {
     private func episodeControls(showsLabel: Bool) -> some View {
         HStack(spacing: 2) {
             barButton("backward.end.fill", label: "Previous episode",
-                      enabled: page.previousEpisode != nil) {
+                      enabled: page.previousEpisode != nil,
+                      unavailable: page.episodeUnavailableReason) {
                 if let previous = page.previousEpisode {
                     page.actions.goToEpisode(previous)
                 }
@@ -638,7 +639,8 @@ struct PlayerOverlay: View {
             }
             .accessibilityLabel("Episode list")
             barButton("forward.end.fill", label: "Next episode",
-                      enabled: page.nextEpisode != nil) {
+                      enabled: page.nextEpisode != nil,
+                      unavailable: page.episodeUnavailableReason) {
                 if let next = page.nextEpisode {
                     page.actions.goToEpisode(next)
                 }
@@ -824,11 +826,17 @@ struct PlayerOverlay: View {
         NavigationStack {
             Group {
                 if page.episodes.isEmpty {
+                    // The specific reason when there is one. "No episode list"
+                    // alone reads the same whether the server refused the
+                    // request, the show has one episode, or the site draws its
+                    // controls with scripts — and those want different things
+                    // from the person reading it.
                     ContentUnavailableView(
                         "No episode list",
                         systemImage: "list.bullet",
-                        description: Text("This page does not link its episodes "
-                                          + "in a way the player can read."))
+                        description: Text(page.episodeUnavailableReason
+                            ?? "This page does not link its episodes in a way "
+                             + "the player can read."))
                 } else {
                     List(page.episodes) { episode in
                         Button {
@@ -941,6 +949,7 @@ struct PlayerOverlay: View {
     }
 
     private func barButton(_ symbol: String, label: String, enabled: Bool = true,
+                           unavailable: String? = nil,
                            action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: symbol)
@@ -948,6 +957,9 @@ struct PlayerOverlay: View {
                 .frame(width: 44, height: 44)
         }
         .disabled(!enabled)
+        // A disabled control that says nothing is the same as a broken one to
+        // someone who cannot see that it is dimmed.
+        .accessibilityHint(enabled ? "" : (unavailable ?? ""))
         .opacity(enabled ? 1 : 0.35)
         .accessibilityLabel(label)
     }
