@@ -2742,3 +2742,114 @@ test.describe('one definition of same site', () => {
         __cp.navigateEpisode('https://elsewhere.test/watch/ep-2'))).toBe(false);
     });
 });
+
+test.describe('what a site paints over the film', () => {
+  // aniwave announces each episode change with a card in the corner of the
+  // player — "Playing Episode 6", a title, a date and a close button. Theater
+  // is supposed to be the video and nothing else, but the interstitial test
+  // deliberately only catches things covering the MIDDLE of the video by at
+  // least a third, because outside theater small site furniture around a
+  // player is the site's business. A corner card is neither, so it sat there
+  // through the whole episode.
+  const shown = (page: Page, selector: string) =>
+    page.evaluate((s) => {
+      const el = document.querySelector(s);
+      return el ? getComputedStyle(el).display !== 'none' : false;
+    }, selector);
+
+  async function stagedPlayer(page: Page) {
+    await serve(page, `${HEAD}<div class="player" style="position:relative">
+      <video></video></div>`);
+    // No rect mock: staging gives the video position:fixed inset:0, so its
+    // box IS the viewport, which is the whole point — in theater every corner
+    // of the screen is the film.
+    await page.evaluate(() => {
+      (document.querySelector('video')! as any).play = () => Promise.resolve();
+    });
+    await watchClean(page).click();
+  }
+
+  test('an episode toast inserted after theater starts is hidden',
+    async ({ page }) => {
+      await stagedPlayer(page);
+      await page.evaluate(() => {
+        const toast = document.createElement('div');
+        toast.id = 'episode-toast';
+        toast.style.cssText =
+          'position:fixed;right:20px;bottom:40px;width:300px;height:110px;background:#222';
+        toast.innerHTML = '<p>Playing Episode 6</p><button>close</button>';
+        document.body.appendChild(toast);
+      });
+      await page.evaluate(() => __cp.hideTheaterIntruders());
+      expect(await shown(page, '#episode-toast')).toBe(false);
+    });
+
+  test('a toast is not mistaken for subtitles just because it holds text',
+    async ({ page }) => {
+      await stagedPlayer(page);
+      await page.evaluate(() => {
+        const toast = document.createElement('div');
+        toast.id = 'notice';
+        toast.style.cssText =
+          'position:fixed;right:20px;bottom:40px;width:300px;height:110px;background:#222';
+        // Text, no media — the caption heuristic's shape. The close button is
+        // what separates a notice from a caption.
+        toast.innerHTML = 'Playing Episode 6<a href="/ep/7">next</a>';
+        document.body.appendChild(toast);
+      });
+      await page.evaluate(() => __cp.hideTheaterIntruders());
+      expect(await shown(page, '#notice')).toBe(false);
+    });
+
+  test('real captions still survive the same pass', async ({ page }) => {
+    await stagedPlayer(page);
+    await page.evaluate(() => {
+      const cues = document.createElement('div');
+      cues.id = 'cues';
+      cues.className = 'vjs-text-track-display';
+      cues.style.cssText =
+        'position:absolute;left:0;right:0;bottom:30px;height:60px';
+      cues.textContent = 'Ceci est un test';
+      document.querySelector('.player')!.appendChild(cues);
+    });
+    await page.evaluate(() => __cp.hideTheaterIntruders());
+    expect(await shown(page, '#cues')).toBe(true);
+  });
+
+  test('closing theater gives every hidden notice back', async ({ page }) => {
+    await stagedPlayer(page);
+    await page.evaluate(() => {
+      const toast = document.createElement('div');
+      toast.id = 'episode-toast';
+      toast.style.cssText =
+        'position:fixed;right:20px;bottom:40px;width:300px;height:110px;background:#222';
+      toast.innerHTML = '<p>Playing Episode 6</p><button>close</button>';
+      document.body.appendChild(toast);
+    });
+    await page.evaluate(() => __cp.hideTheaterIntruders());
+    await page.evaluate(() => __cp.exitTheater());
+    expect(await shown(page, '#episode-toast')).toBe(true);
+  });
+
+  test('nothing is hidden when no video is staged', async ({ page }) => {
+    await serve(page, `${HEAD}<video></video>`);
+    await page.evaluate(() => {
+      const toast = document.createElement('div');
+      toast.id = 'site-ui';
+      toast.style.cssText =
+        'position:fixed;right:20px;bottom:40px;width:300px;height:110px;background:#222';
+      toast.textContent = 'Cookie notice';
+      document.body.appendChild(toast);
+    });
+    expect(await page.evaluate(() => __cp.hideTheaterIntruders())).toBe(0);
+    expect(await shown(page, '#site-ui')).toBe(true);
+  });
+
+  test('an element holding the video is never hidden', async ({ page }) => {
+    await stagedPlayer(page);
+    await page.evaluate(() => __cp.hideTheaterIntruders());
+    expect(await shown(page, '.player')).toBe(true);
+    expect(await page.evaluate(() =>
+      document.querySelector('video')!.hasAttribute('data-cp-hidden'))).toBe(false);
+  });
+});

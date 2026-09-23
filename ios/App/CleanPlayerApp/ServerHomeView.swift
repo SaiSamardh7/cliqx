@@ -221,28 +221,46 @@ private struct HeroCard: View {
     @ObservedObject var servers: JellyfinServers
     let play: () -> Void
     @State private var favorite: Bool
+    /// Compact height is landscape on a phone.
+    @Environment(\.verticalSizeClass) private var verticalSizeClass
 
     init(server: JellyfinServer, item: JellyfinItem, servers: JellyfinServers, play: @escaping () -> Void) {
         self.server = server; self.item = item; self.servers = servers; self.play = play
         _favorite = State(initialValue: item.userData?.isFavorite ?? false)
     }
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            ZStack(alignment: .bottomLeading) {
-                Color.black
-                    .aspectRatio(16 / 9, contentMode: .fit)
-                    .overlay {
-                        if let backdrop = item.backdrop {
-                            RemoteImage(url: JellyfinAPI.imageURL(server: server.url, itemID: backdrop.itemID,
-                                                                  tag: backdrop.tag, kind: .backdrop, maxHeight: 720))
-                        }
-                    }
-                    .overlay {
-                        LinearGradient(colors: [.clear, .clear, .black.opacity(0.85)],
-                                       startPoint: .top, endPoint: .bottom)
-                    }
-                Group {
+    /// The backdrop, sized for the screen it is on.
+    ///
+    /// 16:9 at full width is 491pt tall on a phone held in landscape, where
+    /// the whole screen is 402pt: the hero alone was taller than the viewport,
+    /// so My Media, Continue Watching and every Recently Added row started
+    /// below the fold and the page looked empty. Landscape gets a fixed,
+    /// shorter band instead of the ratio.
+    @ViewBuilder
+    private var backdrop: some View {
+        let art = Color.black
+            .overlay {
+                if let backdrop = item.backdrop {
+                    RemoteImage(url: JellyfinAPI.imageURL(server: server.url, itemID: backdrop.itemID,
+                                                          tag: backdrop.tag, kind: .backdrop, maxHeight: 720))
+                }
+            }
+            .overlay {
+                LinearGradient(colors: [.clear, .clear, .black.opacity(0.85)],
+                               startPoint: .top, endPoint: .bottom)
+            }
+        if verticalSizeClass == .compact {
+            art.frame(width: 300, height: 170)
+        } else {
+            art.aspectRatio(16 / 9, contentMode: .fit)
+        }
+    }
+
+    /// Backdrop with the title or logo across the bottom of it.
+    private var poster: some View {
+        ZStack(alignment: .bottomLeading) {
+            backdrop
+            Group {
                     if let logo = JellyfinAPI.imageURL(server: server.url, itemID: item.id,
                                                        tag: item.logoImageTag, kind: .logo, maxHeight: 200) {
                         RemoteImage(url: logo, contentMode: .fit)
@@ -251,11 +269,13 @@ private struct HeroCard: View {
                         Text(item.name).font(.title.weight(.bold)).foregroundStyle(.white).lineLimit(2)
                     }
                 }
-                .padding(16)
-            }
-            .clipped()
+            .padding(16)
+        }
+        .clipped()
+    }
 
-            VStack(alignment: .leading, spacing: 8) {
+    private var details: some View {
+        VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 10) {
                     if let rating = item.communityRating {
                         Label(String(format: "%.1f", rating), systemImage: "star.fill")
@@ -276,7 +296,10 @@ private struct HeroCard: View {
                     Text(genres.prefix(3).joined(separator: " · ")).font(.caption).foregroundStyle(.secondary)
                 }
                 if let overview = item.overview, !overview.isEmpty {
-                    Text(overview).font(.subheadline).foregroundStyle(.secondary).lineLimit(2)
+                    Text(overview).font(.subheadline).foregroundStyle(.secondary)
+                        // One line in landscape: the screen is 402pt tall and
+                        // every line here is a line the shelves lose.
+                        .lineLimit(verticalSizeClass == .compact ? 1 : 2)
                 }
                 HStack(spacing: 14) {
                     Button(action: play) {
@@ -297,8 +320,30 @@ private struct HeroCard: View {
                     .accessibilityLabel(favorite ? "Remove from favorites" : "Add to favorites")
                 }
                 .padding(.top, 4)
+        }
+        .padding(16)
+    }
+
+    /// Stacked in portrait, side by side in landscape.
+    ///
+    /// Stacking both on a phone held sideways put the shelves below a 402pt
+    /// screen — the page the server is for began off the bottom of it. In
+    /// landscape the width is the thing there is plenty of, so the poster
+    /// takes a fixed column and the details sit beside it.
+    var body: some View {
+        Group {
+            if verticalSizeClass == .compact {
+                HStack(alignment: .top, spacing: 0) {
+                    poster
+                    details
+                    Spacer(minLength: 0)
+                }
+            } else {
+                VStack(alignment: .leading, spacing: 0) {
+                    poster
+                    details
+                }
             }
-            .padding(16)
         }
         .background(Color(.secondarySystemGroupedBackground))
         .clipShape(.rect(cornerRadius: 16))

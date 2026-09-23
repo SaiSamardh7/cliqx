@@ -204,8 +204,14 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     '[class*="caption" i]', '[class*="subtitle" i]', '[id*="caption" i]',
   ].join(',');
 
+  /// Anything a person could press. Subtitles have none: a box of text with a
+  /// close button or a link is a notice, not a caption — which is exactly what
+  /// the "Playing Episode 6" toast is, and it was being kept as one.
+  const INTERACTIVE = 'button,a[href],input,select,textarea,[role="button"],[onclick]';
+
   function isCaptionLayer(el) {
     if (!el || el.nodeType !== 1) return false;
+    if (el.querySelector(INTERACTIVE)) return false;
     if (el.matches(CAPTION_SELECTOR)) return true;
     // A player that names nothing usefully still gives itself away: a box
     // positioned over the video that holds text and no media of its own.
@@ -214,6 +220,55 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     if (el.querySelector('video,iframe,canvas,img')) return false;
     const text = (el.textContent || '').trim();
     return text.length > 0 && text.length < 300;
+  }
+
+  /// Everything the page paints over the staged video while theater is up.
+  ///
+  /// `looksLikeInterstitial` deliberately only catches things covering the
+  /// MIDDLE of the video by at least a third: outside theater, small site
+  /// furniture around a player is the site's business. Inside theater it is
+  /// not — the page is supposed to be gone — and that gap is what left
+  /// aniwave's "Playing Episode 6" card sitting in the corner of the film.
+  ///
+  /// So while a video is staged, anything painted over it goes, at any size,
+  /// unless it is ours, the video itself, something holding the video, or a
+  /// caption layer. Marked with the same attribute `stage()` uses, so leaving
+  /// theater restores every one of them.
+  function hideTheaterIntruders() {
+    if (!staged || !staged.isConnected) return 0;
+    const videoRect = staged.getBoundingClientRect();
+    if (videoRect.width < 1 || videoRect.height < 1) return 0;
+    const hosts = videoHosts();
+
+    let hidden = 0;
+    for (const el of deepElements()) {
+      if (el === staged || isOurs(el) || el.closest('[data-cp-keep]')) continue;
+      if (el.hasAttribute('data-cp-hidden') || el.hasAttribute('data-cp-caption')) continue;
+      if (el === document.body || el === document.documentElement) continue;
+      // Never the video's own ancestors: hiding one takes the video with it.
+      if (containsDeep(el, staged)) continue;
+      if (hosts.some(host => el === host || containsDeep(el, host))) continue;
+      if (el.querySelector('video') || el.querySelector('[data-cp-stage]')) continue;
+
+      const cs = getComputedStyle(el);
+      if (cs.position !== 'fixed' && cs.position !== 'absolute' && cs.position !== 'sticky') {
+        continue;
+      }
+      if (cs.display === 'none' || cs.visibility === 'hidden' || cs.opacity === '0') continue;
+      if (!hasVisibleSurface(el, cs)) continue;
+
+      const r = el.getBoundingClientRect();
+      if (r.width < 8 || r.height < 8) continue;
+      if (overlapFraction(r, videoRect) <= 0) continue;
+
+      if (isCaptionLayer(el)) {
+        el.dataset.cpCaption = '1';
+        continue;
+      }
+      el.dataset.cpHidden = '1';
+      hidden++;
+    }
+    return hidden;
   }
 
   function stage(el) {
@@ -2081,7 +2136,12 @@ html[data-cp-unlock], html[data-cp-unlock] body {
   function schedulePass() {
     if (passPending) return;
     passPending = true;
-    requestAnimationFrame(() => { passPending = false; scan(); blockOverlays(); });
+    requestAnimationFrame(() => {
+      passPending = false;
+      scan();
+      blockOverlays();
+      hideTheaterIntruders();
+    });
   }
 
   /// The slow lane, for the wake-ups that are not a node arriving: scrolling,
@@ -2097,6 +2157,7 @@ html[data-cp-unlock], html[data-cp-unlock] body {
       slowTimer = 0;
       scan();
       blockOverlays();
+      hideTheaterIntruders();
     }, SLOW_PASS_MS);
   }
 
@@ -2171,6 +2232,7 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     ensureStyle();
     scan();
     blockOverlays();
+    hideTheaterIntruders();
     announce();
   }
 
@@ -2187,6 +2249,6 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     checkStaged,
     showAirPlay, nativeFullscreen, untrackAirPlay, isManifestURL,
     streamCandidates, sourceKind, attachAirPlaySource,
-    blockOverlays, setOverlayBlocking,
+    blockOverlays, setOverlayBlocking, hideTheaterIntruders,
   };
 })();
