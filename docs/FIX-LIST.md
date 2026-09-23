@@ -395,6 +395,18 @@ browser group (S2-14 onwards).
   accessibility UI tests (`XCUIElement.accessibilityLabel` for every control in
   theater), localization snapshot tests.
 - [ ] **S3-21 Device-size matrix** in CI: SE, Pro, Pro Max, iPad; Split View.
+- [ ] **S3-21a `loadHTMLString` does not navigate on the GitHub macOS runner.**
+  Measured 23 September 2026 on `testPageWorldControlRunsSitesRealAJAXHandler`:
+  the navigation delegate sees no commit, no finish and no error, `readyState`
+  is the initial empty document's "complete", and `url` is the base URL of a
+  load that never began — while `evaluateJavaScript` still works, so the
+  content process is alive. The test skips on that signal rather than failing,
+  and runs for real everywhere WebKit navigates. It is the only test in the
+  suite affected, and it means the assertion it carries — that the site's own
+  click handler runs — is currently proven locally and not in CI. The fix is
+  to serve fixtures from a real HTTP server in-process rather than
+  `loadHTMLString`, which is the same change S3-14 wants for the Playwright
+  suite.
 - [ ] **S3-22 Coverage** (`-enableCodeCoverage YES`, Playwright coverage API),
   published per PR, ratchet threshold.
 - [ ] **S3-23 Flake tracking** (rerun-and-compare job weekly), mutation testing

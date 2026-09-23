@@ -402,24 +402,32 @@ func waitForPage(_ javaScript: String, in webView: WKWebView,
         try await Task.sleep(nanoseconds: 50_000_000)
     }
 
-    // The deadline says nothing on its own about WHY. Two very different
-    // things end up here, and reporting the second as a test failure sends
-    // someone looking for a bug in code that is fine.
+    // The deadline says nothing on its own about WHY, and reporting a host
+    // problem as a test failure sends someone looking for a bug in code that
+    // is fine. Two signals separate them, both measured rather than assumed.
     //
-    // A hosted CI runner cannot always give a web content process the
-    // assertion it needs to stay alive — the RunningBoard "InvalidTransition"
-    // and "WebProcess NearSuspended Assertion" lines in the log are that
-    // happening — and a suspended process loads nothing, so every wait here
-    // expires. That is the machine, not the code.
-    //
-    // So ask the simplest question there is. If arithmetic does not work
-    // either, no JavaScript ran at all and there is nothing for this test to
-    // have got wrong.
+    // First: did any JavaScript run at all? A web content process the host
+    // refused an assertion to — the RunningBoard "InvalidTransition" and
+    // "WebProcess NearSuspended Assertion" lines — evaluates nothing.
     if await evaluateFlag("1 + 1 === 2", in: webView) != true {
         throw XCTSkip("""
             The web content process never ran: even `1 + 1` did not evaluate. \
             This is the host refusing WebKit a process assertion, not a \
             failure of what the test asserts.
+            """)
+    }
+
+    // Second: did the navigation ever start? This is the case measured on
+    // this project's CI, where the recorder saw no commit, no finish and no
+    // failure, `readyState` was the initial empty document's "complete", and
+    // `url` was the base URL of a load that never began. Nothing was
+    // navigated, so nothing about the page can be asserted — and a wait of
+    // any length would have expired the same way.
+    if let recorder, !recorder.committed, recorder.failure == nil {
+        throw XCTSkip("""
+            The navigation never started: no commit, no finish and no error \
+            reached the delegate. The document is the initial empty one, so \
+            there is nothing here for the test to be right or wrong about.
             """)
     }
 
