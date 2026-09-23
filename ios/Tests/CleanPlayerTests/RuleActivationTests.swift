@@ -384,6 +384,31 @@ final class RuleActivationTests: XCTestCase {
 }
 
 /// Waits for a single navigation to finish. Shared with AdBlockingTests.
+/// Waits for something to become true IN the page, rather than for the
+/// navigation to finish.
+///
+/// `didFinish` waits on every subresource. A test whose fixture contains an
+/// `<iframe>` therefore waits on that frame too, and on a loaded CI runner
+/// that has repeatedly taken longer than the load waiter's budget — failing a
+/// test whose actual subject had been ready for seconds. Ask the page instead.
+@MainActor
+func waitForPage(_ javaScript: String, in webView: WKWebView,
+                 timeout: TimeInterval = 30,
+                 file: StaticString = #filePath, line: UInt = #line) async throws {
+    let deadline = Date().addingTimeInterval(timeout)
+    while Date() < deadline {
+        let ready = await withCheckedContinuation { continuation in
+            webView.evaluateJavaScript(javaScript) { value, _ in
+                continuation.resume(returning: (value as? Bool) ?? false)
+            }
+        }
+        if ready { return }
+        try await Task.sleep(nanoseconds: 50_000_000)
+    }
+    XCTFail("page never satisfied: \(javaScript)", file: file, line: line)
+    throw LoadWaiter.TimedOut()
+}
+
 final class LoadWaiter: NSObject, WKNavigationDelegate {
     private var continuation: CheckedContinuation<Void, Error>?
     private var settled = false

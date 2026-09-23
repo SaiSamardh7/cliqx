@@ -24,8 +24,6 @@ final class EpisodeTransitionTests: XCTestCase {
 
     func testPageWorldControlRunsSitesRealAJAXHandler() async throws {
         let webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 320, height: 480))
-        let waiter = LoadWaiter()
-        webView.navigationDelegate = waiter
         webView.loadHTMLString("""
         <button class="ctrl forward next">Next</button>
         <iframe id="player" src="about:blank"></iframe>
@@ -37,7 +35,12 @@ final class EpisodeTransitionTests: XCTestCase {
         </script>
         """, baseURL: URL(string: "https://video.example/episode-1")!)
 
-        try await waiter.wait()
+        // Not `didFinish`: the fixture holds an <iframe>, so that waits on the
+        // frame as well and has timed out on CI while the button this test is
+        // about had been in the document for seconds.
+        try await waitForPage(
+            "!!document.querySelector('.ctrl.forward.next') && !!document.querySelector('#player')",
+            in: webView)
         let handled: Bool = try await withCheckedThrowingContinuation { continuation in
             webView.evaluateJavaScript(
                 EpisodeTransition.siteControlScript(for: .next),
