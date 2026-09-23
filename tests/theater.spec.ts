@@ -1,3 +1,4 @@
+import { createServer, type Server } from 'node:http';
 import { test, expect, type Page } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -9,7 +10,52 @@ const POPUPGUARD = readFileSync(
 const AGENT = readFileSync(
   path.join(here, '..', 'ios', 'App', 'CleanPlayerApp', 'Resources', 'agent.js'), 'utf8');
 
-const ORIGIN = 'https://example.test';
+// A real server on loopback, not `page.route` interception.
+//
+// WebKit has been losing a synthetic route mid-navigation on long runs — the
+// flake `retries: 1` was added for — and the same interception is what makes
+// `page.goto` hang there. An ordinary HTTP load has neither problem.
+//
+// The kernel picks the port. A fixed one collides with a server a previous
+// run left behind, which fails every test in the file for a reason that has
+// nothing to do with any of them. ORIGIN is therefore assigned in `beforeAll`
+// and read when each test runs, not when this file is loaded.
+let ORIGIN = '';
+
+/// What the server is currently serving. One document at a time, because a
+/// test needs a page rather than a site.
+let currentHtml = '';
+let server: Server;
+
+test.beforeAll(async () => {
+  server = createServer((request, response) => {
+    // Favicon gets a 404 rather than a copy of the fixture: WebKit requests
+    // it for every document, and answering with HTML leaves it parsing a page
+    // as an icon.
+    if (request.url === '/favicon.ico') {
+      response.writeHead(404, { 'Content-Length': '0', Connection: 'close' });
+      response.end();
+      return;
+    }
+    const body = Buffer.from(currentHtml, 'utf8');
+    response.writeHead(200, {
+      'Content-Type': 'text/html; charset=utf-8',
+      // Explicit length and no keep-alive. WebKit was intermittently sitting
+      // on a chunked, kept-alive response and never finishing the navigation.
+      'Content-Length': String(body.byteLength),
+      Connection: 'close',
+    });
+    response.end(body);
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (address === null || typeof address === 'string') throw new Error('no port');
+  ORIGIN = `http://127.0.0.1:${address.port}`;
+});
+
+test.afterAll(async () => {
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+});
 
 const HEAD = `<!doctype html>
 <meta charset="utf-8">
@@ -42,9 +88,13 @@ const PLAYER = `${HEAD}
 /// Stands in for the WKScriptMessageHandler bridge so the payloads the native
 /// chrome depends on are actually asserted.
 async function serve(page: Page, html: string, at = `${ORIGIN}/ep/1`) {
-  await page.route(`${ORIGIN}/**`, (route) =>
-    route.fulfill({ contentType: 'text/html', body: html }));
-  await page.goto(at);
+  currentHtml = html;
+  // `domcontentloaded`, not the default `load`. Several fixtures point a
+  // <video> or an <img> at a host that does not resolve, and `load` waits for
+  // every one of them — which is what the intermittent `page.goto` timeouts
+  // were. Nothing here needs subresources: the agent is injected next and
+  // works against the DOM.
+  await page.goto(at, { waitUntil: 'domcontentloaded' });
   await page.addInitScript(() => {});
   await page.evaluate(() => {
     (window as any).__posted = [];
@@ -1242,19 +1292,21 @@ test.describe('episode neighbours', () => {
   // above never matched this, which is why the buttons stayed empty there.
   const TITLES = ['Fortune Is Unpredictable and Mutable', 'A Certain Bomb',
     'Yokohama Gangster Paradise', 'The Tragedy of the Fatalist'];
-  const SHOW = `${ORIGIN}/watch/bungou-stray-dogs-80525`;
+  // A function, not a constant: describe bodies run at collection time, and
+  // ORIGIN is not known until the fixture server has a port.
+  const show = () => `${ORIGIN}/watch/bungou-stray-dogs-80525`;
   const ANIWAVE = (current: number, order = [1, 2, 3, 4]) => `${HEAD}
     <video id="v" playsinline style="width:360px;height:200px"></video>
     <div class="ctrl"><span>Prev</span><span>Next</span></div>
     <ul>${order.map(n => `<li><a href="/watch/bungou-stray-dogs-80525/ep-${n}"
       data-num="${n}"><b>${n}</b> <span>${TITLES[n - 1]}</span></a></li>`).join('')}</ul>
-    <script>history.replaceState(null, '', '${SHOW}/ep-${current}');<\/script>`;
+    <script>history.replaceState(null, '', '${show()}/ep-${current}');<\/script>`;
 
   test('reads a "number title" list, as aniwave renders it', async ({ page }) => {
-    await serve(page, ANIWAVE(2), `${SHOW}/ep-2`);
+    await serve(page, ANIWAVE(2), `${show()}/ep-2`);
     const found = await page.evaluate(() => __cp.findEpisodes());
-    expect(found.prev).toBe(`${SHOW}/ep-1`);
-    expect(found.next).toBe(`${SHOW}/ep-3`);
+    expect(found.prev).toBe(`${show()}/ep-1`);
+    expect(found.next).toBe(`${show()}/ep-3`);
 
     const list = await page.evaluate(() => __cp.episodeList());
     expect(list.map((e: any) => e.label)).toEqual([
@@ -1265,10 +1317,10 @@ test.describe('episode neighbours', () => {
   });
 
   test('orders "number title" entries by number when listed newest-first', async ({ page }) => {
-    await serve(page, ANIWAVE(2, [4, 3, 2, 1]), `${SHOW}/ep-2`);
+    await serve(page, ANIWAVE(2, [4, 3, 2, 1]), `${show()}/ep-2`);
     const found = await page.evaluate(() => __cp.findEpisodes());
-    expect(found.prev).toBe(`${SHOW}/ep-1`);
-    expect(found.next).toBe(`${SHOW}/ep-3`);
+    expect(found.prev).toBe(`${show()}/ep-1`);
+    expect(found.next).toBe(`${show()}/ep-3`);
   });
 
   // Episode 11 of the same show: an 81-character title. The list used to
@@ -1277,14 +1329,14 @@ test.describe('episode neighbours', () => {
     const long = 'First, an Unsuitable Profession for Her. Second, an Ecstatic Detective Agency';
     await serve(page, `${HEAD}
       <video id="v" playsinline style="width:360px;height:200px"></video>
-      <a href="${SHOW}/ep-10">10 Rashomon and the Tiger</a>
-      <a href="${SHOW}/ep-11">11 ${long}</a>
-      <a href="${SHOW}/ep-12">12 Borne Back Ceaselessly into the Past</a>`, `${SHOW}/ep-10`);
+      <a href="${show()}/ep-10">10 Rashomon and the Tiger</a>
+      <a href="${show()}/ep-11">11 ${long}</a>
+      <a href="${show()}/ep-12">12 Borne Back Ceaselessly into the Past</a>`, `${show()}/ep-10`);
     const list = await page.evaluate(() => __cp.episodeList());
     expect(list.map((e: any) => e.number)).toEqual([10, 11, 12]);
     expect(list[1].label.length).toBeLessThanOrEqual(60);
     expect(list[1].label.startsWith('11 First, an Unsuitable')).toBe(true);
-    expect(await page.evaluate(() => __cp.findEpisodes().next)).toBe(`${SHOW}/ep-11`);
+    expect(await page.evaluate(() => __cp.findEpisodes().next)).toBe(`${show()}/ep-11`);
   });
 
   // Title-only labels are enough when the URL carries the number.
@@ -1304,9 +1356,9 @@ test.describe('episode neighbours', () => {
   test('does not list the site\'s own Next link as an episode', async ({ page }) => {
     await serve(page, `${HEAD}
       <video id="v" playsinline style="width:360px;height:200px"></video>
-      <a href="${SHOW}/ep-3">Next</a>
-      ${[1, 2, 3].map(n => `<a href="${SHOW}/ep-${n}">${n} ${TITLES[n - 1]}</a>`).join('')}`,
-      `${SHOW}/ep-2`);
+      <a href="${show()}/ep-3">Next</a>
+      ${[1, 2, 3].map(n => `<a href="${show()}/ep-${n}">${n} ${TITLES[n - 1]}</a>`).join('')}`,
+      `${show()}/ep-2`);
     const list = await page.evaluate(() => __cp.episodeList());
     expect(list.map((e: any) => e.label)).toEqual([
       '1 Fortune Is Unpredictable and Mutable', '2 A Certain Bomb',
@@ -1319,7 +1371,7 @@ test.describe('episode neighbours', () => {
       <video id="v" playsinline style="width:360px;height:200px"></video>
       <a href="${ORIGIN}/comments/80525">12 comments</a>
       <a href="${ORIGIN}/list?page=2">Page 2 of 9</a>
-      <a href="${ORIGIN}/sleepy-hollow-1999">Sleepy Hollow (1999)</a>`, `${SHOW}/ep-2`);
+      <a href="${ORIGIN}/sleepy-hollow-1999">Sleepy Hollow (1999)</a>`, `${show()}/ep-2`);
     expect(await page.evaluate(() => __cp.episodeList())).toEqual([]);
   });
 
@@ -1330,14 +1382,14 @@ test.describe('episode neighbours', () => {
     await serve(page, `${HEAD}
       <video id="v" playsinline style="width:360px;height:200px"></video>
       <a href="#request">Request</a> <a href="#">View all</a> <a href="#sign">Sign in</a>
-      ${[1, 2, 3].map(n => `<a href="${SHOW}/ep-${n}">${n} ${TITLES[n - 1]}</a>`).join('')}`,
-      `${SHOW}/ep-1`);
+      ${[1, 2, 3].map(n => `<a href="${show()}/ep-${n}">${n} ${TITLES[n - 1]}</a>`).join('')}`,
+      `${show()}/ep-1`);
     const list = await page.evaluate(() => __cp.episodeList());
     expect(list.map((e: any) => e.label)).toEqual([
       '1 Fortune Is Unpredictable and Mutable', '2 A Certain Bomb',
       '3 Yokohama Gangster Paradise']);
     const found = await page.evaluate(() => __cp.findEpisodes());
-    expect(found.next).toBe(`${SHOW}/ep-2`);
+    expect(found.next).toBe(`${show()}/ep-2`);
     expect(found.prev).toBeNull();
   });
 
@@ -1346,19 +1398,19 @@ test.describe('episode neighbours', () => {
   test('prefers the link whose text names the episode when a page is linked twice', async ({ page }) => {
     await serve(page, `${HEAD}
       <video id="v" playsinline style="width:360px;height:200px"></video>
-      <a href="${SHOW}/ep-2">Watch now</a>
-      ${[1, 2, 3].map(n => `<a href="${SHOW}/ep-${n}">${n} ${TITLES[n - 1]}</a>`).join('')}`,
-      `${SHOW}/ep-1`);
+      <a href="${show()}/ep-2">Watch now</a>
+      ${[1, 2, 3].map(n => `<a href="${show()}/ep-${n}">${n} ${TITLES[n - 1]}</a>`).join('')}`,
+      `${show()}/ep-1`);
     const list = await page.evaluate(() => __cp.episodeList());
     expect(list.map((e: any) => e.label)).toEqual([
       '2 A Certain Bomb', '1 Fortune Is Unpredictable and Mutable',
       '3 Yokohama Gangster Paradise']);
-    expect(await page.evaluate(() => __cp.findEpisodes().next)).toBe(`${SHOW}/ep-2`);
+    expect(await page.evaluate(() => __cp.findEpisodes().next)).toBe(`${show()}/ep-2`);
   });
 
   // Live markup is <b>1</b> newline <span>Title</span>; the label read "1\nTitle".
   test('collapses whitespace inside a label', async ({ page }) => {
-    await serve(page, ANIWAVE(1), `${SHOW}/ep-1`);
+    await serve(page, ANIWAVE(1), `${show()}/ep-1`);
     const list = await page.evaluate(() => __cp.episodeList());
     expect(list[0].label).toBe('1 Fortune Is Unpredictable and Mutable');
     expect(list.some((e: any) => /\s\s|\n/.test(e.label))).toBe(false);
@@ -1366,11 +1418,11 @@ test.describe('episode neighbours', () => {
 
   // A hash or trailing slash on the address must not unmark the current entry.
   test('marks the current episode through a hash and trailing slash', async ({ page }) => {
-    await serve(page, ANIWAVE(3), `${SHOW}/ep-3`);
-    await page.evaluate((show) => history.replaceState(null, '', show + '/ep-3/#player'), SHOW);
+    await serve(page, ANIWAVE(3), `${show()}/ep-3`);
+    await page.evaluate((show) => history.replaceState(null, '', show + '/ep-3/#player'), show());
     const list = await page.evaluate(() => __cp.episodeList());
     expect(list.filter((e: any) => e.current).map((e: any) => e.number)).toEqual([3]);
-    expect(await page.evaluate(() => __cp.findEpisodes().next)).toBe(`${SHOW}/ep-4`);
+    expect(await page.evaluate(() => __cp.findEpisodes().next)).toBe(`${show()}/ep-4`);
   });
 });
 
@@ -2700,8 +2752,11 @@ test.describe('one definition of same site', () => {
   test('without a site from native, only the exact host is same-site',
     async ({ page }) => {
       await serve(page, PLAYER);
-      expect(await page.evaluate(() => __cp.sameSiteHost('example.test'))).toBe(true);
-      expect(await page.evaluate(() => __cp.sameSiteHost('www.example.test'))).toBe(false);
+      // Asked of the page rather than written down: these fixtures are served
+      // from loopback, so the host is whatever the server bound to.
+      expect(await page.evaluate(() => __cp.sameSiteHost(location.hostname))).toBe(true);
+      expect(await page.evaluate(() =>
+        __cp.sameSiteHost('www.' + location.hostname))).toBe(false);
       expect(await page.evaluate(() => __cp.sameSiteHost('evil.test'))).toBe(false);
     });
 

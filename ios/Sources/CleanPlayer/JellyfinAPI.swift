@@ -85,6 +85,44 @@ public enum JellyfinAPI {
         return AddressResolver.siteRoot(of: resolved)
     }
 
+    /// The decoder every response goes through.
+    ///
+    /// Tolerant about dates on purpose. `dateDecodingStrategy` applies to the
+    /// whole payload, so a single value it refuses throws away the entire
+    /// response — a shelf, a library listing, or the episode list that Next
+    /// and Previous are built from. Every date here is decoration, a year
+    /// under a title, and losing a screen to protect one of them is the wrong
+    /// trade. Jellyfin has been seen emitting timestamps with no zone, which
+    /// neither ISO 8601 formatter accepts.
+    public static func makeDecoder() -> JSONDecoder {
+        let decoder = JSONDecoder()
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let plain = ISO8601DateFormatter()
+        let zoneless = DateFormatter()
+        zoneless.locale = Locale(identifier: "en_US_POSIX")
+        zoneless.timeZone = TimeZone(identifier: "UTC")
+        zoneless.dateFormat = "yyyy-MM-dd'T'HH:mm:ss.SSSSSSS"
+        let dayOnly = DateFormatter()
+        dayOnly.locale = Locale(identifier: "en_US_POSIX")
+        dayOnly.timeZone = TimeZone(identifier: "UTC")
+        dayOnly.dateFormat = "yyyy-MM-dd"
+
+        decoder.dateDecodingStrategy = .custom { container in
+            let text = try container.singleValueContainer().decode(String.self)
+            if let date = iso.date(from: text) ?? plain.date(from: text)
+                ?? zoneless.date(from: text) ?? dayOnly.date(from: text) {
+                return date
+            }
+            return unparseableDate
+        }
+        return decoder
+    }
+
+    /// What an unreadable timestamp becomes. Distinct enough that a caller can
+    /// tell "the server said nothing useful" from a real date.
+    public static let unparseableDate = Date.distantPast
+
     private static func quoteSafe(_ value: String) -> String {
         value.replacingOccurrences(of: "\"", with: "'")
     }

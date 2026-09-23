@@ -1,3 +1,4 @@
+import { createServer, type Server } from 'node:http';
 import { test, expect, type Frame, type Page } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -6,13 +7,46 @@ import path from 'node:path';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const AGENT = readFileSync(
   path.join(here, '..', 'ios', 'App', 'CleanPlayerApp', 'Resources', 'agent.js'), 'utf8');
-const ORIGIN = 'https://hostile-frames.test';
+// A real loopback server rather than `page.route`, for the reason set out in
+// theater.spec.ts: WebKit loses a synthetic route mid-navigation on long runs.
+let ORIGIN = '';
+let currentHtml = '';
+let server: Server;
+
+test.beforeAll(async () => {
+  server = createServer((request, response) => {
+    // Favicon gets a 404 rather than a copy of the fixture: WebKit requests
+    // it for every document, and answering with HTML leaves it parsing a page
+    // as an icon.
+    if (request.url === '/favicon.ico') {
+      response.writeHead(404, { 'Content-Length': '0', Connection: 'close' });
+      response.end();
+      return;
+    }
+    const body = Buffer.from(currentHtml, 'utf8');
+    response.writeHead(200, {
+      'Content-Type': 'text/html; charset=utf-8',
+      // Explicit length and no keep-alive. WebKit was intermittently sitting
+      // on a chunked, kept-alive response and never finishing the navigation.
+      'Content-Length': String(body.byteLength),
+      Connection: 'close',
+    });
+    response.end(body);
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (address === null || typeof address === 'string') throw new Error('no port');
+  ORIGIN = `http://127.0.0.1:${address.port}`;
+});
+
+test.afterAll(async () => {
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+});
 
 async function loadDocument(target: Page | Frame, html = '<video></video>') {
   if ('route' in target) {
-    await target.route(`${ORIGIN}/**`, (route) =>
-      route.fulfill({ contentType: 'text/html', body: html }));
-    await target.goto(`${ORIGIN}/watch`);
+    currentHtml = html;
+    await target.goto(`${ORIGIN}/watch`, { waitUntil: 'domcontentloaded' });
   }
   await target.evaluate(() => {
     (window as any).__posted = [];

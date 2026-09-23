@@ -48,9 +48,12 @@ final class EpisodeTransitionTests: XCTestCase {
         }
 
 
-        let recorder = NavigationRecorder()
-        webView.navigationDelegate = recorder
-        webView.loadHTMLString("""
+        // Served over loopback rather than loadHTMLString, which does not
+        // navigate at all on the GitHub macOS runner — no commit, no finish,
+        // no error, while JavaScript still evaluates against the initial empty
+        // document. A real http:// load is an ordinary navigation and commits.
+        let server = try FixtureServer(html: """
+        <!doctype html><html><body>
         <button class="ctrl forward next">Next</button>
         <iframe id="player"></iframe>
         <script>
@@ -59,7 +62,14 @@ final class EpisodeTransitionTests: XCTestCase {
             document.querySelector('#player').src = 'about:blank#episode-2';
           });
         </script>
-        """, baseURL: URL(string: "https://video.example/episode-1")!)
+        </body></html>
+        """)
+        try server.start()
+        defer { server.stop() }
+
+        let recorder = NavigationRecorder()
+        webView.navigationDelegate = recorder
+        webView.load(URLRequest(url: server.url.appendingPathComponent("episode-1")))
 
         // Not `didFinish`: the fixture holds an <iframe>, so that waits on the
         // frame as well and has timed out on CI while the button this test is

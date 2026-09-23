@@ -122,8 +122,22 @@ final class ServerEngine: NSObject, ObservableObject, @preconcurrency VLCMediaPl
     /// The other episodes of this season, for Next / Previous and the list.
     /// A film has none, and the chrome hides the controls.
     private func loadSiblings() async {
-        guard item.type == "Episode", let season = item.seasonId else { return }
-        siblings = (try? await client.items(userID: server.userID, parentID: season)) ?? []
+        guard item.type == "Episode" else { return }
+        // By series, with the season as a filter rather than a requirement.
+        // This used to list the season FOLDER, which needs a SeasonId — and an
+        // episode opened from Continue Watching or Next Up need not carry one,
+        // so those had no next or previous at all.
+        if let series = item.seriesId,
+           let found = try? await client.episodes(userID: server.userID,
+                                                  seriesID: series,
+                                                  seasonID: item.seasonId),
+           !found.isEmpty {
+            siblings = found
+        } else if let season = item.seasonId {
+            // Older servers, or an episode that somehow has a season but no
+            // series: the folder listing still works.
+            siblings = (try? await client.items(userID: server.userID, parentID: season)) ?? []
+        }
         publishNeighbours()
     }
 

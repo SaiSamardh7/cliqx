@@ -378,7 +378,13 @@ browser group (S2-14 onwards).
 
 - [ ] **S3-13 Playwright on mobile WebKit.** Add a project using
   `devices['iPhone 15']`; run the theater and fullscreen suites there.
-- [ ] **S3-14 Real captured fixtures.** `tests/fixtures/sites/<name>/` with
+- [ ] **S3-14 Real captured fixtures**, and split the agent suite so one WebKit
+  instance does not carry 200 specs. Measured 23 September 2026: two or three
+  specs per full run stall in `page.goto` and time out, always WebKit, always
+  passing in isolation — unchanged by replacing `page.route` interception with
+  a real HTTP server, and unchanged at one worker or eight. `retries: 1` covers
+  it today at the cost of a slow run.
+  Original item: real captured fixtures. `tests/fixtures/sites/<name>/` with
   saved DOM (via Playwright `page.content()`) from the corpus in Gate-01; one
   spec per site asserting extraction + episode discovery.
 - [ ] **S3-15 App-target unit tests** (after S3-01): `BridgeRouter`,
@@ -395,7 +401,11 @@ browser group (S2-14 onwards).
   accessibility UI tests (`XCUIElement.accessibilityLabel` for every control in
   theater), localization snapshot tests.
 - [ ] **S3-21 Device-size matrix** in CI: SE, Pro, Pro Max, iPad; Split View.
-- [ ] **S3-21a `loadHTMLString` does not navigate on the GitHub macOS runner.**
+- [x] **S3-21a `loadHTMLString` does not navigate on the GitHub macOS runner.**
+  Fixed 23 September 2026 by serving the fixture from a loopback HTTP server
+  (`FixtureServer`), which is an ordinary navigation and commits. Kept below
+  for the record.
+- [ ] **(record) `loadHTMLString` does not navigate on the GitHub macOS runner.**
   Measured 23 September 2026 on `testPageWorldControlRunsSitesRealAJAXHandler`:
   the navigation delegate sees no commit, no finish and no error, `readyState`
   is the initial empty document's "complete", and `url` is the base URL of a

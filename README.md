@@ -17,7 +17,7 @@ library is linked: VLCKit, which decodes the video — see [`NOTICE.md`](NOTICE.
 ## Status
 
 Pre-release, and not on the App Store yet. The engineering is in place and
-covered by tests — 208 Swift, 11 UI and 406 agent runs (203 specs across
+covered by tests — 214 Swift, 11 UI and 406 agent runs (203 specs across
 Chromium and WebKit), all green in CI — but see
 [`docs/ROADMAP.md`](docs/ROADMAP.md) for what is still open before submission,
 and [`docs/FIX-LIST.md`](docs/FIX-LIST.md) for everything ranked by severity.

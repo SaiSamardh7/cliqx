@@ -254,6 +254,23 @@ struct JellyfinClient {
         return page.Items
     }
 
+    /// The episodes of a series, for Next and Previous.
+    ///
+    /// `Shows/{id}/Episodes` rather than listing the season folder. Listing
+    /// the folder needs a `SeasonId`, and bailed out entirely without one —
+    /// so an episode reached from Continue Watching or Next Up, where the
+    /// server need not include it, had no next or previous at all. This is
+    /// the endpoint the server's own clients use: it works from the series,
+    /// takes the season only as a filter, and returns episode order rather
+    /// than whatever SortName happens to give.
+    func episodes(userID: String, seriesID: String,
+                  seasonID: String? = nil) async throws -> [JellyfinItem] {
+        var query = ["userId": userID, "Fields": "ChildCount,ProductionYear"]
+        if let seasonID { query["seasonId"] = seasonID }
+        let page: Page = try await get("Shows/\(seriesID)/Episodes", query: query)
+        return page.Items
+    }
+
     /// Where the film was left, so the next screen can offer Resume without
     /// another round trip. Keeps the server the source of truth for position.
     func item(userID: String, id: String) async throws -> JellyfinItem {
@@ -345,19 +362,7 @@ struct JellyfinClient {
         return request
     }
 
-    private static let decoder: JSONDecoder = {
-        let decoder = JSONDecoder()
-        let iso = ISO8601DateFormatter()
-        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        let plain = ISO8601DateFormatter()
-        decoder.dateDecodingStrategy = .custom { container in
-            let text = try container.singleValueContainer().decode(String.self)
-            if let date = iso.date(from: text) ?? plain.date(from: text) { return date }
-            throw DecodingError.dataCorrupted(.init(codingPath: container.codingPath,
-                                                    debugDescription: "not ISO 8601: \(text)"))
-        }
-        return decoder
-    }()
+    private static let decoder = JellyfinAPI.makeDecoder()
 
     private func get<T: Decodable>(_ path: String, query: [String: String] = [:]) async throws -> T {
         let (data, response) = try await URLSession.shared.data(for: try request(path, query: query))
