@@ -220,6 +220,11 @@ struct HomeView: View {
                         .background(Color(.secondarySystemGroupedBackground), in: .rect(cornerRadius: 14))
                     }
                     .buttonStyle(.plain)
+                    // A signed-in server, as opposed to the prompt to add one
+                    // — whose copy also says "Jellyfin", which is how a UI
+                    // test looking for a server row opened the Add sheet on a
+                    // machine that had none.
+                    .accessibilityIdentifier("server.row")
                 }
             }
         }

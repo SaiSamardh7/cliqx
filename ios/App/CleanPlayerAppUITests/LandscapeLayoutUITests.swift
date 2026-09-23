@@ -41,10 +41,12 @@ final class LandscapeLayoutUITests: XCTestCase {
         XCUIDevice.shared.orientation = .landscapeLeft
         XCTAssertTrue(app.staticTexts["Cliqx"].waitForExistence(timeout: 10))
 
-        // Whichever server this install has. Skips rather than fails on a
-        // machine with none added: this asserts layout, not sign-in.
-        let server = app.buttons.matching(
-            NSPredicate(format: "label CONTAINS[c] 'Jellyfin'")).firstMatch
+        // By identifier, not by label. The prompt to ADD a server also says
+        // "Jellyfin" in its description, so matching on the word opened the
+        // Add sheet on CI, where no server is signed in — and then failed for
+        // the wrong reason. Skips rather than fails when there is none: this
+        // asserts layout, not sign-in.
+        let server = app.descendants(matching: .any)["server.row"]
         try XCTSkipUnless(server.waitForExistence(timeout: 5),
                           "no server signed in on this simulator")
         server.tap()

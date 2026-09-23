@@ -1,3 +1,4 @@
+import UIKit
 import WebKit
 import XCTest
 @testable import CleanPlayer
@@ -23,7 +24,26 @@ final class EpisodeTransitionTests: XCTestCase {
     }
 
     func testPageWorldControlRunsSitesRealAJAXHandler() async throws {
-        let webView = WKWebView(frame: CGRect(x: 0, y: 0, width: 320, height: 480))
+        let frame = CGRect(x: 0, y: 0, width: 320, height: 480)
+        let webView = WKWebView(frame: frame)
+
+        // In a real window, not detached — the same reason spelled out in
+        // RuleActivationTests. WebKit grants no visibility assertion to a web
+        // view in no window, and a loaded machine then suspends its content
+        // process mid-navigation. This test was detached, and had been failing
+        // on CI for exactly that: the document never arrived, so waiting on
+        // `didFinish` timed out and so did waiting for the button.
+        //
+        // The `defer` keeps the window alive; nothing else refers to it once
+        // the web view is added, and releasing it takes the web view back out.
+        let window = UIWindow(frame: frame)
+        window.isHidden = false
+        window.addSubview(webView)
+        defer {
+            webView.removeFromSuperview()
+            window.isHidden = true
+        }
+
         webView.loadHTMLString("""
         <button class="ctrl forward next">Next</button>
         <iframe id="player" src="about:blank"></iframe>
