@@ -76,13 +76,36 @@ public enum JellyfinAPI {
     public static func milliseconds(fromTicks ticks: Int64) -> Int { Int(ticks / ticksPerMillisecond) }
 
     /// The server root a person typed: scheme defaulted the way the address
-    /// bar does (http for a LAN address, https otherwise), path dropped —
-    /// `http://nas:8096/web/index.html` is the same server as `http://nas:8096`.
+    /// bar does (http for a LAN address, https otherwise).
+    ///
+    /// The PATH IS KEPT. It used to be dropped, which made a server behind a
+    /// reverse proxy — `example.com/jellyfin`, the most common way to expose
+    /// one — impossible to add: every request went to the proxy's root and
+    /// came back as the wrong thing entirely.
+    ///
+    /// What is dropped is the web client's own route: someone copying the
+    /// address out of a browser is looking at `/web/index.html#/home.html`,
+    /// and none of that is the server.
     public static func serverURL(from text: String) -> URL? {
         guard let resolved = AddressResolver.resolve(text),
-              resolved.host() != AddressResolver.defaultSearch.host()
+              resolved.host() != AddressResolver.defaultSearch.host(),
+              let scheme = resolved.scheme?.lowercased(), let host = resolved.host()
         else { return nil }
-        return AddressResolver.siteRoot(of: resolved)
+
+        var segments = resolved.path.split(separator: "/").map(String.init)
+        // `/web`, `/web/index.html`, and anything under `/web`.
+        if let web = segments.firstIndex(where: { $0.lowercased() == "web" }) {
+            segments = Array(segments[..<web])
+        }
+        // A bare file at the end is a page, not a mount point.
+        if let last = segments.last, last.contains(".") { segments.removeLast() }
+
+        var parts = URLComponents()
+        parts.scheme = scheme
+        parts.host = host
+        parts.port = resolved.port
+        parts.path = segments.isEmpty ? "/" : "/" + segments.joined(separator: "/")
+        return parts.url
     }
 
     /// The decoder every response goes through.

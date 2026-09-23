@@ -67,3 +67,56 @@ final class JellyfinAPITests: XCTestCase {
         XCTAssertNil(JellyfinAPI.serverURL(from: "my movies"))   // a search, not a server
     }
 }
+
+// MARK: - Where the server actually lives
+
+extension JellyfinAPITests {
+    /// The bug: the path was dropped, so a server behind a reverse proxy —
+    /// `example.com/jellyfin`, the usual way to expose one — could not be
+    /// added at all. Every request went to the proxy's root.
+    func testAServerUnderASubpathKeepsIt() {
+        XCTAssertEqual(JellyfinAPI.serverURL(from: "https://example.com/jellyfin")?.absoluteString,
+                       "https://example.com/jellyfin")
+        XCTAssertEqual(JellyfinAPI.serverURL(from: "demo.jellyfin.org/stable")?.absoluteString,
+                       "https://demo.jellyfin.org/stable")
+    }
+
+    /// The web client's own route is not the server. Someone copying an
+    /// address out of a browser has all of this in it.
+    func testTheWebClientsRouteIsDropped() {
+        for typed in ["http://nas.local:8096/web/index.html",
+                      "http://nas.local:8096/web/",
+                      "http://nas.local:8096/web/index.html#/home.html"] {
+            // A root-mounted server keeps its slash; appending a path to
+            // either form gives the same request URL.
+            XCTAssertEqual(JellyfinAPI.serverURL(from: typed)?.absoluteString,
+                           "http://nas.local:8096/", "\(typed)")
+        }
+    }
+
+    /// ...including when the server is under a subpath as well.
+    func testASubpathServerKeepsItsPathButLosesTheWebRoute() {
+        XCTAssertEqual(
+            JellyfinAPI.serverURL(from: "https://example.com/jellyfin/web/index.html")?.absoluteString,
+            "https://example.com/jellyfin")
+    }
+
+    /// Whichever form the root takes, the request URL is the same.
+    func testBothRootFormsBuildTheSameRequestURL() {
+        let root = JellyfinAPI.serverURL(from: "nas.local:8096")!
+        let sub = JellyfinAPI.serverURL(from: "example.com/jellyfin")!
+        XCTAssertEqual(root.appendingPathComponent("Items").absoluteString,
+                       "http://nas.local:8096/Items")
+        XCTAssertEqual(sub.appendingPathComponent("Items").absoluteString,
+                       "https://example.com/jellyfin/Items")
+    }
+
+    func testAPlainHostIsUnchanged() {
+        XCTAssertEqual(JellyfinAPI.serverURL(from: "192.168.1.170:8096")?.absoluteString,
+                       "http://192.168.1.170:8096/")
+    }
+
+    func testSomethingThatIsNotAnAddressIsRefused() {
+        XCTAssertNil(JellyfinAPI.serverURL(from: "not a server at all"))
+    }
+}
