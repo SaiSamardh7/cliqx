@@ -1,3 +1,4 @@
+import { createServer, type Server } from 'node:http';
 import { test, expect, type Page } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -9,7 +10,52 @@ const POPUPGUARD = readFileSync(
 const AGENT = readFileSync(
   path.join(here, '..', 'ios', 'App', 'CleanPlayerApp', 'Resources', 'agent.js'), 'utf8');
 
-const ORIGIN = 'https://example.test';
+// A real server on loopback, not `page.route` interception.
+//
+// WebKit has been losing a synthetic route mid-navigation on long runs — the
+// flake `retries: 1` was added for — and the same interception is what makes
+// `page.goto` hang there. An ordinary HTTP load has neither problem.
+//
+// The kernel picks the port. A fixed one collides with a server a previous
+// run left behind, which fails every test in the file for a reason that has
+// nothing to do with any of them. ORIGIN is therefore assigned in `beforeAll`
+// and read when each test runs, not when this file is loaded.
+let ORIGIN = '';
+
+/// What the server is currently serving. One document at a time, because a
+/// test needs a page rather than a site.
+let currentHtml = '';
+let server: Server;
+
+test.beforeAll(async () => {
+  server = createServer((request, response) => {
+    // Favicon gets a 404 rather than a copy of the fixture: WebKit requests
+    // it for every document, and answering with HTML leaves it parsing a page
+    // as an icon.
+    if (request.url === '/favicon.ico') {
+      response.writeHead(404, { 'Content-Length': '0', Connection: 'close' });
+      response.end();
+      return;
+    }
+    const body = Buffer.from(currentHtml, 'utf8');
+    response.writeHead(200, {
+      'Content-Type': 'text/html; charset=utf-8',
+      // Explicit length and no keep-alive. WebKit was intermittently sitting
+      // on a chunked, kept-alive response and never finishing the navigation.
+      'Content-Length': String(body.byteLength),
+      Connection: 'close',
+    });
+    response.end(body);
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (address === null || typeof address === 'string') throw new Error('no port');
+  ORIGIN = `http://127.0.0.1:${address.port}`;
+});
+
+test.afterAll(async () => {
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+});
 
 const HEAD = `<!doctype html>
 <meta charset="utf-8">
@@ -42,9 +88,13 @@ const PLAYER = `${HEAD}
 /// Stands in for the WKScriptMessageHandler bridge so the payloads the native
 /// chrome depends on are actually asserted.
 async function serve(page: Page, html: string, at = `${ORIGIN}/ep/1`) {
-  await page.route(`${ORIGIN}/**`, (route) =>
-    route.fulfill({ contentType: 'text/html', body: html }));
-  await page.goto(at);
+  currentHtml = html;
+  // `domcontentloaded`, not the default `load`. Several fixtures point a
+  // <video> or an <img> at a host that does not resolve, and `load` waits for
+  // every one of them — which is what the intermittent `page.goto` timeouts
+  // were. Nothing here needs subresources: the agent is injected next and
+  // works against the DOM.
+  await page.goto(at, { waitUntil: 'domcontentloaded' });
   await page.addInitScript(() => {});
   await page.evaluate(() => {
     (window as any).__posted = [];
@@ -147,7 +197,36 @@ test.describe('theater mode', () => {
       expect.objectContaining({ type: 'theater' }));
 
     await page.evaluate(() => __cp.exitTheater());
-    expect(await posted(page)).toContainEqual({ type: 'theaterEnded' });
+    expect(await posted(page)).toContainEqual(
+      expect.objectContaining({ v: 1, type: 'theaterEnded' }));
+  });
+
+  // WebKit draws a full second set of controls inside a viewport-sized <video>
+  // that still has `controls` — under the native overlay, which is the same
+  // buttons twice. Theater must take the attribute, and give it back.
+  test('takes the video\'s own controls for the duration of theater', async ({ page }) => {
+    await page.evaluate(() => document.getElementById('v')!.setAttribute('controls', ''));
+    await watchClean(page).click();
+    await expect(page.locator('#v')).not.toHaveAttribute('controls');
+
+    await page.evaluate(() => __cp.exitTheater());
+    await expect(page.locator('#v')).toHaveAttribute('controls', '');
+  });
+
+  test('leaves a video that never had controls without them', async ({ page }) => {
+    await watchClean(page).click();
+    await page.evaluate(() => __cp.exitTheater());
+    await expect(page.locator('#v')).not.toHaveAttribute('controls');
+  });
+
+  // `paused` flips before any data arrives. The native button must not say
+  // "pause" about a black screen.
+  test('reports buffering until the video has frames to show', async ({ page }) => {
+    await watchClean(page).click();
+    // The fixture <video> has no source: play() is requested, nothing loads.
+    // The `play` event is a queued task, so poll rather than race it.
+    await expect.poll(async () => (await posted(page)).some((m: any) =>
+      m.type === 'playback' && m.playing === true && m.buffering === true)).toBe(true);
   });
 });
 
@@ -155,7 +234,7 @@ test.describe('episode discovery', () => {
   test('hides nothing when the page offers no episode links', async ({ page }) => {
     await serve(page, PLAYER);
     expect(await page.evaluate(() => __cp.findEpisodes()))
-      .toEqual({ next: null, prev: null });
+      .toEqual(expect.objectContaining({ next: null, prev: null }));
   });
 
   test('prefers rel=next and rel=prev over link text', async ({ page }) => {
@@ -165,9 +244,10 @@ test.describe('episode discovery', () => {
       <a href="/decoy">Next thing entirely</a>
       <video id="v" playsinline></video>`);
 
-    expect(await page.evaluate(() => __cp.findEpisodes())).toEqual({
+    expect(await page.evaluate(() => __cp.findEpisodes()))
+      .toEqual(expect.objectContaining({
       next: `${ORIGIN}/ep/2`, prev: `${ORIGIN}/ep/0`,
-    });
+    }));
   });
 
   test('falls back to accessible names', async ({ page }) => {
@@ -176,9 +256,10 @@ test.describe('episode discovery', () => {
       <a href="/ep/2" aria-label="Next episode">&rarr;</a>
       <video id="v" playsinline></video>`);
 
-    expect(await page.evaluate(() => __cp.findEpisodes())).toEqual({
+    expect(await page.evaluate(() => __cp.findEpisodes()))
+      .toEqual(expect.objectContaining({
       next: `${ORIGIN}/ep/2`, prev: `${ORIGIN}/ep/0`,
-    });
+    }));
   });
 
   test('uses the site episode link so an in-place player router can handle Next',
@@ -234,10 +315,11 @@ test.describe('episode discovery', () => {
       <a href="#/ep/0">Previous episode</a>
       <video id="v" playsinline></video>`, `${ORIGIN}/web/index.html#/ep/1`);
 
-    expect(await page.evaluate(() => __cp.findEpisodes())).toEqual({
+    expect(await page.evaluate(() => __cp.findEpisodes()))
+      .toEqual(expect.objectContaining({
       next: `${ORIGIN}/web/index.html#/ep/2`,
       prev: `${ORIGIN}/web/index.html#/ep/0`,
-    });
+    }));
   });
 
   test('a plain anchor is still not a page', async ({ page }) => {
@@ -256,10 +338,11 @@ test.describe('episode discovery', () => {
 
     const list = await page.evaluate(() => __cp.episodeList());
     expect(list.map(e => e.current)).toEqual([false, true, false]);
-    expect(await page.evaluate(() => __cp.findEpisodes())).toEqual({
+    expect(await page.evaluate(() => __cp.findEpisodes()))
+      .toEqual(expect.objectContaining({
       next: `${ORIGIN}/web/index.html#!/item?ep=3`,
       prev: `${ORIGIN}/web/index.html#!/item?ep=1`,
-    });
+    }));
   });
 });
 
@@ -461,7 +544,8 @@ test.describe('AirPlay source for MSE', () => {
       });
 
       const report = (await posted(page)).filter((m: any) => m.type === 'airplay').pop();
-      expect(report).toEqual({ type: 'airplay', available: true, source: 'mse' });
+      expect(report).toEqual(expect.objectContaining(
+        { v: 1, type: 'airplay', available: true, source: 'mse' }));
     });
 
   // Ranking, not guessing. A manifest with segments behind it was fetched from
@@ -603,7 +687,9 @@ test.describe('playback control', () => {
         expect.objectContaining({ type: 'playback' }));
 
       await page.evaluate(() => document.querySelector('video')!.dispatchEvent(new Event('play')));
-      expect(await posted(page)).toContainEqual({ type: 'playback', playing: true });
+      expect(await posted(page)).toContainEqual(
+        expect.objectContaining(
+          { v: 1, type: 'playback', playing: true, buffering: true }));
     });
 
   test('togglePlay drives the staged video both ways', async ({ page }) => {
@@ -633,7 +719,7 @@ test.describe('playback control', () => {
     expect(await page.evaluate(() => __cp.togglePlay())).toBe(false);
   });
 
-  test('volume up to 100 percent is acknowledged for native hardware control', async ({ page }) => {
+  test('disables media volume when a cross-origin stream cannot use Web Audio', async ({ page }) => {
     await serve(page, PLAYER);
     await page.evaluate(() => {
       const video = document.querySelector('video')!;
@@ -642,9 +728,9 @@ test.describe('playback control', () => {
       video.src = 'https://media.example/episode.mp4';
       __cp.enterTheater(video);
     });
-    expect(await page.evaluate(() => __cp.setVolume(50))).toBe(true);
-    expect(await posted(page)).toContainEqual(
-      { type: 'volume', percent: 50, boosted: false });
+    expect(await page.evaluate(() => __cp.setVolume(50))).toBe(false);
+    expect(await posted(page)).toContainEqual(expect.objectContaining(
+      { v: 1, type: 'volume', percent: 100, boosted: false, available: false }));
   });
 
   test('all website volume levels use the primed gain node and cap at 200 percent', async ({ page }) => {
@@ -665,14 +751,14 @@ test.describe('playback control', () => {
     });
 
     expect(await page.evaluate(() => __cp.setVolume(50))).toBe(true);
-    expect(await page.evaluate(() => (window as any).__gain.gain.value)).toBe(1);
-    expect(await posted(page)).toContainEqual(
-      { type: 'volume', percent: 50, boosted: false });
+    expect(await page.evaluate(() => (window as any).__gain.gain.value)).toBe(0.5);
+    expect(await posted(page)).toContainEqual(expect.objectContaining(
+      { v: 1, type: 'volume', percent: 50, boosted: false, available: true }));
 
     expect(await page.evaluate(() => __cp.setVolume(250))).toBe(true);
     expect(await page.evaluate(() => (window as any).__gain.gain.value)).toBe(2);
-    expect(await posted(page)).toContainEqual(
-      { type: 'volume', percent: 200, boosted: true });
+    expect(await posted(page)).toContainEqual(expect.objectContaining(
+      { v: 1, type: 'volume', percent: 200, boosted: true, available: true }));
   });
 
   test('does not claim boost when WebKit rejects audio activation', async ({ page }) => {
@@ -693,8 +779,8 @@ test.describe('playback control', () => {
     });
 
     expect(await page.evaluate(() => __cp.setVolume(175))).toBe(true);
-    await expect.poll(() => posted(page)).toContainEqual(
-      { type: 'volume', percent: 100, boosted: false });
+    await expect.poll(() => posted(page)).toContainEqual(expect.objectContaining(
+      { v: 1, type: 'volume', percent: 100, boosted: false, available: false }));
     expect(await page.evaluate(() => (window as any).__gain.gain.value)).toBe(1);
   });
 });
@@ -709,6 +795,57 @@ test.describe('frame announcement', () => {
     await serve(page, PLAYER);
     const ready = (await posted(page)).filter((m: any) => m.type === 'ready');
     expect(ready).toHaveLength(1);
+    expect(ready[0]).toEqual(expect.objectContaining({
+      v: 1,
+      fid: expect.stringMatching(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i),
+      width: expect.any(Number),
+      height: expect.any(Number),
+      visible: true,
+    }));
+  });
+
+  test('uses one stable identity per frame', async ({ page }) => {
+    await serve(page, PLAYER);
+    const mainMessages = await posted(page);
+    const mainID = mainMessages[0].fid;
+    expect(mainMessages.every((message: any) => message.fid === mainID)).toBe(true);
+
+    await page.evaluate(() => {
+      const iframe = document.createElement('iframe');
+      iframe.name = 'identity-fixture';
+      iframe.srcdoc = '<!doctype html><video></video>';
+      document.body.appendChild(iframe);
+    });
+    const iframe = await page.waitForSelector('iframe[name="identity-fixture"]');
+    const child = await iframe.contentFrame();
+    if (!child) throw new Error('identity fixture frame did not attach');
+    await child.evaluate(() => {
+      (window as any).__posted = [];
+      (window as any).webkit = {
+        messageHandlers: { cp: { postMessage: (message: any) =>
+          (window as any).__posted.push(message) } },
+      };
+    });
+    await child.addScriptTag({ content: AGENT });
+    const childMessages = await child.evaluate(() => (window as any).__posted);
+    const childID = childMessages[0].fid;
+
+    expect(childMessages.every((message: any) => message.fid === childID)).toBe(true);
+    expect(childID).not.toBe(mainID);
+  });
+
+  test('retires its identity when the document leaves the frame', async ({ page }) => {
+    await serve(page, PLAYER);
+    const frameID = (await posted(page))[0].fid;
+
+    await page.evaluate(() => dispatchEvent(new Event('pagehide')));
+
+    expect(await posted(page)).toContainEqual(expect.objectContaining({
+      v: 1,
+      fid: frameID,
+      type: 'frameGone',
+    }));
   });
 
   test('autoTheater stages the video in the frame it runs in', async ({ page }) => {
@@ -753,7 +890,8 @@ test.describe('resuming theater after an episode change', () => {
       // Once the source changed, the frame is no longer the outgoing one.
       await page.evaluate(() => document.querySelector('video')!.dispatchEvent(new Event('play')));
       expect((await posted(page)).filter((m: any) => m.type === 'playback').slice(-1)[0])
-        .toEqual({ type: 'playback', playing: false });
+        .toEqual(expect.objectContaining(
+          { v: 1, type: 'playback', playing: false, buffering: false }));
     });
 
   test('waits for a video inserted by a delayed AJAX player lifecycle',
@@ -1154,19 +1292,21 @@ test.describe('episode neighbours', () => {
   // above never matched this, which is why the buttons stayed empty there.
   const TITLES = ['Fortune Is Unpredictable and Mutable', 'A Certain Bomb',
     'Yokohama Gangster Paradise', 'The Tragedy of the Fatalist'];
-  const SHOW = `${ORIGIN}/watch/bungou-stray-dogs-80525`;
+  // A function, not a constant: describe bodies run at collection time, and
+  // ORIGIN is not known until the fixture server has a port.
+  const show = () => `${ORIGIN}/watch/bungou-stray-dogs-80525`;
   const ANIWAVE = (current: number, order = [1, 2, 3, 4]) => `${HEAD}
     <video id="v" playsinline style="width:360px;height:200px"></video>
     <div class="ctrl"><span>Prev</span><span>Next</span></div>
     <ul>${order.map(n => `<li><a href="/watch/bungou-stray-dogs-80525/ep-${n}"
       data-num="${n}"><b>${n}</b> <span>${TITLES[n - 1]}</span></a></li>`).join('')}</ul>
-    <script>history.replaceState(null, '', '${SHOW}/ep-${current}');<\/script>`;
+    <script>history.replaceState(null, '', '${show()}/ep-${current}');<\/script>`;
 
   test('reads a "number title" list, as aniwave renders it', async ({ page }) => {
-    await serve(page, ANIWAVE(2), `${SHOW}/ep-2`);
+    await serve(page, ANIWAVE(2), `${show()}/ep-2`);
     const found = await page.evaluate(() => __cp.findEpisodes());
-    expect(found.prev).toBe(`${SHOW}/ep-1`);
-    expect(found.next).toBe(`${SHOW}/ep-3`);
+    expect(found.prev).toBe(`${show()}/ep-1`);
+    expect(found.next).toBe(`${show()}/ep-3`);
 
     const list = await page.evaluate(() => __cp.episodeList());
     expect(list.map((e: any) => e.label)).toEqual([
@@ -1177,10 +1317,10 @@ test.describe('episode neighbours', () => {
   });
 
   test('orders "number title" entries by number when listed newest-first', async ({ page }) => {
-    await serve(page, ANIWAVE(2, [4, 3, 2, 1]), `${SHOW}/ep-2`);
+    await serve(page, ANIWAVE(2, [4, 3, 2, 1]), `${show()}/ep-2`);
     const found = await page.evaluate(() => __cp.findEpisodes());
-    expect(found.prev).toBe(`${SHOW}/ep-1`);
-    expect(found.next).toBe(`${SHOW}/ep-3`);
+    expect(found.prev).toBe(`${show()}/ep-1`);
+    expect(found.next).toBe(`${show()}/ep-3`);
   });
 
   // Episode 11 of the same show: an 81-character title. The list used to
@@ -1189,14 +1329,14 @@ test.describe('episode neighbours', () => {
     const long = 'First, an Unsuitable Profession for Her. Second, an Ecstatic Detective Agency';
     await serve(page, `${HEAD}
       <video id="v" playsinline style="width:360px;height:200px"></video>
-      <a href="${SHOW}/ep-10">10 Rashomon and the Tiger</a>
-      <a href="${SHOW}/ep-11">11 ${long}</a>
-      <a href="${SHOW}/ep-12">12 Borne Back Ceaselessly into the Past</a>`, `${SHOW}/ep-10`);
+      <a href="${show()}/ep-10">10 Rashomon and the Tiger</a>
+      <a href="${show()}/ep-11">11 ${long}</a>
+      <a href="${show()}/ep-12">12 Borne Back Ceaselessly into the Past</a>`, `${show()}/ep-10`);
     const list = await page.evaluate(() => __cp.episodeList());
     expect(list.map((e: any) => e.number)).toEqual([10, 11, 12]);
     expect(list[1].label.length).toBeLessThanOrEqual(60);
     expect(list[1].label.startsWith('11 First, an Unsuitable')).toBe(true);
-    expect(await page.evaluate(() => __cp.findEpisodes().next)).toBe(`${SHOW}/ep-11`);
+    expect(await page.evaluate(() => __cp.findEpisodes().next)).toBe(`${show()}/ep-11`);
   });
 
   // Title-only labels are enough when the URL carries the number.
@@ -1216,9 +1356,9 @@ test.describe('episode neighbours', () => {
   test('does not list the site\'s own Next link as an episode', async ({ page }) => {
     await serve(page, `${HEAD}
       <video id="v" playsinline style="width:360px;height:200px"></video>
-      <a href="${SHOW}/ep-3">Next</a>
-      ${[1, 2, 3].map(n => `<a href="${SHOW}/ep-${n}">${n} ${TITLES[n - 1]}</a>`).join('')}`,
-      `${SHOW}/ep-2`);
+      <a href="${show()}/ep-3">Next</a>
+      ${[1, 2, 3].map(n => `<a href="${show()}/ep-${n}">${n} ${TITLES[n - 1]}</a>`).join('')}`,
+      `${show()}/ep-2`);
     const list = await page.evaluate(() => __cp.episodeList());
     expect(list.map((e: any) => e.label)).toEqual([
       '1 Fortune Is Unpredictable and Mutable', '2 A Certain Bomb',
@@ -1231,7 +1371,7 @@ test.describe('episode neighbours', () => {
       <video id="v" playsinline style="width:360px;height:200px"></video>
       <a href="${ORIGIN}/comments/80525">12 comments</a>
       <a href="${ORIGIN}/list?page=2">Page 2 of 9</a>
-      <a href="${ORIGIN}/sleepy-hollow-1999">Sleepy Hollow (1999)</a>`, `${SHOW}/ep-2`);
+      <a href="${ORIGIN}/sleepy-hollow-1999">Sleepy Hollow (1999)</a>`, `${show()}/ep-2`);
     expect(await page.evaluate(() => __cp.episodeList())).toEqual([]);
   });
 
@@ -1242,14 +1382,14 @@ test.describe('episode neighbours', () => {
     await serve(page, `${HEAD}
       <video id="v" playsinline style="width:360px;height:200px"></video>
       <a href="#request">Request</a> <a href="#">View all</a> <a href="#sign">Sign in</a>
-      ${[1, 2, 3].map(n => `<a href="${SHOW}/ep-${n}">${n} ${TITLES[n - 1]}</a>`).join('')}`,
-      `${SHOW}/ep-1`);
+      ${[1, 2, 3].map(n => `<a href="${show()}/ep-${n}">${n} ${TITLES[n - 1]}</a>`).join('')}`,
+      `${show()}/ep-1`);
     const list = await page.evaluate(() => __cp.episodeList());
     expect(list.map((e: any) => e.label)).toEqual([
       '1 Fortune Is Unpredictable and Mutable', '2 A Certain Bomb',
       '3 Yokohama Gangster Paradise']);
     const found = await page.evaluate(() => __cp.findEpisodes());
-    expect(found.next).toBe(`${SHOW}/ep-2`);
+    expect(found.next).toBe(`${show()}/ep-2`);
     expect(found.prev).toBeNull();
   });
 
@@ -1258,19 +1398,19 @@ test.describe('episode neighbours', () => {
   test('prefers the link whose text names the episode when a page is linked twice', async ({ page }) => {
     await serve(page, `${HEAD}
       <video id="v" playsinline style="width:360px;height:200px"></video>
-      <a href="${SHOW}/ep-2">Watch now</a>
-      ${[1, 2, 3].map(n => `<a href="${SHOW}/ep-${n}">${n} ${TITLES[n - 1]}</a>`).join('')}`,
-      `${SHOW}/ep-1`);
+      <a href="${show()}/ep-2">Watch now</a>
+      ${[1, 2, 3].map(n => `<a href="${show()}/ep-${n}">${n} ${TITLES[n - 1]}</a>`).join('')}`,
+      `${show()}/ep-1`);
     const list = await page.evaluate(() => __cp.episodeList());
     expect(list.map((e: any) => e.label)).toEqual([
       '2 A Certain Bomb', '1 Fortune Is Unpredictable and Mutable',
       '3 Yokohama Gangster Paradise']);
-    expect(await page.evaluate(() => __cp.findEpisodes().next)).toBe(`${SHOW}/ep-2`);
+    expect(await page.evaluate(() => __cp.findEpisodes().next)).toBe(`${show()}/ep-2`);
   });
 
   // Live markup is <b>1</b> newline <span>Title</span>; the label read "1\nTitle".
   test('collapses whitespace inside a label', async ({ page }) => {
-    await serve(page, ANIWAVE(1), `${SHOW}/ep-1`);
+    await serve(page, ANIWAVE(1), `${show()}/ep-1`);
     const list = await page.evaluate(() => __cp.episodeList());
     expect(list[0].label).toBe('1 Fortune Is Unpredictable and Mutable');
     expect(list.some((e: any) => /\s\s|\n/.test(e.label))).toBe(false);
@@ -1278,11 +1418,56 @@ test.describe('episode neighbours', () => {
 
   // A hash or trailing slash on the address must not unmark the current entry.
   test('marks the current episode through a hash and trailing slash', async ({ page }) => {
-    await serve(page, ANIWAVE(3), `${SHOW}/ep-3`);
-    await page.evaluate((show) => history.replaceState(null, '', show + '/ep-3/#player'), SHOW);
+    await serve(page, ANIWAVE(3), `${show()}/ep-3`);
+    await page.evaluate((show) => history.replaceState(null, '', show + '/ep-3/#player'), show());
     const list = await page.evaluate(() => __cp.episodeList());
     expect(list.filter((e: any) => e.current).map((e: any) => e.number)).toEqual([3]);
-    expect(await page.evaluate(() => __cp.findEpisodes().next)).toBe(`${SHOW}/ep-4`);
+    expect(await page.evaluate(() => __cp.findEpisodes().next)).toBe(`${show()}/ep-4`);
+  });
+});
+
+test.describe('popup guard fingerprint', () => {
+  test('leaves no string-named __cp property in the page world', async ({ page }) => {
+    await page.setContent(PLAYER);
+    await page.addScriptTag({ content: POPUPGUARD });
+
+    expect(await page.evaluate(() =>
+      Object.getOwnPropertyNames(window).filter((name) => name.startsWith('__cp'))))
+      .toEqual([]);
+  });
+
+  test('reports blocked popups through the versioned bridge', async ({ page }) => {
+    await serve(page, PLAYER);
+    await page.addScriptTag({ content: POPUPGUARD });
+
+    await page.evaluate(() => window.open('https://advertisement.test'));
+
+    expect(await posted(page)).toContainEqual(expect.objectContaining({
+      v: 1,
+      fid: expect.any(String),
+      type: 'popupBlocked',
+    }));
+    expect(await page.evaluate(() =>
+      Object.prototype.hasOwnProperty.call(window, '__cpPopupsBlocked'))).toBe(false);
+  });
+
+  test('does not stack wrappers when injected twice', async ({ page }) => {
+    await serve(page, PLAYER);
+    await page.addScriptTag({ content: POPUPGUARD });
+    await page.addScriptTag({ content: POPUPGUARD });
+
+    await page.evaluate(() => window.open('https://advertisement.test'));
+
+    expect((await posted(page)).filter((message: any) => message.type === 'popupBlocked'))
+      .toHaveLength(1);
+  });
+
+  test('makes the wrapped window.open resemble the native function', async ({ page }) => {
+    await page.setContent(PLAYER);
+    await page.addScriptTag({ content: POPUPGUARD });
+
+    expect(await page.evaluate(() => window.open.toString()))
+      .toBe('function open() { [native code] }');
   });
 });
 
@@ -2379,5 +2564,347 @@ test.describe('interstitial blocking', () => {
 
     await page.evaluate(() => __cp.setOverlayBlocking(true));
     await expect(page.locator('#backdrop')).toBeHidden();
+  });
+});
+
+test.describe('volume routing and AirPlay', () => {
+  // `createMediaElementSource` is irreversible for the element's lifetime, and
+  // an element routed through Web Audio does not follow AirPlay: the
+  // television gets silence. Theater used to build the graph on every entry,
+  // so the volume slider nobody touched broke the AirPlay button next to it.
+  async function stagedWithAudioSpy(page: Page) {
+    await serve(page, PLAYER);
+    await page.evaluate(() => {
+      (window as any).__routed = 0;
+      const Ctor: any = (window as any).AudioContext || (window as any).webkitAudioContext;
+      const original = Ctor.prototype.createMediaElementSource;
+      Ctor.prototype.createMediaElementSource = function (...args: any[]) {
+        (window as any).__routed++;
+        return original.apply(this, args);
+      };
+      const v = document.querySelector('video')! as any;
+      v.play = () => Promise.resolve();
+    });
+    await watchClean(page).click();
+  }
+
+  const routed = (page: Page) => page.evaluate(() => (window as any).__routed as number);
+
+  test('entering theater does not route the element through Web Audio',
+    async ({ page }) => {
+      await stagedWithAudioSpy(page);
+      expect(await routed(page)).toBe(0);
+    });
+
+  test('setting 100% leaves the element unrouted and reports it as available',
+    async ({ page }) => {
+      await stagedWithAudioSpy(page);
+      await page.evaluate(() => __cp.setVolume(100));
+      expect(await routed(page)).toBe(0);
+      expect((await posted(page)).filter((m: any) => m.type === 'volume').slice(-1)[0])
+        .toEqual(expect.objectContaining({ percent: 100, boosted: false, available: true }));
+    });
+
+  test('asking for a different level routes once and only once',
+    async ({ page }) => {
+      await stagedWithAudioSpy(page);
+      await page.evaluate(() => __cp.setVolume(50));
+      expect(await routed(page)).toBe(1);
+      await page.evaluate(() => __cp.setVolume(150));
+      await page.evaluate(() => __cp.setVolume(75));
+      expect(await routed(page)).toBe(1);
+    });
+
+  test('a cross-origin stream without CORS says the control is unavailable',
+    async ({ page }) => {
+      await serve(page, PLAYER);
+      await page.evaluate(() => {
+        const v = document.querySelector('video')! as any;
+        Object.defineProperty(v, 'currentSrc',
+          { get: () => 'https://elsewhere.test/a.mp4', configurable: true });
+        v.play = () => Promise.resolve();
+      });
+      await watchClean(page).click();
+      await page.evaluate(() => __cp.setVolume(150));
+      expect((await posted(page)).filter((m: any) => m.type === 'volume').slice(-1)[0])
+        .toEqual(expect.objectContaining({ available: false }));
+    });
+});
+
+test.describe('what counts as a next episode', () => {
+  // The player advances on its own when a video ends. `/\bnext\b/` matches
+  // "Next »" in a forum footer, a docs page, any gallery — so on those pages
+  // finishing a video carried the user somewhere they never chose. The button
+  // is still offered; only the countdown is withheld.
+  const discovery = (page: Page) =>
+    page.evaluate(() => JSON.parse(JSON.stringify(__cp.findEpisodes())));
+
+  test('rel=next is an episode signal', async ({ page }) => {
+    await serve(page, `${HEAD}<link rel="next" href="/ep/2"><video></video>`);
+    expect(await discovery(page)).toMatchObject({ nextSource: 'rel' });
+  });
+
+  test('a numbered episode list is an episode signal', async ({ page }) => {
+    await serve(page, `${HEAD}<video></video>
+      <a href="/watch/ep-1">Episode 1</a>
+      <a href="/watch/ep-2">Episode 2</a>
+      <a href="/watch/ep-3">Episode 3</a>`, `${ORIGIN}/watch/ep-2`);
+    const found = await discovery(page);
+    expect(found.nextSource).toBe('list');
+    expect(found.next).toContain('/watch/ep-3');
+  });
+
+  test('pagination is offered as a button but is NOT an episode signal',
+    async ({ page }) => {
+      await serve(page, `${HEAD}<video></video>
+        <a href="/thread?page=1">Previous</a>
+        <a href="/thread?page=3">Next »</a>`, `${ORIGIN}/thread?page=2`);
+      const found = await discovery(page);
+      expect(found.next).toContain('page=3');
+      expect(found.nextSource).toBe('text');
+    });
+
+  test('a docs footer link is not an episode signal', async ({ page }) => {
+    await serve(page, `${HEAD}<video></video>
+      <nav><a href="/guide/installing">Next: Installing</a></nav>`, `${ORIGIN}/guide/intro`);
+    expect(await discovery(page)).toMatchObject({ nextSource: 'text' });
+  });
+
+  test('rel beats text when a page has both', async ({ page }) => {
+    await serve(page, `${HEAD}<link rel="next" href="/ep/2"><video></video>
+      <a href="/unrelated">Next »</a>`);
+    const found = await discovery(page);
+    expect(found.nextSource).toBe('rel');
+    expect(found.next).toContain('/ep/2');
+  });
+});
+
+test.describe('subtitles a player paints itself', () => {
+  // Video.js, JW, Shaka and most of the players this app meets render captions
+  // into a sibling <div> over the video, not into the element's text tracks.
+  // Theater hides every sibling on the way up, so it deleted the subtitles —
+  // and textTracks() sees nothing for those players either, so the native menu
+  // could not offer them back.
+  const visible = (page: Page, selector: string) =>
+    page.evaluate((s) => {
+      const el = document.querySelector(s)!;
+      return getComputedStyle(el).display !== 'none';
+    }, selector);
+
+  test('a video.js caption display survives theater', async ({ page }) => {
+    await serve(page, `${HEAD}<div class="player">
+      <video></video>
+      <div class="vjs-text-track-display">Hello there</div>
+      <div class="advert">Buy this</div>
+    </div>`);
+    await watchClean(page).click();
+    expect(await visible(page, '.vjs-text-track-display')).toBe(true);
+    expect(await visible(page, '.advert')).toBe(false);
+  });
+
+  test('a JW captions layer survives theater', async ({ page }) => {
+    await serve(page, `${HEAD}<div class="player">
+      <video></video><div class="jw-captions">Subtitle line</div>
+    </div>`);
+    await watchClean(page).click();
+    expect(await visible(page, '.jw-captions')).toBe(true);
+  });
+
+  test('an unnamed overlay holding only text is treated as captions',
+    async ({ page }) => {
+      await serve(page, `${HEAD}<div class="player" style="position:relative">
+        <video></video>
+        <div id="cues" style="position:absolute;bottom:0">Ceci est un test</div>
+      </div>`);
+      await watchClean(page).click();
+      expect(await visible(page, '#cues')).toBe(true);
+    });
+
+  test('an overlay holding an image is not captions and is still hidden',
+    async ({ page }) => {
+      await serve(page, `${HEAD}<div class="player" style="position:relative">
+        <video></video>
+        <div id="banner" style="position:absolute;inset:0"><img src="x.png">Ad</div>
+      </div>`);
+      await watchClean(page).click();
+      expect(await visible(page, '#banner')).toBe(false);
+    });
+
+  test('closing theater leaves the caption layer as it was', async ({ page }) => {
+    await serve(page, `${HEAD}<div class="player">
+      <video></video><div class="jw-captions">Subtitle line</div>
+    </div>`);
+    await watchClean(page).click();
+    await page.evaluate(() => __cp.exitTheater());
+    expect(await page.evaluate(() =>
+      document.querySelector('.jw-captions')!.hasAttribute('data-cp-caption'))).toBe(false);
+  });
+});
+
+test.describe('one definition of same site', () => {
+  // The agent refused anything off `location.origin`; native accepted anything
+  // on the same registrable domain. A site serving its player from
+  // player.example.com and its episodes from www.example.com therefore got no
+  // episode discovery at all — while the very same URLs passed native's check
+  // when a navigation was attempted. Native has the Public Suffix List and is
+  // the authority; it tells the agent the site.
+
+  test('without a site from native, only the exact host is same-site',
+    async ({ page }) => {
+      await serve(page, PLAYER);
+      // Asked of the page rather than written down: these fixtures are served
+      // from loopback, so the host is whatever the server bound to.
+      expect(await page.evaluate(() => __cp.sameSiteHost(location.hostname))).toBe(true);
+      expect(await page.evaluate(() =>
+        __cp.sameSiteHost('www.' + location.hostname))).toBe(false);
+      expect(await page.evaluate(() => __cp.sameSiteHost('evil.test'))).toBe(false);
+    });
+
+  test('a site from native admits its subdomains', async ({ page }) => {
+    await serve(page, PLAYER);
+    await page.evaluate(() => __cp.setSite('example.test'));
+    expect(await page.evaluate(() => __cp.sameSiteHost('www.example.test'))).toBe(true);
+    expect(await page.evaluate(() => __cp.sameSiteHost('player.example.test'))).toBe(true);
+    expect(await page.evaluate(() => __cp.sameSiteHost('example.test'))).toBe(true);
+  });
+
+  test('a lookalike host is not admitted by the suffix rule', async ({ page }) => {
+    await serve(page, PLAYER);
+    await page.evaluate(() => __cp.setSite('example.test'));
+    // Not `.endsWith('example.test')` — that would admit this.
+    expect(await page.evaluate(() => __cp.sameSiteHost('notexample.test'))).toBe(false);
+    expect(await page.evaluate(() => __cp.sameSiteHost('example.test.evil.com'))).toBe(false);
+  });
+
+  test('episode links on a sibling subdomain are found once the site is known',
+    async ({ page }) => {
+      await serve(page, `${HEAD}<video></video>
+        <a href="https://www.example.test/watch/ep-1">Episode 1</a>
+        <a href="https://www.example.test/watch/ep-2">Episode 2</a>`);
+      expect(await page.evaluate(() => __cp.episodeList().length)).toBe(0);
+
+      await page.evaluate(() => __cp.setSite('example.test'));
+      expect(await page.evaluate(() => __cp.episodeList().length)).toBe(2);
+    });
+
+  test('a cross-site link is still refused after the site is known',
+    async ({ page }) => {
+      await serve(page, `${HEAD}<video></video>
+        <a href="https://elsewhere.test/watch/ep-2">Episode 2</a>`);
+      await page.evaluate(() => __cp.setSite('example.test'));
+      expect(await page.evaluate(() => __cp.episodeList().length)).toBe(0);
+      expect(await page.evaluate(() =>
+        __cp.navigateEpisode('https://elsewhere.test/watch/ep-2'))).toBe(false);
+    });
+});
+
+test.describe('what a site paints over the film', () => {
+  // aniwave announces each episode change with a card in the corner of the
+  // player — "Playing Episode 6", a title, a date and a close button. Theater
+  // is supposed to be the video and nothing else, but the interstitial test
+  // deliberately only catches things covering the MIDDLE of the video by at
+  // least a third, because outside theater small site furniture around a
+  // player is the site's business. A corner card is neither, so it sat there
+  // through the whole episode.
+  const shown = (page: Page, selector: string) =>
+    page.evaluate((s) => {
+      const el = document.querySelector(s);
+      return el ? getComputedStyle(el).display !== 'none' : false;
+    }, selector);
+
+  async function stagedPlayer(page: Page) {
+    await serve(page, `${HEAD}<div class="player" style="position:relative">
+      <video></video></div>`);
+    // No rect mock: staging gives the video position:fixed inset:0, so its
+    // box IS the viewport, which is the whole point — in theater every corner
+    // of the screen is the film.
+    await page.evaluate(() => {
+      (document.querySelector('video')! as any).play = () => Promise.resolve();
+    });
+    await watchClean(page).click();
+  }
+
+  test('an episode toast inserted after theater starts is hidden',
+    async ({ page }) => {
+      await stagedPlayer(page);
+      await page.evaluate(() => {
+        const toast = document.createElement('div');
+        toast.id = 'episode-toast';
+        toast.style.cssText =
+          'position:fixed;right:20px;bottom:40px;width:300px;height:110px;background:#222';
+        toast.innerHTML = '<p>Playing Episode 6</p><button>close</button>';
+        document.body.appendChild(toast);
+      });
+      await page.evaluate(() => __cp.hideTheaterIntruders());
+      expect(await shown(page, '#episode-toast')).toBe(false);
+    });
+
+  test('a toast is not mistaken for subtitles just because it holds text',
+    async ({ page }) => {
+      await stagedPlayer(page);
+      await page.evaluate(() => {
+        const toast = document.createElement('div');
+        toast.id = 'notice';
+        toast.style.cssText =
+          'position:fixed;right:20px;bottom:40px;width:300px;height:110px;background:#222';
+        // Text, no media — the caption heuristic's shape. The close button is
+        // what separates a notice from a caption.
+        toast.innerHTML = 'Playing Episode 6<a href="/ep/7">next</a>';
+        document.body.appendChild(toast);
+      });
+      await page.evaluate(() => __cp.hideTheaterIntruders());
+      expect(await shown(page, '#notice')).toBe(false);
+    });
+
+  test('real captions still survive the same pass', async ({ page }) => {
+    await stagedPlayer(page);
+    await page.evaluate(() => {
+      const cues = document.createElement('div');
+      cues.id = 'cues';
+      cues.className = 'vjs-text-track-display';
+      cues.style.cssText =
+        'position:absolute;left:0;right:0;bottom:30px;height:60px';
+      cues.textContent = 'Ceci est un test';
+      document.querySelector('.player')!.appendChild(cues);
+    });
+    await page.evaluate(() => __cp.hideTheaterIntruders());
+    expect(await shown(page, '#cues')).toBe(true);
+  });
+
+  test('closing theater gives every hidden notice back', async ({ page }) => {
+    await stagedPlayer(page);
+    await page.evaluate(() => {
+      const toast = document.createElement('div');
+      toast.id = 'episode-toast';
+      toast.style.cssText =
+        'position:fixed;right:20px;bottom:40px;width:300px;height:110px;background:#222';
+      toast.innerHTML = '<p>Playing Episode 6</p><button>close</button>';
+      document.body.appendChild(toast);
+    });
+    await page.evaluate(() => __cp.hideTheaterIntruders());
+    await page.evaluate(() => __cp.exitTheater());
+    expect(await shown(page, '#episode-toast')).toBe(true);
+  });
+
+  test('nothing is hidden when no video is staged', async ({ page }) => {
+    await serve(page, `${HEAD}<video></video>`);
+    await page.evaluate(() => {
+      const toast = document.createElement('div');
+      toast.id = 'site-ui';
+      toast.style.cssText =
+        'position:fixed;right:20px;bottom:40px;width:300px;height:110px;background:#222';
+      toast.textContent = 'Cookie notice';
+      document.body.appendChild(toast);
+    });
+    expect(await page.evaluate(() => __cp.hideTheaterIntruders())).toBe(0);
+    expect(await shown(page, '#site-ui')).toBe(true);
+  });
+
+  test('an element holding the video is never hidden', async ({ page }) => {
+    await stagedPlayer(page);
+    await page.evaluate(() => __cp.hideTheaterIntruders());
+    expect(await shown(page, '.player')).toBe(true);
+    expect(await page.evaluate(() =>
+      document.querySelector('video')!.hasAttribute('data-cp-hidden'))).toBe(false);
   });
 });

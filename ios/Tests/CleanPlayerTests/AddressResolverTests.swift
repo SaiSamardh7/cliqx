@@ -87,6 +87,12 @@ final class AddressResolverTests: XCTestCase {
         XCTAssertEqual(resolve("8.8.8.8")?.scheme, "https")
         XCTAssertEqual(resolve("172.32.0.1")?.scheme, "https")
         XCTAssertEqual(resolve("193.168.1.1")?.scheme, "https")
+        XCTAssertEqual(resolve("169.254.20.30")?.scheme, "https")
+    }
+
+    func testLinkLocalAddressIsNotTreatedAsTrustedLocalHost() {
+        XCTAssertFalse(AddressResolver.isLocalHost("169.254.20.30"))
+        XCTAssertTrue(AddressResolver.isLocalHost("192.168.20.30"))
     }
 
     /// An explicit scheme is always obeyed, local or not.
@@ -114,5 +120,69 @@ final class AddressResolverTests: XCTestCase {
         let url = AddressResolver.resolve("hello", search: engine)
         XCTAssertEqual(url?.host(), "example.org")
         XCTAssertEqual(url?.path(), "/find")
+    }
+
+    // MARK: Resume key
+
+    /// One episode, five URLs. They have to land on one saved position.
+    func testResumeKeyIgnoresTheWaysASiteDressesUpTheSameURL() {
+        let key = { AddressResolver.resumeKey(for: URL(string: $0)!) }
+        let expected = key("https://example.com/watch/ep-4")
+        XCTAssertEqual(key("http://www.example.com/watch/ep-4/"), expected)
+        XCTAssertEqual(key("https://example.com/watch/ep-4?utm_source=x&fbclid=y"), expected)
+        XCTAssertEqual(key("https://EXAMPLE.com/watch/ep-4?t=120"), expected)
+        XCTAssertEqual(key("https://example.com/watch/ep-4?si=abc&start=30"), expected)
+    }
+
+    /// Things that DO identify a different video survive: a real query
+    /// parameter, a hash route, a port.
+    func testResumeKeyKeepsWhatIdentifiesTheVideo() {
+        let key = { AddressResolver.resumeKey(for: URL(string: $0)!) }
+        XCTAssertNotEqual(key("https://example.com/watch?v=abc"), key("https://example.com/watch?v=def"))
+        XCTAssertNotEqual(key("http://nas.local:8096/web/#/video?id=1"),
+                          key("http://nas.local:8096/web/#/video?id=2"))
+        XCTAssertNotEqual(key("http://nas.local:8096/"), key("http://nas.local:8920/"))
+    }
+}
+
+// MARK: - Resume keys keep distinct pages distinct
+
+extension AddressResolverTests {
+    /// A `t` that is a timestamp is still noise: the same video shared at two
+    /// moments is one video.
+    func testTimestampsAreStillStripped() {
+        let plain = URL(string: "https://site.test/watch?v=1")!
+        for shared in ["?v=1&t=90", "?v=1&t=90s", "?v=1&t=1h2m3s", "?v=1&start=45"] {
+            let url = URL(string: "https://site.test/watch\(shared)")!
+            XCTAssertEqual(AddressResolver.resumeKey(for: url),
+                           AddressResolver.resumeKey(for: plain),
+                           "\(shared) should fold onto the plain URL")
+        }
+    }
+
+    /// A `t` that is a thread id is not a timestamp, whatever it is called.
+    func testNonTimeValuesUnderTimeNamesAreKept() {
+        let first = URL(string: "https://forum.test/thread?t=alpha")!
+        let second = URL(string: "https://forum.test/thread?t=beta")!
+        XCTAssertNotEqual(AddressResolver.resumeKey(for: first),
+                          AddressResolver.resumeKey(for: second))
+    }
+
+    func testTrackingParametersAreStillStripped() {
+        let clean = URL(string: "https://site.test/watch?v=1")!
+        for noise in ["utm_source=x", "utm_campaign=y", "fbclid=z", "gclid=q"] {
+            let url = URL(string: "https://site.test/watch?v=1&\(noise)")!
+            XCTAssertEqual(AddressResolver.resumeKey(for: url),
+                           AddressResolver.resumeKey(for: clean))
+        }
+    }
+
+    func testTimeValueRecogniser() {
+        for value in ["90", "90s", "1h2m3s", "2m30s", "0:45", "01:02:03"] {
+            XCTAssertTrue(AddressResolver.looksLikeTime(value), "\(value)")
+        }
+        for value in ["alpha", "12ab", "abc123", "", "id-7"] {
+            XCTAssertFalse(AddressResolver.looksLikeTime(value), "\(value)")
+        }
     }
 }

@@ -11,14 +11,19 @@ An iOS browser for watching video: it blocks advertising and tracking requests,
 cancels popups before they open, hides the overlays that sit on top of players,
 and offers a native "Watch clean" player with next/previous episode controls.
 
-No account, no server, no analytics, no third-party SDKs.
+No account, no server, no analytics, no tracking SDKs. One third-party
+library is linked: VLCKit, which decodes the video — see [`NOTICE.md`](NOTICE.md).
 
 ## Status
 
 Pre-release, and not on the App Store yet. The engineering is in place and
-covered by tests — 198 Playwright specs across Chromium and WebKit, 66 XCTest
-cases and 8 UI tests, all green in CI — but see [`docs/ROADMAP.md`](docs/ROADMAP.md) for what is still
-open before submission.
+covered by tests — 228 Swift, 11 UI and 406 agent runs (203 specs across
+Chromium and WebKit), all green in CI — but see
+[`docs/ROADMAP.md`](docs/ROADMAP.md) for what is still open before submission,
+and [`docs/FIX-LIST.md`](docs/FIX-LIST.md) for everything ranked by severity.
+
+Those counts are checked by `tools/count-tests.py --check` in CI, because they
+were wrong here for two weeks.
 
 - [`ARCHITECTURE.md`](ARCHITECTURE.md) — how it works and why
 - [`NOTICE.md`](NOTICE.md) — third-party licences and obligations
@@ -79,10 +84,16 @@ cd ios/App && xcodebuild -scheme CleanPlayerApp -destination 'platform=iOS,id=<h
 xcrun devicectl device install app --device <coredevice-uuid> /tmp/dd/Build/Products/Debug-iphoneos/CleanPlayerApp.app
 ```
 
-Device builds also need `DEVELOPMENT_TEAM` set in `project.pbxproj`; it is
-committed as `""` so that CI signs nothing, so keep your team id as a local
-change rather than committing it. Simulator builds are unsigned
-(`CODE_SIGNING_ALLOWED[sdk=iphonesimulator*]`) and are unaffected by both.
+Device builds need `DEVELOPMENT_TEAM` in `project.pbxproj`. It is committed,
+the same value in all four configurations, because this repository builds to
+one person's device; fork it and you will want your own. CI is unaffected
+either way: simulator builds are unsigned
+(`CODE_SIGNING_ALLOWED[sdk=iphonesimulator*]`), so nothing in CI signs.
+
+The version is in [`VERSION`](VERSION) and nowhere else. `tools/set-version.py`
+writes it into every configuration and `tools/check-version.py` fails CI when
+they drift — two configurations carried 0.1 and two carried 1.0, so which
+version shipped depended on which scheme was built.
 
 ## Building and running the app
 

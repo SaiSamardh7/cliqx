@@ -1,5 +1,6 @@
 import CleanPlayer
 import SwiftUI
+import UIKit
 
 @main
 struct CleanPlayerApp: App {
@@ -7,6 +8,7 @@ struct CleanPlayerApp: App {
     @StateObject private var settings = ProtectionSettings()
     @StateObject private var gestureSettings = PlayerGestureSettings()
     @StateObject private var rules = RuleListController()
+    @StateObject private var playback = PlaybackPreferences()
 
     var body: some Scene {
         WindowGroup {
@@ -15,10 +17,10 @@ struct CleanPlayerApp: App {
                     OnboardingView(settings: settings)
                 } else if let url = model.current {
                     BrowserView(url: url, model: model, rules: rules, settings: settings,
-                                gestureSettings: gestureSettings)
+                                gestureSettings: gestureSettings, playback: playback)
                 } else {
                     HomeView(model: model, rules: rules, settings: settings,
-                             gestureSettings: gestureSettings)
+                             gestureSettings: gestureSettings, playback: playback)
                 }
             }
             .task {
@@ -26,11 +28,13 @@ struct CleanPlayerApp: App {
                 // milliseconds afterwards. Starting at launch — not at first
                 // navigation — is what keeps that cost off the critical path.
                 rules.begin(settings.level)
-                // What makes the `audio` background mode mean something. The
-                // default category is silenced by the ring switch and stops on
-                // lock, which would suspend Picture in Picture and cut AirPlay
-                // the moment the phone locked.
-                MediaSession.activate()
+                Diagnostics.start()
+                // `UIDevice.current.orientation` reads `.unknown` until this is
+                // asked for. The player's rotate button needs it: undoing that
+                // button means sending the interface back to where the device
+                // actually is, and "unknown" would leave it stuck in the
+                // orientation the button chose.
+                UIDevice.current.beginGeneratingDeviceOrientationNotifications()
             }
         }
     }

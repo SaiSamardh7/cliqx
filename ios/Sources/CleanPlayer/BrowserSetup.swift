@@ -79,6 +79,27 @@ public enum BrowserSetup {
     /// the userContentController is shared by reference, so mutating the
     /// original would in fact still work. Going through `webView.configuration`
     /// just removes the need to know that.
+    /// A configuration for the warm standby: everything the primary has, with
+    /// media gated behind a user gesture.
+    ///
+    /// The standby loads the NEXT episode's whole page while the user is still
+    /// watching the current one, off screen and on purpose — that is what makes
+    /// the cut instant. With the primary's configuration it also inherited
+    /// `mediaTypesRequiringUserActionForPlayback = []`, so every autoplaying
+    /// video on that page, in the document and in every ad frame, began playing
+    /// audio into the room. Muting the staged element afterwards is too late
+    /// and reaches only one of them.
+    ///
+    /// The data store, rule lists, user scripts and bridge are shared by
+    /// reference, so the standby is still filtered and still reports here.
+    public static func makeStandbyConfiguration(
+        from primary: WKWebViewConfiguration
+    ) -> WKWebViewConfiguration {
+        let copy = primary.copy() as! WKWebViewConfiguration
+        copy.mediaTypesRequiringUserActionForPlayback = .all
+        return copy
+    }
+
     public static func installBridge(_ handler: WKScriptMessageHandler,
                                      on webView: WKWebView,
                                      name: String = "cp") {

@@ -8,6 +8,7 @@ struct HomeView: View {
     @ObservedObject var rules: RuleListController
     @ObservedObject var settings: ProtectionSettings
     @ObservedObject var gestureSettings: PlayerGestureSettings
+    @ObservedObject var playback: PlaybackPreferences
     @FocusState private var searchFocused: Bool
     @State private var showingSettings = false
     /// The browser entry is a button, not the first thing on screen: this app
@@ -18,6 +19,9 @@ struct HomeView: View {
     /// player. `playing` non-nil drives the full-screen cover.
     /// Local playback progress — Continue Watching reads it, the player writes.
     @StateObject private var library = MediaLibrary()
+    /// Media servers the user signed into. Their own shelf, above the web.
+    @StateObject private var servers = JellyfinServers()
+    @State private var addingServer = false
 
     @State private var importingFile = false
     @State private var pickingPhoto = false
@@ -50,6 +54,7 @@ struct HomeView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 28) {
                     deviceBar
+                    serversSection
                     browseBar
                     if rules.status.isPreparing { preparingNote }
                     if !library.continueWatching.isEmpty { continueWatchingSection }
@@ -89,9 +94,10 @@ struct HomeView: View {
                 // Nothing to reload: the home screen has no web view. The
                 // empty closure is the statement, not an omission.
                 SettingsView(model: model, rules: rules, settings: settings,
-                             gestureSettings: gestureSettings,
+                             gestureSettings: gestureSettings, playback: playback,
                              onProtectionChanged: {})
             }
+            .sheet(isPresented: $addingServer) { AddServerSheet(servers: servers) }
             .fileImporter(isPresented: $importingFile,
                           allowedContentTypes: Self.playableTypes,
                           allowsMultipleSelection: false) { result in
@@ -136,7 +142,8 @@ struct HomeView: View {
             }
             .fullScreenCover(item: $playing) { video in
                 LocalPlayerView(video: video, onClose: { playing = nil },
-                                gestureSettings: gestureSettings) { position, duration in
+                                gestureSettings: gestureSettings,
+                                subtitleStyle: playback.subtitles) { position, duration in
                     guard let fingerprint = video.fingerprint else { return }
                     library.save(fingerprint: fingerprint, sourceKind: video.sourceKind,
                                  displayName: video.displayName,
@@ -161,6 +168,69 @@ struct HomeView: View {
         .padding(.vertical, 12)
         .background(Color(.secondarySystemGroupedBackground), in: .rect(cornerRadius: 12))
         .accessibilityElement(children: .combine)
+    }
+
+    /// Servers the user has signed into, one tile each, plus the way to add
+    /// one. Jellyfin today; the tile shape does not care.
+    private var serversSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text("Servers").font(.title3.weight(.semibold))
+                Spacer()
+                Button { addingServer = true } label: {
+                    Label("Add", systemImage: "plus").font(.subheadline)
+                }
+                .accessibilityLabel("Add server")
+            }
+            if servers.servers.isEmpty {
+                Button { addingServer = true } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: "server.rack")
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Add your media server").fontWeight(.medium)
+                            Text("Jellyfin — movies and shows from your own server, "
+                                 + "with resume that follows you.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Image(systemName: "chevron.right").font(.footnote).foregroundStyle(.secondary)
+                    }
+                    .padding(16)
+                    .background(Color(.secondarySystemGroupedBackground), in: .rect(cornerRadius: 14))
+                }
+                .buttonStyle(.plain)
+            } else {
+                ForEach(servers.servers) { server in
+                    NavigationLink {
+                        ServerHomeView(servers: servers, server: server,
+                                       rules: rules, gestureSettings: gestureSettings,
+                                       preferences: playback)
+                    } label: {
+                        HStack(spacing: 12) {
+                            Image(systemName: "server.rack")
+                                .font(.title3)
+                                .frame(width: 44, height: 44)
+                                .background(Color(.tertiarySystemFill), in: .rect(cornerRadius: 10))
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(server.name).fontWeight(.medium)
+                                Text("\(server.username) · \(server.url.host() ?? "")")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Image(systemName: "chevron.right").font(.footnote).foregroundStyle(.secondary)
+                        }
+                        .padding(12)
+                        .background(Color(.secondarySystemGroupedBackground), in: .rect(cornerRadius: 14))
+                    }
+                    .buttonStyle(.plain)
+                    // A signed-in server, as opposed to the prompt to add one
+                    // — whose copy also says "Jellyfin", which is how a UI
+                    // test looking for a server row opened the Add sheet on a
+                    // machine that had none.
+                    .accessibilityIdentifier("server.row")
+                }
+            }
+        }
     }
 
     /// Play something already on the device. Two native pickers, no
@@ -427,6 +497,20 @@ struct HomeView: View {
             } label: {
                 Label(model.isPinned(site) ? "Unpin" : "Pin",
                       systemImage: model.isPinned(site) ? "pin.slash" : "pin")
+            }
+            // Only for a pinned site, and off by default: this gives the
+            // site's session cookies an expiry the server did not set, so it
+            // has to be something the user asked for rather than something
+            // pinning did to them.
+            if model.isPinned(site) {
+                Button {
+                    model.setStaySignedIn(!model.keepsSignIn(site.host), for: site)
+                } label: {
+                    Label(model.keepsSignIn(site.host)
+                            ? "Don't stay signed in" : "Stay signed in",
+                          systemImage: model.keepsSignIn(site.host)
+                            ? "person.badge.minus" : "person.badge.key")
+                }
             }
             Button {
                 UIPasteboard.general.string = site.url.absoluteString

@@ -1,26 +1,8 @@
 import CleanPlayer
-import MediaPlayer
 import os
 import SwiftUI
 import UIKit
 import WebKit
-
-/// Bridges website playback to the iPhone's real output volume. WebKit on iOS
-/// deliberately ignores JavaScript writes to HTMLMediaElement.volume.
-@MainActor
-private final class SystemVolumeController {
-    static let shared = SystemVolumeController()
-    private let volumeView = MPVolumeView(frame: .zero)
-
-    func set(percent: Int) {
-        let value = Float(min(max(percent, 0), 100)) / 100
-        guard let slider = volumeView.subviews.compactMap({ $0 as? UISlider }).first else {
-            return
-        }
-        slider.setValue(value, animated: false)
-        slider.sendActions(for: .valueChanged)
-    }
-}
 
 /// Navigation and player state the SwiftUI chrome needs.
 @MainActor
@@ -33,6 +15,9 @@ final class PageState: ObservableObject {
     /// A failed load must say why. Otherwise every failure looks identical:
     /// a blank screen.
     @Published var loadError: String?
+    /// The staged video will not play — DRM, an unopenable format, a stalled
+    /// download. Distinct from `loadError`, which is about the page.
+    @Published var mediaError: String?
 
     @Published var isTheater = false
     /// An episode change is in flight and theater is expected to come back.
@@ -43,6 +28,10 @@ final class PageState: ObservableObject {
     /// Drives the transition curtain copy. Kept separate from the destination
     /// URL so Previous never announces itself as Next.
     @Published var episodeTransitionDirection: EpisodeDirection?
+    /// The last frame of the outgoing video, shown under the curtain so an
+    /// episode change reads as a pause on the picture rather than a cut to
+    /// black. Nil until the snapshot lands, and again once the curtain lifts.
+    @Published var transitionFrame: UIImage?
 
     var episodeTransitionMessage: String {
         switch episodeTransitionDirection {
@@ -55,6 +44,10 @@ final class PageState: ObservableObject {
     /// pause must not.
     @Published var playbackEnded = false
     @Published var isPlaying = false
+    /// Not paused, but no frame to show yet. Distinct from `isPlaying` so the
+    /// centre button can say "loading" and the chrome does not auto-hide over
+    /// a black screen.
+    @Published var isBuffering = false
     @Published var currentTime: Double = 0
     /// 0 both for a live stream and before metadata arrives. `isLive`
     /// separates them: only one of those deserves a LIVE badge.
@@ -64,6 +57,7 @@ final class PageState: ObservableObject {
     @Published var playbackRate: Double = 1
     /// Per-video level. 100 is normal; 101...200 is software amplification.
     @Published var volumePercent = 100
+    @Published var mediaVolumeAvailable = false
     @Published var textTracks: [TextTrack] = []
     @Published var pipAvailable = false
     /// Decoded frame height — the only quality figure available from outside
@@ -89,16 +83,44 @@ final class PageState: ObservableObject {
     @Published var airplayPickerSupported = false
     @Published var nextEpisode: URL?
     @Published var previousEpisode: URL?
+    /// Whether `nextEpisode` came from a real episode signal — `rel="next"` or
+    /// a list of numbered episodes — rather than an anchor whose text happens
+    /// to say "next".
+    ///
+    /// The button is offered either way; only this decides whether the player
+    /// will navigate ON ITS OWN when the video ends. "Next »" in a forum
+    /// footer or a docs page matches the text rule, and auto-advancing on it
+    /// carries the user off the page they were watching.
+    @Published var nextEpisodeIsEpisodic = false
+    /// Why there is no next or previous, when there is none.
+    ///
+    /// A disabled button says "not here" and nothing else, which is the same
+    /// thing whether the server refused the request, the show has one episode,
+    /// or this is a page the app could find no episode links on. Those want
+    /// different actions from the user, so the player says which it is.
+    @Published var episodeUnavailableReason: String?
     @Published var overlayBlocking = true
     @Published var blockedCount = 0
-    /// Popups the page agent stopped, plus the ones native held. Two counters,
-    /// because they measure different things and the page-world one is polled
-    /// rather than pushed.
+    /// Popups stopped in the native navigation layer: a cross-site window, a
+    /// cancelled redirect. Native witnessed each of these itself, so the
+    /// number is trustworthy.
     @Published var popupsBlocked = 0
-    /// Held by native: cross-site windows and cancelled redirects. Kept apart
-    /// from the page's own tally, which arrives as an absolute value — adding
-    /// it in would be overwritten on the next poll.
-    var nativePopupsBlocked = 0
+    /// Popups the page-world guard says it stopped.
+    ///
+    /// Advisory, and it cannot be made otherwise: `popupguard.js` has to run in
+    /// the page's own world to replace `window.open`, so any channel it uses to
+    /// report is a channel the page can use too. Native validates the message
+    /// and counts increments rather than accepting a total — a page can no
+    /// longer set the badge to -40 or 9,999,999 — but it can still claim
+    /// blocks that did not happen, so the claim is capped per document and
+    /// kept apart from the number native is sure of.
+    @Published var pageReportedPopups = 0
+    /// Highest number of page-claimed blocks one document may contribute.
+    static let pageReportedPopupCap = 100
+
+    /// What the shield badge shows: elements hidden, plus popups from both
+    /// sources. The page's share is bounded; see `pageReportedPopups`.
+    var blockedTotal: Int { blockedCount + popupsBlocked + pageReportedPopups }
     /// A cross-origin window the page tried to open. Held rather than followed,
     /// so the user decides whether to leave the page they are watching.
     @Published var blockedExternal: URLRequest?
@@ -171,7 +193,7 @@ struct WebView: UIViewRepresentable {
         Coordinator(model: model, page: page, rules: rules, settings: settings)
     }
 
-    func makeUIView(context: Context) -> WKWebView {
+    func makeUIView(context: Context) -> UIView {
         let webView = WKWebView(
             frame: .zero,
             configuration: BrowserSetup.makeConfiguration(
@@ -206,8 +228,6 @@ struct WebView: UIViewRepresentable {
             },
             setVolume: { [weak coordinator = context.coordinator] percent in
                 let safe = min(max(percent, 0), 200)
-                SystemVolumeController.shared.set(percent: safe)
-                coordinator?.page.volumePercent = safe
                 coordinator?.callPlayer("setVolume(\(safe))")
             },
             selectTrack: { [weak coordinator = context.coordinator] index in
@@ -252,15 +272,28 @@ struct WebView: UIViewRepresentable {
         context.coordinator.observe(webView)
         context.coordinator.loaded = url
         webView.load(URLRequest(url: url))
-        return webView
+
+        // A plain container rather than the web view itself, so the warm
+        // standby for the next episode can load in a second web view behind
+        // this one and be swapped to the front without SwiftUI noticing.
+        let container = UIView()
+        container.backgroundColor = .black
+        webView.frame = container.bounds
+        webView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        container.addSubview(webView)
+        context.coordinator.container = container
+        return container
     }
 
-    func updateUIView(_ webView: WKWebView, context: Context) {
+    func updateUIView(_ container: UIView, context: Context) {
         // Only reload when the model points somewhere new, or every state
-        // change would restart the page.
-        guard context.coordinator.loaded != url else { return }
-        context.coordinator.loaded = url
-        webView.load(URLRequest(url: url))
+        // change would restart the page. Read from the model, not the `url`
+        // this view was built with: a `page` change can run this update one
+        // pass before the parent rebuilds us, and that stale `url` navigated
+        // a just-promoted standby straight back to the episode it replaced.
+        guard let target = model.current, context.coordinator.loaded != target else { return }
+        context.coordinator.loaded = target
+        page.webView?.load(URLRequest(url: target))
     }
 
     @MainActor
@@ -287,6 +320,9 @@ struct WebView: UIViewRepresentable {
         /// main frame — reaches a different `window.__cp` than the one holding
         /// the staged video, and silently does nothing.
         private var theaterFrame: WKFrameInfo?
+        private var knownFrames: [String: WKFrameInfo] = [:]
+        private var frameCapabilities = FrameCapabilityModel()
+        private var droppedSpectatorMessages = 0
 
         /// The episode navigation theater should carry across to, if any.
         ///
@@ -306,13 +342,24 @@ struct WebView: UIViewRepresentable {
         private static let transitionLog = Logger(
             subsystem: Bundle.main.bundleIdentifier ?? "com.saisamardh.cleanplayer",
             category: "EpisodeTransition")
+        private static let bridgeLog = Logger(
+            subsystem: Bundle.main.bundleIdentifier ?? "com.saisamardh.cleanplayer",
+            category: "PageBridge")
         private var resumeArmTask: Task<Void, Never>?
         private var observations: [NSKeyValueObservation] = []
 
-        /// Frames that reported blocking something. Toggling has to reach each
-        /// of them: `evaluateJavaScript(in: nil)` only ever hits the main frame,
-        /// and interstitials are frequently inside an ad iframe.
-        private var blockingFrames: [WKFrameInfo] = []
+        /// Calls, alarms, and headphones being pulled out.
+        private let interruptions = AudioInterruptions()
+        /// Playing when an interruption began, so resuming is only offered to
+        /// a video that was actually running.
+        private var wasPlayingBeforeInterruption = false
+
+        /// Per-frame totals prevent a zero from one iframe erasing blocks
+        /// reported by every other iframe. The keys also address each frame
+        /// when overlay blocking is toggled.
+        private var blockedByFrame = BlockedFrameRegistry()
+        private var bridgeRateLimiter = BridgeRateLimiter()
+        private var droppedRateLimitedMessages = 0
 
         /// Resume + thumbnail bookkeeping for the video currently in theater.
         /// The URL is the watch page; last time/duration are saved when the
@@ -323,12 +370,78 @@ struct WebView: UIViewRepresentable {
         private var pendingResumeAt: Double = 0
         private var didApplyResume = false
 
+        /// The view both web views live in. Weak: SwiftUI owns it.
+        weak var container: UIView?
+
+        /// Warm standby: the next episode, loading in a second web view behind
+        /// the one on screen. Armed in the last minute of an episode, promoted
+        /// the moment its video proves it can play, so Next is a cut rather
+        /// than a load. Fails soft — anything going wrong just leaves the
+        /// ordinary in-place navigation, which is what ran before this existed.
+        ///
+        /// ponytail: one extra WebKit process for about a minute per episode.
+        /// The ceiling is memory on older phones, where jetsam kills rather
+        /// than warns; lower `standbyLeadSeconds` if that shows up in reports.
+        private var standby: WKWebView?
+        private var standbyURL: URL?
+        private var standbyFrame: WKFrameInfo?
+        /// The standby's own bridge identity for the frame holding its video,
+        /// so the capability model can adopt it on promotion.
+        private var standbyFrameID: String?
+        private var standbyReady = false
+        private var standbyNavigation: StandbyNavigation?
+        /// The user asked for the episode the standby holds and it was not
+        /// ready yet: the curtain is up for the standby, not for a navigation.
+        private var waitingForStandby = false
+        private static let standbyLeadSeconds: Double = 60
+
         init(model: BrowserModel, page: PageState,
              rules: RuleListController, settings: ProtectionSettings) {
             self.model = model
             self.page = page
             self.rules = rules
             self.settings = settings
+            super.init()
+            interruptions.start { [weak self] event in
+                MainActor.assumeIsolated { self?.handle(interruption: event) }
+            }
+            // A second web view is the first thing to give up under pressure.
+            // Only when nobody is waiting on it: then it is the transition.
+            memoryWarning = NotificationCenter.default.addObserver(
+                forName: UIApplication.didReceiveMemoryWarningNotification,
+                object: nil, queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self, !self.waitingForStandby else { return }
+                    self.discardStandby()
+                }
+            }
+        }
+
+        private var memoryWarning: NSObjectProtocol?
+        deinit {
+            if let memoryWarning { NotificationCenter.default.removeObserver(memoryWarning) }
+        }
+
+        /// iOS pauses the audio for an interruption and tells nobody, so a
+        /// player that does not listen comes back claiming to play over
+        /// silence. Headphones leaving is the one route change with a rule:
+        /// always pause, because the alternative is the video suddenly playing
+        /// out loud in a quiet room.
+        private func handle(interruption event: AudioInterruptions.Event) {
+            guard page.isTheater else { return }
+            switch event {
+            case .began:
+                wasPlayingBeforeInterruption = page.isPlaying
+                if page.isPlaying { togglePlay() }
+            case .ended(let shouldResume):
+                guard shouldResume, wasPlayingBeforeInterruption, !page.isPlaying else { break }
+                wasPlayingBeforeInterruption = false
+                togglePlay()
+            case .outputDeviceLost:
+                wasPlayingBeforeInterruption = false
+                if page.isPlaying { togglePlay() }
+            }
         }
 
         func observe(_ webView: WKWebView) {
@@ -368,7 +481,7 @@ struct WebView: UIViewRepresentable {
             routeRefresh = Task { [weak self] in
                 try? await Task.sleep(for: .seconds(1))
                 guard !Task.isCancelled, let self, let webView = self.page.webView else { return }
-                self.page.title = webView.title ?? self.page.title
+                self.page.title = webView.title.map { Self.sanitizedForUI($0) } ?? self.page.title
                 self.refreshEpisodes(webView)
             }
         }
@@ -387,6 +500,11 @@ struct WebView: UIViewRepresentable {
             callTheaterFrame("window.__cp && window.__cp.exitTheater()")
             releaseHostPage()
             page.isTheater = false
+            page.mediaVolumeAvailable = false
+            // Nothing is playing now, so give the session back: .playback
+            // interrupted whatever else was making sound, and only this ends
+            // the interruption.
+            MediaSession.deactivate()
         }
 
         /// Undoes `hostTheater()` in the main frame. Separate from
@@ -414,12 +532,16 @@ struct WebView: UIViewRepresentable {
         func setOverlayBlocking(_ on: Bool) {
             page.overlayBlocking = on
             let js = "window.__cp && window.__cp.setOverlayBlocking(\(on))"
-            for frame in [nil] + blockingFrames.map(Optional.init) {
+            let reportingFrames = blockedByFrame.frameIDs.compactMap { knownFrames[$0] }
+            for frame in [nil] + reportingFrames.map(Optional.init) {
                 page.webView?.evaluateJavaScript(js, in: frame,
                                                  in: BrowserSetup.world,
                                                  completionHandler: nil)
             }
-            if !on { page.blockedCount = 0 }
+            if !on {
+                blockedByFrame.zeroAll()
+                page.blockedCount = 0
+            }
         }
 
         func showAirPlay() {
@@ -471,6 +593,24 @@ struct WebView: UIViewRepresentable {
             }
             let wasWatching = page.isTheater
             resumeTheaterFor = wasWatching ? destination : nil
+
+            // The standby already holds this episode. Promote it now if it has
+            // proven playback; otherwise hold the curtain for it — the video
+            // on screen keeps playing underneath, nothing navigates.
+            if wasWatching, standby != nil, standbyURL == destination {
+                if standbyReady {
+                    Self.transitionLog.notice("Standby ready; cutting to it")
+                    promoteStandby()
+                } else {
+                    Self.transitionLog.notice("Standby not ready; waiting under the curtain")
+                    waitingForStandby = true
+                    beginResume(direction: direction)
+                }
+                return
+            }
+            // Anything else the user picked makes the standby stale.
+            discardStandby()
+
             if wasWatching {
                 resumeOutgoingFrame = theaterFrame
                 resumeOutgoingSourceChanged = false
@@ -557,6 +697,15 @@ struct WebView: UIViewRepresentable {
         private func beginResume(direction: EpisodeDirection?) {
             page.episodeTransitionDirection = direction
             page.isResumingEpisode = true
+            // Grab the picture before the page underneath changes. The
+            // navigation waits on a JavaScript round trip, so this normally
+            // lands while the old video is still on screen; if it does not,
+            // the curtain is plain black, which is what it always was.
+            page.transitionFrame = nil
+            page.webView?.takeSnapshot(with: nil) { [weak self] image, _ in
+                guard let self, self.page.isResumingEpisode else { return }
+                self.page.transitionFrame = image
+            }
             resumeArmTask?.cancel()
             // Keep the page covered until playback resumes or the user chooses
             // to reveal it. Giving up early is the bug: slow player iframes
@@ -579,9 +728,198 @@ struct WebView: UIViewRepresentable {
             resumeOutgoingSourceChanged = false
             page.isResumingEpisode = false
             page.episodeTransitionDirection = nil
+            page.transitionFrame = nil
+            if waitingForStandby {
+                // Timed out or "Show the page": the episode on screen was
+                // never left, so it stays exactly as it was.
+                waitingForStandby = false
+                discardStandby()
+                return
+            }
             if !keepingTheater {
                 page.isTheater = false
                 releaseHostPage()
+            }
+        }
+
+        // MARK: Warm standby
+
+        private func armStandbyIfNear(currentTime: Double, duration: Double) {
+            // The next link changed under an armed standby: it holds the wrong
+            // episode now.
+            if let standbyURL, standbyURL != page.nextEpisode { discardStandby() }
+            guard standby == nil, duration > 0,
+                  duration - currentTime < Self.standbyLeadSeconds,
+                  let next = page.nextEpisode,
+                  let primary = page.webView, let current = primary.url,
+                  EpisodeTransition.mayResume(expected: next, current: current),
+                  let container
+            else { return }
+
+            // The primary's configuration, so rule lists, user scripts, the
+            // bridge and the data store are all shared: the standby is filtered
+            // and reports to this same handler, distinguished by `message.webView`.
+            // Media is gated behind a gesture there, though — see
+            // makeStandbyConfiguration. It is off screen, and nothing off
+            // screen should be making noise.
+            let view = WKWebView(
+                frame: container.bounds,
+                configuration: BrowserSetup.makeStandbyConfiguration(from: primary.configuration))
+            view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            let navigation = StandbyNavigation(site: next) { [weak self] in
+                Self.transitionLog.notice("Standby failed to load; dropping it")
+                self?.discardStandby()
+            }
+            view.navigationDelegate = navigation
+            standbyNavigation = navigation
+            // Behind the opaque primary: on screen as far as WebKit is
+            // concerned, so its media is not suspended, and invisible to the user.
+            container.insertSubview(view, at: 0)
+            standby = view
+            standbyURL = next
+            standbyFrame = nil
+            standbyReady = false
+            view.load(URLRequest(url: next))
+            Self.transitionLog.notice("Standby armed for the next episode")
+        }
+
+        private func discardStandby() {
+            guard let view = standby else { return }
+            view.navigationDelegate = nil
+            view.stopLoading()
+            view.removeFromSuperview()
+            standby = nil
+            standbyURL = nil
+            standbyFrame = nil
+            standbyFrameID = nil
+            standbyReady = false
+            standbyNavigation = nil
+        }
+
+        /// Messages from the standby never touch page state: it is not what
+        /// the user is looking at. It gets exactly the resume treatment the
+        /// primary would — every frame that announces is asked to stage — plus
+        /// silence, and a pause once it has proven it can play.
+        private func handleStandby(_ incoming: BridgeMessage, _ message: WKScriptMessage,
+                                   frameID: String) {
+            guard let view = standby else { return }
+            switch incoming {
+            case .ready:
+                view.evaluateJavaScript(
+                    "window.__cp && (window.__cp.setMuted(true), window.__cp.autoTheater())",
+                    in: message.frameInfo, in: BrowserSetup.world, completionHandler: nil)
+            case .theater:
+                standbyFrame = message.frameInfo
+                standbyFrameID = frameID
+                if !message.frameInfo.isMainFrame {
+                    view.evaluateJavaScript("window.__cp && window.__cp.hostTheater()",
+                                            in: nil, in: BrowserSetup.world,
+                                            completionHandler: nil)
+                }
+            case .theaterEnded:
+                standbyFrame = nil
+                standbyFrameID = nil
+                standbyReady = false
+            case .playback(let playing, _, _):
+                guard playing, !standbyReady,
+                      let frame = standbyFrame else { break }
+                standbyReady = true
+                // Proven. Park it at the start until it is wanted.
+                view.evaluateJavaScript(
+                    "window.__cp && (window.__cp.togglePlay(), window.__cp.seek(0))",
+                    in: frame, in: BrowserSetup.world, completionHandler: nil)
+                Self.transitionLog.notice("Standby proved playback")
+                if waitingForStandby { promoteStandby() }
+            default:
+                break
+            }
+        }
+
+        /// The cut. The standby becomes the page; the old web view leaves the
+        /// hierarchy and is released, which is what stops its media.
+        private func promoteStandby() {
+            guard let new = standby, let url = standbyURL, let frame = standbyFrame,
+                  let container else { return }
+            let old = page.webView
+            stopWatching()
+
+            container.bringSubviewToFront(new)
+            old?.navigationDelegate = nil
+            old?.uiDelegate = nil
+            old?.removeFromSuperview()
+
+            let promotedFrameID = standbyFrameID
+            standby = nil
+            standbyURL = nil
+            standbyFrame = nil
+            standbyFrameID = nil
+            standbyReady = false
+            standbyNavigation = nil
+            waitingForStandby = false
+
+            new.navigationDelegate = self
+            new.uiDelegate = self
+            new.allowsBackForwardNavigationGestures = true
+            // On screen now, and the user asked for this episode: the gesture
+            // requirement the standby carried would otherwise block the play
+            // that makes the cut look instant.
+            new.configuration.mediaTypesRequiringUserActionForPlayback = []
+            page.webView = new
+            observe(new)
+            theaterFrame = frame
+            // The standby's frames are unknown to the capability model — it
+            // ran its own bridge off screen. It is the page now, so its
+            // player frame is adopted rather than made to claim theater again.
+            clearFrameCapabilities()
+            if let promotedFrameID,
+               let origin = frame.request.url.flatMap(BridgeOrigin.init(url:))
+                ?? new.url.flatMap(BridgeOrigin.init(url:)) {
+                knownFrames[promotedFrameID] = frame
+                frameCapabilities.adoptPlayer(BridgeFrame(
+                    id: promotedFrameID, origin: origin,
+                    width: 0, height: 0, isVisible: true,
+                    isMainFrame: frame.isMainFrame))
+            }
+            let current = new.url ?? url
+            loaded = current
+            model.synchronizeCurrent(current)
+            page.host = Self.displayHost(current)
+            page.isSecure = current.scheme?.lowercased() == "https"
+            page.title = new.title ?? ""
+            page.loadError = nil
+            page.blockedExternal = nil
+            endResume(keepingTheater: true)
+            page.isTheater = true
+            page.playbackEnded = false
+            callPlayer("setMuted(false)")
+            callPlayer("setVolume(\(page.volumePercent))")
+            callPlayer("togglePlay()")
+            refreshEpisodes(new)
+            beginWatching(current)
+            Self.transitionLog.notice("Standby promoted; episode cut over")
+        }
+
+        /// The moment a page becomes a watched video: record it, and arm
+        /// resume + thumbnail for the session in this player.
+        private func beginWatching(_ url: URL) {
+            // Now, not at launch: taking `.playback` on open ducked whatever
+            // the user was listening to before they had chosen a video.
+            MediaSession.activate()
+            Diagnostics.count(.watchCleanSucceeded)
+            guard !settings.privateBrowsing else { return }
+            watchingURL = url
+            model.recordWatched(url, title: page.webView?.title)
+            pendingResumeAt = model.resume(for: url)
+            didApplyResume = false
+            lastTime = 0
+            lastDuration = 0
+            // Capture the poster on a short delay rather than on a time
+            // update: a paused or already-finished video sends no
+            // timeupdate, and would otherwise never get a thumbnail.
+            Task { [weak self] in
+                try? await Task.sleep(for: .seconds(1.5))
+                guard let self, self.page.isTheater, self.watchingURL == url else { return }
+                self.captureThumbnail(for: url)
             }
         }
 
@@ -591,7 +929,8 @@ struct WebView: UIViewRepresentable {
         /// it is offered, exactly like next/previous.
         func refreshEpisodeList() {
             guard let webView = page.webView else { return }
-            let js = "JSON.stringify(window.__cp ? window.__cp.episodeList() : [])"
+            let js = siteScript(for: webView)
+                + "JSON.stringify(window.__cp ? window.__cp.episodeList() : [])"
             webView.evaluateJavaScript(js, in: nil, in: BrowserSetup.world) { [weak self] result in
                 guard let self,
                       case .success(let value) = result,
@@ -601,24 +940,44 @@ struct WebView: UIViewRepresentable {
                         as? [[String: Any]]
                 else { return }
 
-                let host = webView.url?.host()
+                let here = webView.url
                 self.page.episodes = parsed.compactMap { entry in
                     guard let href = entry["href"] as? String,
                           let label = entry["label"] as? String,
                           let url = URL(string: href),
-                          url.host() == host          // page-supplied, re-checked
+                          // Page-supplied, re-checked — and checked the SAME
+                          // way everything else is. An exact host comparison
+                          // here meant a site serving its player from
+                          // player.example.com and its episodes from
+                          // www.example.com got an empty list, while the very
+                          // same URLs passed the check in goToEpisode.
+                          HostKey.isSameSite(url, as: here)
                     else { return nil }
                     return PageState.Episode(
-                        id: href, label: label,
+                        id: href, label: Self.sanitizedForUI(label, limit: 60),
                         current: entry["current"] as? Bool ?? false)
                 }
             }
         }
 
+        /// The registrable domain, handed to the agent so it and native agree
+        /// on what "same site" means. The agent cannot work it out — that
+        /// needs the Public Suffix List — so it stays at hostname equality
+        /// until this arrives.
+        private func siteScript(for webView: WKWebView) -> String {
+            guard let host = webView.url?.host(),
+                  let domain = HostKey.registrableDomain(host),
+                  let encoded = try? JSONEncoder().encode(domain),
+                  let json = String(data: encoded, encoding: .utf8)
+            else { return "" }
+            return "window.__cp && window.__cp.setSite(\(json)); "
+        }
+
         /// Episode discovery always asks the MAIN frame — that is where the
         /// site's next/previous links live, not inside the player iframe.
         private func refreshEpisodes(_ webView: WKWebView) {
-            let js = "JSON.stringify(window.__cp ? window.__cp.findEpisodes() : {})"
+            let js = siteScript(for: webView)
+                + "JSON.stringify(window.__cp ? window.__cp.findEpisodes() : {})"
             webView.evaluateJavaScript(js, in: nil, in: BrowserSetup.world) { [weak self] result in
                 guard let self,
                       case .success(let value) = result,
@@ -626,8 +985,33 @@ struct WebView: UIViewRepresentable {
                       let data = json.data(using: .utf8),
                       let parsed = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
                 else { return }
-                self.page.nextEpisode = (parsed["next"] as? String).flatMap(URL.init(string:))
-                self.page.previousEpisode = (parsed["prev"] as? String).flatMap(URL.init(string:))
+                // Validated here, not merely where a navigation happens. These
+                // URLs are page-supplied and go straight into the chrome; the
+                // standby also loads whatever `nextEpisode` holds.
+                let here = webView.url
+                let sameSite = { (raw: String?) -> URL? in
+                    guard let url = raw.flatMap(URL.init(string:)),
+                          HostKey.isSameSite(url, as: here) else { return nil }
+                    return url
+                }
+                self.page.nextEpisode = sameSite(parsed["next"] as? String)
+                self.page.previousEpisode = sameSite(parsed["prev"] as? String)
+                // Say which of the two silences this is. A site whose player
+                // draws Next with JavaScript and no link — Jellyfin's own web
+                // client among them — looks exactly like a page with one
+                // episode, and the user can act on the difference.
+                if self.page.nextEpisode == nil && self.page.previousEpisode == nil {
+                    let offered = (parsed["next"] as? String) ?? (parsed["prev"] as? String)
+                    self.page.episodeUnavailableReason = offered == nil
+                        ? "No episode links on this page. Some sites draw Next "
+                          + "and Previous with scripts rather than links, and "
+                          + "those can't be found from here."
+                        : "The episode links on this page point to another site."
+                } else {
+                    self.page.episodeUnavailableReason = nil
+                }
+                self.page.nextEpisodeIsEpisodic = self.page.nextEpisode != nil
+                    && ["rel", "list"].contains(parsed["nextSource"] as? String ?? "")
             }
         }
 
@@ -661,7 +1045,6 @@ struct WebView: UIViewRepresentable {
                 webView.load(navigationAction.request)
             } else {
                 page.blockedExternal = navigationAction.request
-                page.nativePopupsBlocked += 1
                 page.popupsBlocked += 1
             }
             return nil
@@ -677,7 +1060,8 @@ struct WebView: UIViewRepresentable {
             // Never hand an unexpected scheme to another app.
             guard scheme == "https" || scheme == "http" || scheme == "about" else {
                 if navigationAction.targetFrame?.isMainFrame == true {
-                    page.loadError = "Blocked a link using the \(scheme): scheme. "
+                    page.loadError = "Blocked a link using the "
+                        + "\(Self.sanitizedForUI(scheme, limit: 24)): scheme. "
                         + "Only web pages are opened."
                 }
                 decisionHandler(.cancel)
@@ -703,7 +1087,6 @@ struct WebView: UIViewRepresentable {
                 if page.isTheater, navigationAction.navigationType == .other,
                    !HostKey.isSameSite(url, as: webView.url) {
                     page.blockedExternal = navigationAction.request
-                    page.nativePopupsBlocked += 1
                     page.popupsBlocked += 1
                     decisionHandler(.cancel)
                     return
@@ -721,7 +1104,10 @@ struct WebView: UIViewRepresentable {
             page.blockedExternal = nil
             loaded = url
             model.synchronizeCurrent(url)
-            webView.load(request)
+            // The URL only. The request the page built carried its method,
+            // headers and body; "Open" means "show me where this goes", not
+            // "replay the POST this page wrote".
+            webView.load(URLRequest(url: url))
         }
 
         func retryFailedNavigation() {
@@ -743,9 +1129,9 @@ struct WebView: UIViewRepresentable {
         ///
         /// Password challenges get a native prompt. This is how a home server
         /// behind nginx, Caddy or a NAS's own auth asks for a login, and the
-        /// credential is kept (`.permanent`, keychain-backed) so it is not
-        /// asked for again next launch — unless private browsing is on, where
-        /// it lasts the session like everything else.
+        /// credential is kept (`.permanent`, keychain-backed) only for secure
+        /// connections outside private browsing. Cleartext HTTP credentials
+        /// always expire with the session and carry an explicit warning.
         func webView(_ webView: WKWebView,
                      didReceive challenge: URLAuthenticationChallenge,
                      completionHandler: @escaping (URLSession.AuthChallengeDisposition,
@@ -773,9 +1159,13 @@ struct WebView: UIViewRepresentable {
             let space = challenge.protectionSpace
             let where_ = space.port == 80 || space.port == 443
                 ? space.host : "\(space.host):\(space.port)"
+            let message = [
+                space.realm.flatMap { $0.isEmpty ? nil : Self.sanitizedForUI($0) },
+                CredentialPolicy.warning(for: space),
+            ].compactMap { $0 }.joined(separator: "\n\n")
             let alert = UIAlertController(
                 title: challenge.previousFailureCount > 0 ? "Wrong username or password" : "Sign in to \(where_)",
-                message: space.realm.flatMap { $0.isEmpty ? nil : $0 },
+                message: message.isEmpty ? nil : message,
                 preferredStyle: .alert)
             alert.addTextField {
                 $0.placeholder = "Username"
@@ -792,7 +1182,14 @@ struct WebView: UIViewRepresentable {
             alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { _ in
                 completionHandler(.cancelAuthenticationChallenge, nil)
             })
-            let persistence: URLCredential.Persistence = settings.privateBrowsing ? .forSession : .permanent
+            // Pinned, secure and not private — see CredentialPolicy. A host
+            // being on the local network is NOT enough: an address is not an
+            // identity, and a page can put "Jellyfin — session expired" in a
+            // realm string.
+            let persistence = CredentialPolicy.persistence(
+                for: space,
+                isPinnedHost: model.isPinnedHost(space.host),
+                privateBrowsing: settings.privateBrowsing)
             alert.addAction(UIAlertAction(title: "Sign In", style: .default) { [weak alert] _ in
                 let fields = alert?.textFields ?? []
                 let credential = URLCredential(user: fields.first?.text ?? "",
@@ -807,21 +1204,25 @@ struct WebView: UIViewRepresentable {
 
         /// WKWebView drops session cookies (no expiry) when the app quits, so a
         /// media server that keeps its login in one — Synology, Nextcloud, a
-        /// NAS's web UI — asks for it again every launch. On the user's own
-        /// servers, pinned sites and local addresses, the cookie is re-set
-        /// with an expiry so the login survives. Nothing changes for any other
-        /// site, and private browsing never registers this observer.
+        /// NAS's web UI — asks for it again every launch.
+        ///
+        /// Cliqx will override that, but only where the user asked: a pinned
+        /// site with "Stay signed in" switched on. Pinning alone was not
+        /// enough. A session cookie is short-lived because the SERVER said so,
+        /// and quietly giving a month's expiry to every auth and CSRF cookie
+        /// on a pinned host means a stolen unlocked phone holds logins the
+        /// server believed had ended. Nothing changes for any other site, and
+        /// private browsing never registers this observer.
         ///
         /// ponytail: every cookie change re-reads the whole jar. Fine at this
         /// scale; index by domain if a site ever churns cookies fast enough to
         /// show up in a profile.
         nonisolated func cookiesDidChange(in store: WKHTTPCookieStore) {
             Task { @MainActor in
-                let mine = Set(model.pinned.compactMap { $0.url.host() })
                 let cookies = await store.allCookies()
                 for cookie in cookies where cookie.isSessionOnly {
                     let domain = cookie.domain.hasPrefix(".") ? String(cookie.domain.dropFirst()) : cookie.domain
-                    guard mine.contains(domain) || AddressResolver.isLocalHost(domain),
+                    guard model.keepsSignIn(domain),
                           var properties = cookie.properties else { continue }
                     properties[.expires] = Date(timeIntervalSinceNow: 30 * 24 * 3600)
                     properties.removeValue(forKey: .discard)
@@ -837,7 +1238,9 @@ struct WebView: UIViewRepresentable {
         /// no explanation — the view stays up, but nothing is in it.
         func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
             theaterFrame = nil
-            blockingFrames.removeAll()
+            clearFrameCapabilities()
+            waitingForStandby = false
+            discardStandby()   // shares the process; it died too
             endResume()   // also drops theater and the curtain
 
             guard let url = webView.url ?? loaded else {
@@ -858,20 +1261,26 @@ struct WebView: UIViewRepresentable {
         func webView(_ webView: WKWebView,
                      didStartProvisionalNavigation navigation: WKNavigation!) {
             page.loadError = nil
+            // The document that asked is going away; answer anything still
+            // queued so no WebKit completion handler is left uncalled.
+            drainDialogs()
             if let url = pendingMainFrameRequest?.url ?? webView.url {
                 primeLocalNetwork(for: url)
             }
             // Leaving the page (including an episode change) banks where the
             // last video stopped before the old document goes away.
             stopWatching()
+            if !waitingForStandby { discardStandby() }
             // The old frame handle dies with the old document.
             theaterFrame = nil
-            blockingFrames.removeAll()
+            clearFrameCapabilities()
             page.blockedCount = 0
             page.popupsBlocked = 0
-            page.nativePopupsBlocked = 0
+            page.pageReportedPopups = 0
             page.blockedExternal = nil
             page.isTheater = false
+            page.mediaVolumeAvailable = false
+            page.mediaError = nil
             // Not simply `false`: goToEpisode arms the resume and starts the
             // load, so this fires with the curtain already up. Deriving it from
             // the armed destination also drops the curtain when some *other*
@@ -879,6 +1288,7 @@ struct WebView: UIViewRepresentable {
             page.isResumingEpisode = resumeTheaterFor != nil
             page.playbackEnded = false
             page.isPlaying = false
+            page.isBuffering = false
             page.currentTime = 0
             page.duration = 0
             page.isLive = false
@@ -896,6 +1306,8 @@ struct WebView: UIViewRepresentable {
             page.airplayCanSendVideo = true
             page.nextEpisode = nil
             page.previousEpisode = nil
+            page.nextEpisodeIsEpisodic = false
+            page.episodeUnavailableReason = nil
         }
 
         func webView(_ webView: WKWebView,
@@ -1015,38 +1427,135 @@ struct WebView: UIViewRepresentable {
             }
             pendingMainFrameRequest = nil
             page.host = Self.displayHost(url)
-            page.title = webView.title ?? ""
+            page.title = Self.sanitizedForUI(webView.title ?? "")
             page.isSecure = url?.scheme?.lowercased() == "https"
             // Recents are videos you watched, not pages you visited — the
             // entry is recorded when theater opens, not on navigation.
 
             recoveredFrom = nil
             refreshEpisodes(webView)
-            // The guard lives in the page world, so it is read rather than
-            // reporting through the bridge.
-            webView.evaluateJavaScript("window.__cpPopupsBlocked || 0",
-                                       in: nil, in: .page) { [weak self] result in
-                if case .success(let value) = result {
-                    // Assigning here erased every native block that landed
-                    // during the load — a count that went down as you watched.
-                    guard let self else { return }
-                    self.page.popupsBlocked =
-                        (value as? Int ?? 0) + self.page.nativePopupsBlocked
-                }
-            }
-
         }
 
         // MARK: Page agent
 
         func userContentController(_ controller: WKUserContentController,
                                    didReceive message: WKScriptMessage) {
-            // Page-supplied: only the message shape is trusted. No URL from here
-            // is used without being re-validated against the current host.
-            guard let body = message.body as? [String: Any],
-                  let kind = body["type"] as? String else { return }
+            do {
+                let envelope = try BridgeEnvelope.decode(body: message.body)
+                // The standby shares this bridge and is not what the user is
+                // looking at: it keeps its own small state machine and never
+                // touches page state or the capability model.
+                if let standby, message.webView === standby {
+                    handleStandby(envelope.message, message, frameID: envelope.frameID)
+                    return
+                }
+                // A web view that was swapped out is still tearing down and
+                // still talks through the shared bridge. Nothing it says is
+                // about what is on screen any more.
+                guard message.webView === page.webView else { return }
+                if envelope.message.kind == .frameGone {
+                    removeFrame(id: envelope.frameID)
+                    return
+                }
+                guard bridgeRateLimiter.allow(
+                    envelope.message.kind,
+                    from: envelope.frameID,
+                    at: ProcessInfo.processInfo.systemUptime)
+                else {
+                    droppedRateLimitedMessages += 1
+                    // Avoid turning a hostile flood into an equally expensive
+                    // unified-log flood. The counter retains the exact total.
+                    if droppedRateLimitedMessages == 1
+                        || droppedRateLimitedMessages.isMultiple(of: 1_000) {
+                        let total = droppedRateLimitedMessages
+                        Self.bridgeLog.notice(
+                            "Rate-limited page bridge messages; total: \(total)")
+                    }
+                    return
+                }
+                if envelope.message.kind == .ready {
+                    guard let metrics = envelope.metrics else {
+                        throw BridgeMessage.ValidationError.malformedPayload
+                    }
+                    registerFrame(
+                        id: envelope.frameID,
+                        frameInfo: message.frameInfo,
+                        metrics: metrics)
+                } else if let metrics = envelope.metrics,
+                          knownFrames[envelope.frameID] != nil {
+                    registerFrame(
+                        id: envelope.frameID,
+                        frameInfo: message.frameInfo,
+                        metrics: metrics)
+                }
 
-            switch kind {
+                guard frameCapabilities.authorize(
+                    envelope.message.kind,
+                    from: envelope.frameID,
+                    mainOrigin: page.webView?.url.flatMap(BridgeOrigin.init(url:)))
+                else {
+                    droppedSpectatorMessages += 1
+                    Self.bridgeLog.notice(
+                        "Dropped spectator bridge message; total: \(self.droppedSpectatorMessages)")
+                    return
+                }
+
+                handle(
+                    envelope.message,
+                    from: message.frameInfo,
+                    frameID: envelope.frameID)
+                if envelope.message.kind == .theaterEnded {
+                    frameCapabilities.releasePlayer(frameID: envelope.frameID)
+                }
+            } catch {
+                Self.bridgeLog.error(
+                    "Rejected page bridge message: \(error.localizedDescription, privacy: .public)")
+            }
+        }
+
+        private func registerFrame(
+            id: String,
+            frameInfo: WKFrameInfo,
+            metrics: BridgeEnvelope.FrameMetrics
+        ) {
+            knownFrames[id] = frameInfo
+            let securityOrigin = frameInfo.securityOrigin
+            frameCapabilities.register(BridgeFrame(
+                id: id,
+                origin: BridgeOrigin(
+                    scheme: securityOrigin.protocol,
+                    host: securityOrigin.host,
+                    port: securityOrigin.port == 0 ? nil : securityOrigin.port),
+                width: metrics.width,
+                height: metrics.height,
+                isVisible: metrics.isVisible,
+                isMainFrame: frameInfo.isMainFrame))
+        }
+
+        private func clearFrameCapabilities() {
+            knownFrames.removeAll()
+            frameCapabilities.reset()
+            blockedByFrame.reset()
+            bridgeRateLimiter.reset()
+            page.blockedCount = 0
+        }
+
+        private func removeFrame(id: String) {
+            knownFrames.removeValue(forKey: id)
+            if frameCapabilities.remove(frameID: id) {
+                theaterFrame = nil
+            }
+            blockedByFrame.remove(frameID: id)
+            bridgeRateLimiter.remove(frameID: id)
+            page.blockedCount = blockedByFrame.total
+        }
+
+        private func handle(
+            _ message: BridgeMessage,
+            from frameInfo: WKFrameInfo,
+            frameID: String
+        ) {
+            switch message {
             // Every frame announces itself once. Resuming theater after an
             // episode change has to happen in the frame holding the video, and
             // on these sites that is a cross-origin iframe — the main frame has
@@ -1054,7 +1563,7 @@ struct WebView: UIViewRepresentable {
             // `resumeTheater` is cleared by the theater message rather than
             // here, so a frame without a video simply finds nothing and the one
             // that has it still gets asked.
-            case "ready":
+            case .ready:
                 // Scoped to the destination, which is what the property was
                 // always documented to be: checking only for non-nil meant a
                 // resume armed for one episode could fire on whatever page
@@ -1066,39 +1575,32 @@ struct WebView: UIViewRepresentable {
                 Self.transitionLog.notice("Player frame ready during episode transition")
                 page.webView?.evaluateJavaScript(
                     "window.__cp && window.__cp.autoTheater()",
-                    in: message.frameInfo, in: BrowserSetup.world,
+                    in: frameInfo, in: BrowserSetup.world,
                     completionHandler: nil)
 
-            case "theater":
+            case .frameGone:
+                // Lifecycle messages are consumed before dispatch.
+                break
+
+            // One frame holds theater at a time. A second frame announcing —
+            // an ad iframe whose <video> the resume poll happened to like —
+            // does not take the controls away from the one that has them;
+            // `FrameCapabilityModel` refuses the claim before this runs.
+            case .theater(let airplay, let pip):
                 // Remember WHICH frame staged the video. Everything the native
                 // chrome does afterwards is addressed to this frame.
-                theaterFrame = message.frameInfo
+                theaterFrame = frameInfo
                 endResume(keepingTheater: true)
                 page.isTheater = true
+                page.mediaVolumeAvailable = false
+                page.mediaError = nil
                 callPlayer("setVolume(\(page.volumePercent))")
                 page.playbackEnded = false
-                page.airplayAvailable = body["airplay"] as? Bool ?? false
-                page.pipAvailable = body["pip"] as? Bool ?? false
+                page.airplayAvailable = airplay
+                page.pipAvailable = pip
                 if let webView = page.webView { refreshEpisodes(webView) }
 
-                // This is the moment a page becomes a watched video. Record it,
-                // and arm resume + thumbnail for the session in this player.
-                if let url = page.webView?.url, !settings.privateBrowsing {
-                    watchingURL = url
-                    model.recordWatched(url, title: page.webView?.title)
-                    pendingResumeAt = model.resume(for: url)
-                    didApplyResume = false
-                    lastTime = 0
-                    lastDuration = 0
-                    // Capture the poster on a short delay rather than on a time
-                    // update: a paused or already-finished video sends no
-                    // timeupdate, and would otherwise never get a thumbnail.
-                    Task { [weak self] in
-                        try? await Task.sleep(for: .seconds(1.5))
-                        guard let self, self.page.isTheater, self.watchingURL == url else { return }
-                        self.captureThumbnail(for: url)
-                    }
-                }
+                if let url = page.webView?.url { beginWatching(url) }
 
                 // A player in a cross-origin frame stages the video against
                 // that frame's document and can reach no further. The host
@@ -1106,13 +1608,16 @@ struct WebView: UIViewRepresentable {
                 // screen under the native controls — which is what "Watch
                 // clean did nothing but add a close button" looks like. Tell
                 // the main frame to stage the player frame itself.
-                if !message.frameInfo.isMainFrame {
+                if !frameInfo.isMainFrame {
                     page.webView?.evaluateJavaScript(
                         "window.__cp && window.__cp.hostTheater()",
                         in: nil, in: BrowserSetup.world, completionHandler: nil)
                 }
-            case "theaterEnded":
+            case .theaterEnded:
                 theaterFrame = nil
+                // Not during an episode handoff: the next player is moments
+                // away and bouncing the session would duck the audio twice.
+                if resumeTheaterFor == nil { MediaSession.deactivate() }
                 if resumeTheaterFor != nil {
                     Self.transitionLog.notice("Old player frame ended; preserving theater transition")
                     stopWatching()
@@ -1120,35 +1625,43 @@ struct WebView: UIViewRepresentable {
                 }
                 releaseHostPage()
                 page.isTheater = false
+                page.mediaVolumeAvailable = false
                 stopWatching()
             // The agent gave up finding a video to resume into. Only the frame
             // that was actually asked reports this, so the curtain comes down
             // on a real answer rather than on the watchdog's deadline.
-            case "theaterFailed":
+            case .mediaError(let reason):
+                // The curtain came up on a black rectangle with working-looking
+                // controls. Say what happened instead.
+                page.mediaError = reason.message
+                endResume()
+            case .theaterFailed:
                 // Stay covered and armed. This is usually the main document,
                 // while the real player iframe announces later. Revealing the
                 // page here is what made Next look like a redirect.
                 Self.transitionLog.debug("A frame has not found the replacement video yet")
                 break
-            case "ended":
+            case .watchCleanTapped:
+                Diagnostics.count(.watchCleanAttempted)
+            case .ended:
                 page.playbackEnded = true
                 page.isPlaying = false
-            case "blocked":
-                page.blockedCount = body["count"] as? Int ?? 0
-                if page.blockedCount > 0,
-                   !blockingFrames.contains(where: { $0 == message.frameInfo }) {
-                    blockingFrames.append(message.frameInfo)
-                }
-            case "playback":
-                let playing = body["playing"] as? Bool ?? false
+                page.isBuffering = false
+            case .blocked(let count):
+                blockedByFrame.update(frameID: frameID, count: count)
+                page.blockedCount = blockedByFrame.total
+            case .popupBlocked:
+                page.pageReportedPopups = min(page.pageReportedPopups + 1,
+                                              PageState.pageReportedPopupCap)
+            case .playback(let playing, let buffering, let armed):
                 page.isPlaying = playing
+                page.isBuffering = buffering
                 // An SPA may keep the same staged <video> and only replace its
                 // source. There is no new theater message in that case; fresh
                 // playback is the successful handoff signal.
                 if playing, resumeTheaterFor != nil {
-                    let fromOutgoing = body["armed"] as? Bool ?? false
                     if EpisodeTransition.playbackCompletesResume(
-                        isFromOutgoingFrame: fromOutgoing,
+                        isFromOutgoingFrame: armed,
                         outgoingSourceChanged: resumeOutgoingSourceChanged) {
                         Self.transitionLog.notice("Episode transition resumed playback")
                         endResume(keepingTheater: true)
@@ -1158,24 +1671,28 @@ struct WebView: UIViewRepresentable {
                 }
                 // Replaying, or seeking back out of the end, retracts the offer.
                 if playing { page.playbackEnded = false }
-            case "episodeSourceChanged":
+            case .episodeSourceChanged(let playing):
                 // Only the armed frame posts this, so no frame check is needed —
                 // nor possible: WKFrameInfo has no value equality.
                 guard resumeTheaterFor != nil else { break }
                 resumeOutgoingSourceChanged = true
                 Self.transitionLog.notice("Outgoing frame confirmed a new episode source")
-                if body["playing"] as? Bool == true {
+                if playing {
                     endResume(keepingTheater: true)
                 }
-            case "volume":
-                page.volumePercent = min(max(body["percent"] as? Int ?? 100, 0), 200)
-            case "time":
-                page.currentTime = body["at"] as? Double ?? 0
-                page.duration = body["duration"] as? Double ?? 0
-                page.isLive = body["live"] as? Bool ?? false
-                page.bufferedTo = body["buffered"] as? Double ?? 0
-                page.playbackRate = body["rate"] as? Double ?? 1
+            case .volume(let percent, _, let available):
+                page.volumePercent = percent
+                page.mediaVolumeAvailable = available
+            case .time(let at, let duration, let live, let buffered, let rate):
+                page.currentTime = at
+                page.duration = duration
+                page.isLive = live
+                page.bufferedTo = buffered
+                page.playbackRate = rate
 
+                if page.isTheater {
+                    armStandbyIfNear(currentTime: page.currentTime, duration: page.duration)
+                }
                 if page.isTheater, watchingURL != nil {
                     lastTime = page.currentTime
                     lastDuration = page.duration
@@ -1187,37 +1704,30 @@ struct WebView: UIViewRepresentable {
                         callTheaterFrame("window.__cp && window.__cp.seek(\(pendingResumeAt))")
                     }
                 }
-            case "video":
-                let info = body["info"] as? [String: Any] ?? [:]
-                page.videoHeight = info["height"] as? Int ?? 0
-                page.objectFit = info["fit"] as? String ?? "contain"
-                page.sources = (info["sources"] as? [[String: Any]] ?? [])
-                    .compactMap { entry in
-                        guard let index = entry["index"] as? Int,
-                              let label = entry["label"] as? String else { return nil }
-                        return PageState.VideoSource(
-                            id: index, label: label,
-                            active: entry["active"] as? Bool ?? false)
-                    }
-            case "tracks":
-                let raw = body["tracks"] as? [[String: Any]] ?? []
-                page.textTracks = raw.compactMap { entry in
-                    guard let index = entry["index"] as? Int,
-                          let label = entry["label"] as? String else { return nil }
-                    return PageState.TextTrack(
-                        id: index, label: label,
-                        active: entry["active"] as? Bool ?? false)
+            case .video(let info):
+                page.videoHeight = info.height
+                page.objectFit = info.fit
+                page.sources = info.sources.map { source in
+                    PageState.VideoSource(
+                        id: source.index,
+                        label: Self.sanitizedForUI(source.label, limit: 40),
+                        active: source.active)
                 }
-            case "airplay":
-                page.airplayAvailable = body["available"] as? Bool ?? false
-                page.airplayCanSendVideo = (body["source"] as? String) != "mse"
+            case .tracks(let tracks):
+                page.textTracks = tracks.map { track in
+                    PageState.TextTrack(
+                        id: track.index,
+                        label: Self.sanitizedForUI(track.label, limit: 40),
+                        active: track.active)
+                }
+            case .airplay(let available, let source):
+                page.airplayAvailable = available
+                page.airplayCanSendVideo = source != "mse"
             // Sent once when a video is staged: the picker capability and the
             // stream kind, both known before any route appears.
-            case "airplaySupport":
-                page.airplayPickerSupported = body["picker"] as? Bool ?? false
-                page.airplayCanSendVideo = (body["source"] as? String) != "mse"
-            default:
-                break
+            case .airplaySupport(let picker, let source):
+                page.airplayPickerSupported = picker
+                page.airplayCanSendVideo = source != "mse"
             }
         }
 
@@ -1226,47 +1736,129 @@ struct WebView: UIViewRepresentable {
         func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String,
                      initiatedByFrame frame: WKFrameInfo,
                      completionHandler: @escaping () -> Void) {
-            guard let presenter = Self.presenter(for: webView) else {
-                completionHandler(); return
-            }
-            let alert = UIAlertController(title: Self.dialogTitle(for: frame),
-                                          message: message, preferredStyle: .alert)
-            alert.addAction(UIAlertAction(title: "OK", style: .default) { _ in completionHandler() })
-            presenter.present(alert, animated: true)
+            var answered = false
+            let answer = { if !answered { answered = true; completionHandler() } }
+            let alert = UIAlertController(
+                title: Self.dialogTitle(for: frame),
+                message: Self.sanitizedForUI(message), preferredStyle: .alert)
+            alert.addAction(UIAlertAction(title: "OK", style: .default) { [weak self] _ in
+                answer()
+                self?.dialogFinished()
+            })
+            presentDialog(alert, completing: answer)
         }
 
         func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String,
                      initiatedByFrame frame: WKFrameInfo,
                      completionHandler: @escaping (Bool) -> Void) {
-            guard let presenter = Self.presenter(for: webView) else {
-                completionHandler(false); return
+            var answered = false
+            let answer = { (value: Bool) in
+                if !answered { answered = true; completionHandler(value) }
             }
-            let alert = UIAlertController(title: Self.dialogTitle(for: frame),
-                                          message: message, preferredStyle: .alert)
-            alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { _ in completionHandler(false) })
-            alert.addAction(UIAlertAction(title: "OK", style: .default) { _ in completionHandler(true) })
-            presenter.present(alert, animated: true)
+            let alert = UIAlertController(
+                title: Self.dialogTitle(for: frame),
+                message: Self.sanitizedForUI(message), preferredStyle: .alert)
+            alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { [weak self] _ in
+                answer(false)
+                self?.dialogFinished()
+            })
+            alert.addAction(UIAlertAction(title: "OK", style: .default) { [weak self] _ in
+                answer(true)
+                self?.dialogFinished()
+            })
+            presentDialog(alert) { answer(false) }
         }
 
         func webView(_ webView: WKWebView, runJavaScriptTextInputPanelWithPrompt prompt: String,
                      defaultText: String?, initiatedByFrame frame: WKFrameInfo,
                      completionHandler: @escaping (String?) -> Void) {
-            guard let presenter = Self.presenter(for: webView) else {
-                completionHandler(nil); return
+            var answered = false
+            let answer = { (value: String?) in
+                if !answered { answered = true; completionHandler(value) }
             }
-            let alert = UIAlertController(title: Self.dialogTitle(for: frame),
-                                          message: prompt, preferredStyle: .alert)
-            alert.addTextField { $0.text = defaultText }
-            alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { _ in completionHandler(nil) })
-            alert.addAction(UIAlertAction(title: "OK", style: .default) { [weak alert] _ in
-                completionHandler(alert?.textFields?.first?.text)
+            let alert = UIAlertController(
+                title: Self.dialogTitle(for: frame),
+                message: Self.sanitizedForUI(prompt), preferredStyle: .alert)
+            alert.addTextField { $0.text = defaultText.map { Self.sanitizedForUI($0) } }
+            alert.addAction(UIAlertAction(title: "Cancel", style: .cancel) { [weak self] _ in
+                answer(nil)
+                self?.dialogFinished()
             })
-            presenter.present(alert, animated: true)
+            alert.addAction(UIAlertAction(title: "OK", style: .default) { [weak self, weak alert] _ in
+                answer(alert?.textFields?.first?.text)
+                self?.dialogFinished()
+            })
+            presentDialog(alert) { answer(nil) }
+        }
+
+        /// Page-supplied text for native UI. See `PageText`.
+        static func sanitizedForUI(_ value: String, limit: Int = 120) -> String {
+            PageText.sanitized(value, limit: limit)
         }
 
         private static func dialogTitle(for frame: WKFrameInfo) -> String {
             let host = frame.request.url?.host().flatMap(HostKey.canonical) ?? "this page"
             return "Message from \(host)"
+        }
+
+        /// One dialog at a time, and every completion handler called exactly
+        /// once.
+        ///
+        /// WebKit's `alert()` is synchronous: the frame's JavaScript is
+        /// suspended until the handler runs. UIKit refuses to present over a
+        /// controller that is already presenting, so a second dialog — another
+        /// frame, a sheet mid-transition, an auth challenge arriving during an
+        /// alert — logged "already presenting" and dropped the presentation,
+        /// and with it the handler. That frame was then frozen for good.
+        private var dialogQueue: [(UIViewController, () -> Void)] = []
+        private var dialogShowing = false
+
+        /// Presents now, or waits for the one on screen to finish. `fallback`
+        /// runs if the dialog can never be shown, so the page is answered
+        /// rather than left waiting.
+        private func presentDialog(_ alert: UIAlertController,
+                                   completing fallback: @escaping () -> Void) {
+            dialogQueue.append((alert, fallback))
+            presentNextDialog()
+        }
+
+        private func presentNextDialog() {
+            guard !dialogShowing, !dialogQueue.isEmpty else { return }
+            let (alert, fallback) = dialogQueue.removeFirst()
+            guard let presenter = Self.presenter(for: page.webView),
+                  presenter.presentedViewController == nil else {
+                // Still busy: put it back and wait for the current one to go.
+                // A presenter that never frees up is covered by the page's own
+                // dismissal, since the queue is drained on navigation.
+                if Self.presenter(for: page.webView) == nil {
+                    fallback()
+                    presentNextDialog()
+                } else {
+                    dialogQueue.insert((alert, fallback), at: 0)
+                }
+                return
+            }
+            dialogShowing = true
+            presenter.present(alert, animated: true)
+        }
+
+        /// Called from every action, after the handler the action carries.
+        private func dialogFinished() {
+            dialogShowing = false
+            presentNextDialog()
+        }
+
+        /// A navigation replaces the document that asked. Answer anything still
+        /// queued so no handler is dropped.
+        private func drainDialogs() {
+            let pending = dialogQueue
+            dialogQueue.removeAll()
+            for (_, fallback) in pending { fallback() }
+        }
+
+        private static func presenter(for webView: WKWebView?) -> UIViewController? {
+            guard let webView else { return nil }
+            return presenter(for: webView)
         }
 
         private static func presenter(for webView: WKWebView) -> UIViewController? {
@@ -1280,5 +1872,41 @@ struct WebView: UIViewRepresentable {
             }
             return current
         }
+    }
+
+    /// The standby's navigation delegate. Lets the destination site load and
+    /// nothing else, and never touches page state — the standby is not what
+    /// the user is looking at. Auth falls to WebKit's default handling, which
+    /// replays a credential the user already saved.
+    @MainActor
+    final class StandbyNavigation: NSObject, WKNavigationDelegate {
+        private let site: URL
+        private let failed: () -> Void
+
+        init(site: URL, failed: @escaping () -> Void) {
+            self.site = site
+            self.failed = failed
+        }
+
+        func webView(_ webView: WKWebView,
+                     decidePolicyFor navigationAction: WKNavigationAction,
+                     decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+            guard let url = navigationAction.request.url,
+                  ["http", "https"].contains(url.scheme?.lowercased() ?? "")
+            else { decisionHandler(.cancel); return }
+            // Subframes go anywhere the rule lists allow; the document itself
+            // stays on the site it was armed for.
+            if navigationAction.targetFrame?.isMainFrame == true,
+               !HostKey.isSameSite(url, as: site) {
+                decisionHandler(.cancel); return
+            }
+            decisionHandler(.allow)
+        }
+
+        func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!,
+                     withError error: Error) { failed() }
+
+        func webView(_ webView: WKWebView, didFail navigation: WKNavigation!,
+                     withError error: Error) { failed() }
     }
 }

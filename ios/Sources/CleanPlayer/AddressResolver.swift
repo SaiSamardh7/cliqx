@@ -56,15 +56,17 @@ public enum AddressResolver {
         return beforePath.split(separator: ":").first.map(String.init) ?? beforePath
     }
 
-    /// Private, link-local and `.local` hosts — the ones behind the router,
-    /// where a trusted certificate is the exception rather than the rule.
+    /// Private and `.local` hosts — the ones controlled by the user, where a
+    /// trusted certificate is the exception rather than the rule. Link-local
+    /// addresses are deliberately excluded because peers can claim them on a
+    /// shared network.
     public static func isLocalHost(_ host: String) -> Bool {
         let name = host.lowercased()
         if name == "localhost" || name.hasSuffix(".local") { return true }
         let parts = name.split(separator: ".").compactMap { Int($0) }
         guard parts.count == 4, parts.allSatisfy({ (0...255).contains($0) }) else { return false }
         switch (parts[0], parts[1]) {
-        case (10, _), (192, 168), (169, 254), (127, _): return true
+        case (10, _), (192, 168), (127, _): return true
         case (172, 16...31): return true
         default: return false
         }
@@ -88,6 +90,67 @@ public enum AddressResolver {
     }
 
     public static let defaultSearch = URL(string: "https://duckduckgo.com/")!
+
+    /// The identity of a watch page, for keying resume positions.
+    ///
+    /// The absolute string was the key, and the same episode arrived under
+    /// five of them: `www.` or not, a `?t=` the site added on share, a
+    /// `utm_source` from wherever the link was pasted, a trailing slash. Host
+    /// is canonicalised, the scheme dropped (a site moving to https keeps its
+    /// history), tracking and timestamp parameters removed, the rest kept
+    /// in order. The fragment stays: single-page servers route with it.
+    public static func resumeKey(for url: URL) -> String {
+        guard var parts = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            return url.absoluteString
+        }
+        let host = parts.host.flatMap(HostKey.canonical) ?? parts.host ?? ""
+        let port = parts.port.map { ":\($0)" } ?? ""
+        var path = parts.path
+        if path.count > 1, path.hasSuffix("/") { path.removeLast() }
+        parts.queryItems = parts.queryItems?.filter { item in
+            !isNoise(item)
+        }
+        let query = (parts.queryItems?.isEmpty == false) ? "?" + (parts.percentEncodedQuery ?? "") : ""
+        let fragment = parts.fragment.map { "#" + $0 } ?? ""
+        return host + port + path + query + fragment
+    }
+
+    /// Share-sheet and referrer noise: these carry no content identity, so
+    /// they go whatever their value.
+    private static let alwaysNoise: Set<String> = [
+        "fbclid", "gclid", "msclkid", "igshid", "mc_cid", "mc_eid",
+        "ref", "ref_src", "si", "feature",
+    ]
+
+    /// "Start at" parameters, dropped only when the VALUE looks like a time.
+    ///
+    /// `t` is a timestamp on YouTube and a thread id on a dozen forums; the
+    /// name alone cannot tell them apart, but `120`, `1h2m3s` and `90s` are
+    /// not content ids.
+    private static let timeLike: Set<String> = ["t", "start", "time_continue", "starttime"]
+
+    /// `90`, `90s`, `1h2m3s`, `2m30s`, `00:01:30`.
+    private static let timeValue = try? NSRegularExpression(
+        pattern: #"^(\d+s?|(\d+h)?(\d+m)?(\d+s)?|\d{1,2}(:\d{2}){1,2})$"#,
+        options: [.caseInsensitive])
+
+    private static func isNoise(_ item: URLQueryItem) -> Bool {
+        let name = item.name.lowercased()
+        if name.hasPrefix("utm_") || alwaysNoise.contains(name) { return true }
+        guard timeLike.contains(name) else { return false }
+        guard let value = item.value, !value.isEmpty else { return true }
+        return looksLikeTime(value)
+    }
+
+    static func looksLikeTime(_ value: String) -> Bool {
+        guard let timeValue else { return false }
+        let range = NSRange(value.startIndex..., in: value)
+        guard let match = timeValue.firstMatch(in: value, range: range),
+              match.range == range else { return false }
+        // The empty alternation matches an empty string; a value that is only
+        // letters ("abc") cannot reach here, but "s" alone would.
+        return value.contains(where: \.isNumber)
+    }
 
     private static func query(_ text: String, on engine: URL) -> URL? {
         var components = URLComponents(url: engine, resolvingAgainstBaseURL: false)

@@ -45,8 +45,19 @@ public enum EpisodeTransition {
         !isFromOutgoingFrame || outgoingSourceChanged
     }
 
+    /// A JSON string literal. The selectors here are compile-time constants so
+    /// the encoder cannot fail today, but `try!` in the one helper that builds
+    /// script text is a crash waiting for the first dynamic caller.
     private static func javascriptString(_ value: String) -> String {
-        let data = try! JSONEncoder().encode(value)
-        return String(decoding: data, as: UTF8.self)
+        if let data = try? JSONEncoder().encode(value) {
+            return String(decoding: data, as: UTF8.self)
+        }
+        // Escape by hand rather than emit something that would parse as code.
+        let escaped = value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "\n", with: "\\n")
+            .replacingOccurrences(of: "\r", with: "\\r")
+        return "\"\(escaped)\""
     }
 }

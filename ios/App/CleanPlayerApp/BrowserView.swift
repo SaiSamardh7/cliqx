@@ -7,6 +7,7 @@ struct BrowserView: View {
     @ObservedObject var rules: RuleListController
     @ObservedObject var settings: ProtectionSettings
     @ObservedObject var gestureSettings: PlayerGestureSettings
+    @ObservedObject var playback: PlaybackPreferences
     @StateObject private var page = PageState()
     @State private var showingSettings = false
     @State private var loadedDuringRulePreparation = false
@@ -66,7 +67,7 @@ struct BrowserView: View {
         }
         .sheet(isPresented: $showingSettings) {
             SettingsView(model: model, rules: rules, settings: settings,
-                         gestureSettings: gestureSettings,
+                         gestureSettings: gestureSettings, playback: playback,
                          currentHost: page.host.isEmpty ? url.host() : page.host,
                          // Rules apply at navigation time, so a level change
                          // leaves the page in front of the user exactly as it
@@ -81,11 +82,20 @@ struct BrowserView: View {
     /// the player.
     private var immersive: Bool { page.isTheater || page.isResumingEpisode }
 
-    /// Black, not a spinner over the page. The point is that the next episode's
+    /// The last frame of the outgoing video, dimmed, with the spinner over it —
+    /// or black when there is no frame yet. Either way the next episode's
     /// header, ads and cookie banner are never seen at all.
     private var resumingCurtain: some View {
         ZStack {
             Color.black.ignoresSafeArea()
+            if let frame = page.transitionFrame {
+                Image(uiImage: frame)
+                    .resizable()
+                    .scaledToFill()
+                    .ignoresSafeArea()
+                    .overlay(Color.black.opacity(0.45).ignoresSafeArea())
+                    .accessibilityHidden(true)
+            }
             VStack(spacing: 16) {
                 ProgressView().controlSize(.large).tint(.white)
                 Text(page.episodeTransitionMessage)
@@ -273,8 +283,8 @@ struct BrowserView: View {
                       ? "shield.lefthalf.filled" : "shield.slash")
                     .frame(width: 44, height: 44)
                     .overlay(alignment: .topTrailing) {
-                        if page.overlayBlocking && page.blockedCount + page.popupsBlocked > 0 {
-                            Text("\(page.blockedCount + page.popupsBlocked)")
+                        if page.overlayBlocking && page.blockedTotal > 0 {
+                            Text("\(page.blockedTotal)")
                                 .accessibilityHidden(true)
                                 .font(.system(size: 10, weight: .bold))
                                 .foregroundStyle(.white)
@@ -289,7 +299,7 @@ struct BrowserView: View {
             // uncountable; this badge is only what the page agent hid.
             .accessibilityLabel(page.overlayBlocking
                                 ? "Overlay blocking on, "
-                                  + "\(page.blockedCount + page.popupsBlocked) "
+                                  + "\(page.blockedTotal) "
                                   + "overlays and popups hidden"
                                 : "Overlay blocking off")
             Spacer()

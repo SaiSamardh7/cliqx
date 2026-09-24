@@ -384,6 +384,117 @@ final class RuleActivationTests: XCTestCase {
 }
 
 /// Waits for a single navigation to finish. Shared with AdBlockingTests.
+/// Waits for something to become true IN the page, rather than for the
+/// navigation to finish.
+///
+/// `didFinish` waits on every subresource. A test whose fixture contains an
+/// `<iframe>` therefore waits on that frame too, and on a loaded CI runner
+/// that has repeatedly taken longer than the load waiter's budget — failing a
+/// test whose actual subject had been ready for seconds. Ask the page instead.
+@MainActor
+func waitForPage(_ javaScript: String, in webView: WKWebView,
+                 timeout: TimeInterval = 30,
+                 recorder: NavigationRecorder? = nil,
+                 file: StaticString = #filePath, line: UInt = #line) async throws {
+    let deadline = Date().addingTimeInterval(timeout)
+    while Date() < deadline {
+        if await evaluateFlag(javaScript, in: webView) == true { return }
+        try await Task.sleep(nanoseconds: 50_000_000)
+    }
+
+    // The deadline says nothing on its own about WHY, and reporting a host
+    // problem as a test failure sends someone looking for a bug in code that
+    // is fine. Two signals separate them, both measured rather than assumed.
+    //
+    // First: did any JavaScript run at all? A web content process the host
+    // refused an assertion to — the RunningBoard "InvalidTransition" and
+    // "WebProcess NearSuspended Assertion" lines — evaluates nothing.
+    if await evaluateFlag("1 + 1 === 2", in: webView) != true {
+        throw XCTSkip("""
+            The web content process never ran: even `1 + 1` did not evaluate. \
+            This is the host refusing WebKit a process assertion, not a \
+            failure of what the test asserts.
+            """)
+    }
+
+    // Second: did the navigation ever start? This is the case measured on
+    // this project's CI, where the recorder saw no commit, no finish and no
+    // failure, `readyState` was the initial empty document's "complete", and
+    // `url` was the base URL of a load that never began. Nothing was
+    // navigated, so nothing about the page can be asserted — and a wait of
+    // any length would have expired the same way.
+    if let recorder, !recorder.committed, recorder.failure == nil {
+        throw XCTSkip("""
+            The navigation never started: no commit, no finish and no error \
+            reached the delegate. The document is the initial empty one, so \
+            there is nothing here for the test to be right or wrong about.
+            """)
+    }
+
+    let url = webView.url?.absoluteString ?? "nil"
+    let readyState = await withCheckedContinuation { continuation in
+        webView.evaluateJavaScript("document.readyState") { value, _ in
+            continuation.resume(returning: (value as? String) ?? "unknown")
+        }
+    }
+    XCTFail("""
+        page never satisfied: \(javaScript)
+        url: \(url), readyState: \(readyState)
+        \(recorder?.report ?? "no navigation recorder attached")
+        """, file: file, line: line)
+    throw LoadWaiter.TimedOut()
+}
+
+/// Records what a navigation did, so a test that times out can say WHY rather
+/// than leaving the next person to guess from a deadline.
+final class NavigationRecorder: NSObject, WKNavigationDelegate {
+    private(set) var finished = false
+    private(set) var failure: Error?
+    private(set) var committed = false
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        finished = true
+    }
+
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        committed = true
+    }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!,
+                 withError error: Error) {
+        failure = error
+    }
+
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!,
+                 withError error: Error) {
+        failure = error
+    }
+
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        failure = NSError(domain: "NavigationRecorder", code: -1, userInfo: [
+            NSLocalizedDescriptionKey: "the web content process terminated",
+        ])
+    }
+
+    var report: String {
+        if let failure { return "navigation failed: \(failure)" }
+        if finished { return "navigation finished but the document lacked it" }
+        if committed { return "navigation committed but never finished" }
+        return "navigation never committed"
+    }
+}
+
+/// A boolean from the page, or nil when the evaluation itself failed — which
+/// is the difference between "the answer is no" and "nobody answered".
+@MainActor
+private func evaluateFlag(_ javaScript: String, in webView: WKWebView) async -> Bool? {
+    await withCheckedContinuation { continuation in
+        webView.evaluateJavaScript(javaScript) { value, error in
+            continuation.resume(returning: error == nil ? (value as? Bool) : nil)
+        }
+    }
+}
+
 final class LoadWaiter: NSObject, WKNavigationDelegate {
     private var continuation: CheckedContinuation<Void, Error>?
     private var settled = false

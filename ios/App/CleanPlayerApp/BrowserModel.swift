@@ -15,6 +15,14 @@ struct Site: Codable, Hashable, Identifiable {
     /// array position, so replaying something old moves it to the front no
     /// matter what pinning or removal did to the list.
     var lastPlayed: Date?
+    /// Keep this site's login across launches, by giving its session cookies
+    /// an expiry the server did not.
+    ///
+    /// Off unless the user asks. A session cookie is short-lived because the
+    /// server said so; overriding that silently means a stolen unlocked phone
+    /// holds a month of logins the server believed had ended. Optional so
+    /// existing payloads migrate; nil reads as off.
+    var staySignedIn: Bool?
     /// Visible grouping metadata. Optional so the existing recents.v1 payload
     /// migrates without a decoding break.
     var seriesKey: String?
@@ -71,17 +79,32 @@ final class BrowserModel: ObservableObject {
     private let episodeProgressKey = "episode-progress.v1"
     private var episodeProgress: [String: EpisodeProgress] = [:]
 
+    /// A store that would not decode. Nothing may be written back over it:
+    /// persisting an empty list is what turns one unreadable payload into a
+    /// library that is gone for good.
+    private var unreadable: Set<String> = []
+
+    private func load<T: Decodable>(_ type: T.Type, key: String) -> T? {
+        StoreRecovery.decode(type, from: store.data(forKey: key), named: key) { kept in
+            self.unreadable.insert(key)
+            StoreHealth.shared.record(store: key, keptAt: kept)
+        }
+    }
+
     init() {
-        if let data = store.data(forKey: recentsKey),
-           let saved = try? JSONDecoder().decode([Site].self, from: data) {
+        if let saved = load([Site].self, key: recentsKey) {
             recents = saved
         }
-        if let data = store.data(forKey: episodeProgressKey),
-           let saved = try? JSONDecoder().decode([String: EpisodeProgress].self, from: data) {
-            episodeProgress = saved
+        if let saved = load([String: EpisodeProgress].self, key: episodeProgressKey) {
+            // Keys used to be absolute URL strings. Fold each onto its
+            // normalised key; where two collapse, keep the further position.
+            for (key, progress) in saved {
+                let folded = URL(string: key).map(AddressResolver.resumeKey(for:)) ?? key
+                if let existing = episodeProgress[folded], existing.position >= progress.position { continue }
+                episodeProgress[folded] = progress
+            }
         }
-        if let data = store.data(forKey: pinnedKey),
-           let saved = try? JSONDecoder().decode([Site].self, from: data) {
+        if let saved = load([Site].self, key: pinnedKey) {
             pinned = saved
         }
         migrateAndCollapseRecents()
@@ -142,7 +165,7 @@ final class BrowserModel: ObservableObject {
         let key = PlayerFormatting.seriesIdentity(title: name, url: url)
         let show = PlayerFormatting.seriesTitle(name, host: url.host() ?? "")
         let existing = recents.first { $0.url == url } ?? pinned.first { $0.url == url }
-        let saved = episodeProgress[url.absoluteString]
+        let saved = episodeProgress[AddressResolver.resumeKey(for: url)]
         let site = Site(url: url, title: name,
                         resumeAt: saved?.position ?? existing?.resumeAt,
                         resumeDuration: saved?.duration ?? existing?.resumeDuration,
@@ -168,7 +191,7 @@ final class BrowserModel: ObservableObject {
     /// the card lives.
     func saveResume(_ url: URL, at seconds: Double, duration: Double) {
         guard duration > 0 else { return }
-        episodeProgress[url.absoluteString] = EpisodeProgress(position: seconds,
+        episodeProgress[AddressResolver.resumeKey(for: url)] = EpisodeProgress(position: seconds,
                                                               duration: duration)
         for index in recents.indices where recents[index].url == url {
             recents[index].resumeAt = seconds
@@ -185,7 +208,7 @@ final class BrowserModel: ObservableObject {
 
     /// Saved position for a URL, or 0.
     func resume(for url: URL) -> Double {
-        episodeProgress[url.absoluteString]?.position
+        episodeProgress[AddressResolver.resumeKey(for: url)]?.position
             ?? (recents.first { $0.url == url } ?? pinned.first { $0.url == url })?.resumeAt
             ?? 0
     }
@@ -223,6 +246,34 @@ final class BrowserModel: ObservableObject {
         return pinned.contains { $0.url == root }
     }
 
+    /// A host the user pinned. The one signal that a server is theirs.
+    func isPinnedHost(_ host: String) -> Bool {
+        guard let wanted = HostKey.canonical(host) else { return false }
+        return pinned.contains { $0.url.host().flatMap(HostKey.canonical) == wanted }
+    }
+
+    /// Pinned AND asked to stay signed in. Only these sites have their session
+    /// cookies given an expiry.
+    func keepsSignIn(_ host: String) -> Bool {
+        guard let wanted = HostKey.canonical(host) else { return false }
+        return pinned.contains {
+            $0.staySignedIn == true
+                && $0.url.host().flatMap(HostKey.canonical) == wanted
+        }
+    }
+
+    func setStaySignedIn(_ on: Bool, for site: Site) {
+        guard let index = pinned.firstIndex(where: { $0.url == site.url }) else { return }
+        pinned[index].staySignedIn = on
+        persistPinned()
+    }
+
+    /// Pinned, or on the local network: where a saved password may live in
+    /// the keychain rather than die with the session.
+    func isOwnHost(_ host: String) -> Bool {
+        isPinnedHost(host) || AddressResolver.isLocalHost(host)
+    }
+
     func unpinSite(_ url: URL) {
         guard let root = AddressResolver.siteRoot(of: url) else { return }
         pinned.removeAll { $0.url == root }
@@ -239,18 +290,25 @@ final class BrowserModel: ObservableObject {
     }
 
     private func persist() {
-        guard let data = try? JSONEncoder().encode(recents) else { return }
-        store.set(data, forKey: recentsKey)
+        write(recents, key: recentsKey)
     }
 
     private func persistPinned() {
-        guard let data = try? JSONEncoder().encode(pinned) else { return }
-        store.set(data, forKey: pinnedKey)
+        write(pinned, key: pinnedKey)
     }
 
     private func persistEpisodeProgress() {
-        guard let data = try? JSONEncoder().encode(episodeProgress) else { return }
-        store.set(data, forKey: episodeProgressKey)
+        write(episodeProgress, key: episodeProgressKey)
+    }
+
+    /// Never writes over a payload that failed to decode this launch.
+    private func write<T: Encodable>(_ value: T, key: String) {
+        guard !unreadable.contains(key) else { return }
+        guard let data = try? JSONEncoder().encode(value) else {
+            StoreHealth.shared.record(store: key, keptAt: nil)
+            return
+        }
+        store.set(data, forKey: key)
     }
 
     private func seriesIdentity(for site: Site) -> String {
@@ -266,7 +324,7 @@ final class BrowserModel: ObservableObject {
             ($0.lastPlayed ?? .distantPast) > ($1.lastPlayed ?? .distantPast)
         }) {
             if let at = site.resumeAt, let duration = site.resumeDuration {
-                episodeProgress[site.url.absoluteString] = EpisodeProgress(position: at,
+                episodeProgress[AddressResolver.resumeKey(for: site.url)] = EpisodeProgress(position: at,
                                                                           duration: duration)
             }
             let key = site.seriesKey ?? seriesIdentity(for: site)

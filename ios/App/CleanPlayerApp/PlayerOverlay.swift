@@ -29,6 +29,16 @@ struct PlayerOverlay: View {
     @State private var gestureBrightnessPercent: Int?
     @State private var gestureVolumePercent: Int?
     @State private var heldPreviousRate: Double?
+    /// The screen brightness before this player touched it, so it can be put
+    /// back. Without this, one swipe down during a dark scene left the phone
+    /// dim for everything the user did afterwards.
+    @State private var brightnessOnEntry: CGFloat?
+    @State private var showingBoostWarning = false
+    /// Whether the rotate button narrowed the app's supported orientations, so
+    /// exiting knows whether it has anything to put back, and what the
+    /// interface was showing before it did.
+    @State private var didNarrowOrientation = false
+    @State private var orientationBeforeRotate: UIInterfaceOrientation?
 
     var body: some View {
         ZStack {
@@ -47,13 +57,16 @@ struct PlayerOverlay: View {
                 .transition(.opacity)
             }
 
+            if let message = page.mediaError { mediaErrorCard(message) }
+
             if let flash = chrome.seekFlash { seekFlashLabel(flash) }
 
             if gestureBrightnessPercent != nil || gestureVolumePercent != nil {
                 levelHUDs
             }
 
-            if let remaining = chrome.countdown, let next = page.nextEpisode {
+            if let remaining = chrome.countdown, let next = page.nextEpisode,
+               page.nextEpisodeIsEpisodic {
                 upNextCard(remaining: remaining, next: next)
             }
         }
@@ -64,6 +77,7 @@ struct PlayerOverlay: View {
         .animation(.easeInOut(duration: 0.18), value: chrome.areControlsVisible)
         .animation(.easeInOut(duration: 0.18), value: chrome.isLocked)
         .onAppear {
+            brightnessOnEntry = UIScreen.main.brightness
             // The three things the chrome initiates on its own. Everything
             // else is a button, and goes straight to `page.actions`.
             chrome.onAdvance = {
@@ -71,23 +85,50 @@ struct PlayerOverlay: View {
             }
             chrome.onSeek = { page.actions.seek($0) }
             chrome.onBeginScrub = { page.actions.beginScrub() }
-            chrome.playbackChanged(isPlaying: page.isPlaying)
+            chrome.playbackChanged(isPlaying: isShowingFrames)
         }
-        .onChange(of: page.isPlaying) { _, playing in
-            chrome.playbackChanged(isPlaying: playing)
+        // The chrome's "only auto-hide while playing" needs frames on screen,
+        // not merely a play() that has been requested.
+        .onChange(of: page.isPlaying) { _, _ in
+            chrome.playbackChanged(isPlaying: isShowingFrames)
+        }
+        .onChange(of: page.isBuffering) { _, _ in
+            chrome.playbackChanged(isPlaying: isShowingFrames)
         }
         .onChange(of: page.playbackEnded) { _, ended in
             guard ended else { return }
-            chrome.playbackEnded(hasNext: page.nextEpisode != nil)
+            // Only a real episode signal starts the countdown. A "Next »" in a
+            // forum footer gives a button, not a reason to leave the page
+            // while the user is looking away.
+            chrome.playbackEnded(
+                hasNext: page.nextEpisode != nil && page.nextEpisodeIsEpisodic)
         }
         // A new episode is a new video: whatever the user declined last time
         // has nothing to do with this one.
         .onChange(of: page.nextEpisode) { _, _ in chrome.itemChanged() }
-        .onDisappear { chrome.cancelEverything() }
+        .onDisappear {
+            chrome.cancelEverything()
+            restoreOrientation()
+            // Put the screen back the way it was found. Only if nothing else
+            // changed it since — the user may have used Control Centre, and
+            // overriding that would be the same rudeness in reverse.
+            if let entry = brightnessOnEntry,
+               let last = lastBrightnessSet,
+               abs(UIScreen.main.brightness - last) < 0.01 {
+                UIScreen.main.brightness = entry
+            }
+        }
         .sheet(isPresented: $showingEpisodes) { episodeSheet }
         // Says what AirPlay will and will not do here, and names the thing
         // that does work. "AirPlay is broken" and "AirPlay cannot carry this
         // stream, mirroring can" are very different messages to receive.
+        .alert("Careful with your hearing", isPresented: $showingBoostWarning) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text("Above 100% amplifies the video's own audio on top of the "
+                 + "device volume. On headphones this gets loud quickly — turn "
+                 + "the hardware volume down before raising this.")
+        }
         .alert("Video can't be sent to a TV from this site",
                isPresented: $showingAirPlayHelp) {
             Button("OK", role: .cancel) { }
@@ -96,6 +137,46 @@ struct PlayerOverlay: View {
                  + "only the sound would reach the TV.\n\nUse Screen Mirroring "
                  + "from Control Centre instead — it sends the picture as well.")
         }
+    }
+
+    /// Said plainly, over the black. A protected stream used to give a black
+    /// rectangle with a full set of controls that did nothing.
+    private func mediaErrorCard(_ message: String) -> some View {
+        VStack(spacing: 14) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.largeTitle)
+                .foregroundStyle(.secondary)
+            Text(message)
+                .multilineTextAlignment(.center)
+                .font(.callout)
+                .foregroundStyle(.white)
+            Button("Close") { page.actions.exitTheater() }
+                .buttonStyle(.borderedProminent)
+        }
+        .padding(28)
+        .frame(maxWidth: 380)
+        .background(.black.opacity(0.82), in: .rect(cornerRadius: 18))
+        .accessibilityElement(children: .combine)
+    }
+
+    /// Playing as the user would mean it: not paused, and with a picture.
+    private var isShowingFrames: Bool { page.isPlaying && !page.isBuffering }
+
+    /// Amplification routes the element through Web Audio, which AirPlay
+    /// cannot forward. While a route could carry the picture, that trade is
+    /// not worth making silently.
+    /// The last brightness this view set, so it can tell its own change from
+    /// one the user made in Control Centre.
+    @State private var lastBrightnessSet: CGFloat?
+
+    private var boostWithheldForAirPlay: Bool {
+        page.airplayAvailable && page.airplayCanSendVideo
+    }
+
+    private var volumeLevels: [Int] {
+        boostWithheldForAirPlay
+            ? [0, 25, 50, 75, 100]
+            : [0, 25, 50, 75, 100, 125, 150, 175, 200]
     }
 
     // MARK: Tap and double-tap
@@ -180,10 +261,13 @@ struct PlayerOverlay: View {
                     let change = -value.translation.height / max(size.height, 1)
                     let brightness = min(max(dragStartBrightness + change, 0), 1)
                     UIScreen.main.brightness = brightness
+                    lastBrightnessSet = brightness
                     gestureBrightnessPercent = Int((brightness * 100).rounded())
-                    gestureVolumePercent = page.volumePercent
+                    gestureVolumePercent = page.mediaVolumeAvailable
+                        ? page.volumePercent : nil
                 case .volume:
-                    guard gestureSettings.brightnessAndVolume else { return }
+                    guard gestureSettings.brightnessAndVolume,
+                          page.mediaVolumeAvailable else { return }
                     let change = Int((-value.translation.height
                                       / max(size.height, 1) * 200).rounded())
                     let volume = min(max(dragStartVolume + change, 0), 200)
@@ -418,13 +502,20 @@ struct PlayerOverlay: View {
                 page.actions.togglePlay()
                 chrome.interacted()
             } label: {
-                Image(systemName: page.isPlaying ? "pause.fill" : "play.fill")
-                    .font(.system(size: 30, weight: .semibold))
-                    .foregroundStyle(.black)
-                    .frame(width: 66, height: 66)
-                    .background(.white, in: .circle)
+                Group {
+                    if page.isBuffering {
+                        ProgressView().tint(.black).controlSize(.large)
+                    } else {
+                        Image(systemName: page.isPlaying ? "pause.fill" : "play.fill")
+                            .font(.system(size: 30, weight: .semibold))
+                    }
+                }
+                .foregroundStyle(.black)
+                .frame(width: 66, height: 66)
+                .background(.white, in: .circle)
             }
-            .accessibilityLabel(page.isPlaying ? "Pause" : "Play")
+            .accessibilityLabel(page.isBuffering ? "Loading, tap to pause"
+                                : page.isPlaying ? "Pause" : "Play")
             circleButton("goforward.10", label: "Forward 10 seconds", size: 30) {
                 page.actions.skip(10)
                 chrome.interacted()
@@ -527,7 +618,8 @@ struct PlayerOverlay: View {
     private func episodeControls(showsLabel: Bool) -> some View {
         HStack(spacing: 2) {
             barButton("backward.end.fill", label: "Previous episode",
-                      enabled: page.previousEpisode != nil) {
+                      enabled: page.previousEpisode != nil,
+                      unavailable: page.episodeUnavailableReason) {
                 if let previous = page.previousEpisode {
                     page.actions.goToEpisode(previous)
                 }
@@ -547,7 +639,8 @@ struct PlayerOverlay: View {
             }
             .accessibilityLabel("Episode list")
             barButton("forward.end.fill", label: "Next episode",
-                      enabled: page.nextEpisode != nil) {
+                      enabled: page.nextEpisode != nil,
+                      unavailable: page.episodeUnavailableReason) {
                 if let next = page.nextEpisode {
                     page.actions.goToEpisode(next)
                 }
@@ -646,19 +739,42 @@ struct PlayerOverlay: View {
             Menu {
                 Picker("Volume", selection: Binding(
                     get: { page.volumePercent },
-                    set: { page.actions.setVolume($0) }
+                    set: { level in
+                        // Once, the first time anyone amplifies. Above 100%
+                        // this is software gain on top of whatever the device
+                        // is already doing, and on headphones that is loud.
+                        if level > 100, !gestureSettings.hasSeenBoostWarning {
+                            gestureSettings.hasSeenBoostWarning = true
+                            showingBoostWarning = true
+                        }
+                        page.actions.setVolume(level)
+                    }
                 )) {
-                    ForEach([0, 25, 50, 75, 100, 125, 150, 175, 200], id: \.self) { level in
+                    // Boost is withheld while a route could carry the
+                    // picture: amplifying means routing the element through
+                    // Web Audio, and a routed element does not follow AirPlay
+                    // — the television would get silence. The plain levels
+                    // still work, because they do not route anything.
+                    ForEach(volumeLevels, id: \.self) { level in
                         Text(level > 100 ? "\(level)% Boost" : "\(level)%").tag(level)
                     }
                 }
                 Divider()
-                Text("Above 100% may distort loud audio")
+                if boostWithheldForAirPlay {
+                    Text("Boost is off while AirPlay can send this video")
+                } else {
+                    Text("Above 100% may distort loud audio")
+                }
             } label: {
                 Label("Volume \(page.volumePercent)%",
                       systemImage: page.volumePercent > 100
                         ? "speaker.wave.3.fill" : "speaker.wave.2.fill")
             }
+            .disabled(!page.mediaVolumeAvailable)
+            .accessibilityHint(page.mediaVolumeAvailable
+                ? "Controls this video's audio level"
+                : "Unavailable for this stream; use the hardware volume buttons")
+
             Divider()
             Button {
                 page.actions.setObjectFit(page.objectFit == "cover" ? "contain" : "cover")
@@ -710,11 +826,17 @@ struct PlayerOverlay: View {
         NavigationStack {
             Group {
                 if page.episodes.isEmpty {
+                    // The specific reason when there is one. "No episode list"
+                    // alone reads the same whether the server refused the
+                    // request, the show has one episode, or the site draws its
+                    // controls with scripts — and those want different things
+                    // from the person reading it.
                     ContentUnavailableView(
                         "No episode list",
                         systemImage: "list.bullet",
-                        description: Text("This page does not link its episodes "
-                                          + "in a way the player can read."))
+                        description: Text(page.episodeUnavailableReason
+                            ?? "This page does not link its episodes in a way "
+                             + "the player can read."))
                 } else {
                     List(page.episodes) { episode in
                         Button {
@@ -768,11 +890,54 @@ struct PlayerOverlay: View {
             ? "Rotate to portrait" : "Rotate to landscape"
     }
 
+    /// Turn the screen, and remember that we narrowed what the app supports.
+    ///
+    /// `requestGeometryUpdate` REPLACES the scene's supported orientations
+    /// rather than simply rotating: after asking for `.landscape` the scene no
+    /// longer follows the device, and it stayed that way after the player
+    /// closed — the whole app stuck in landscape until it was relaunched.
     private func rotatePlayer() {
         guard let scene = foregroundScene else { return }
-        let orientation: UIInterfaceOrientationMask = scene.interfaceOrientation.isLandscape
-            ? .portrait : .landscape
-        scene.requestGeometryUpdate(.iOS(interfaceOrientations: orientation))
+        if !didNarrowOrientation { orientationBeforeRotate = scene.interfaceOrientation }
+        didNarrowOrientation = true
+        scene.requestGeometryUpdate(
+            .iOS(interfaceOrientations:
+                    InterfaceOrientationPolicy.flipped(from: scene.interfaceOrientation)))
+    }
+
+    /// Give the app back every orientation it declares in its Info.plist.
+    ///
+    /// Only when this player narrowed it. A user who rotated the device by
+    /// hand, or who has Portrait Orientation Lock on, chose that — and asking
+    /// for a geometry update they did not ask for is the same rudeness in the
+    /// other direction.
+    private func restoreOrientation() {
+        guard didNarrowOrientation, let scene = foregroundScene else { return }
+        didNarrowOrientation = false
+        let declared = InterfaceOrientationPolicy.declared()
+
+        // Two steps, and the first one is the point.
+        //
+        // Widening back to everything the app allows does NOT undo the rotate
+        // button: landscape is still in that set, so UIKit has no reason to
+        // leave it and waits for a device-orientation change that never comes
+        // for a phone already being held still. So send the interface to where
+        // the device actually is first...
+        if let target = InterfaceOrientationPolicy.restoreTarget(
+            device: UIDevice.current.orientation,
+            before: orientationBeforeRotate,
+            allowed: declared) {
+            scene.requestGeometryUpdate(.iOS(interfaceOrientations: target))
+        }
+        orientationBeforeRotate = nil
+        // ...then hand every orientation back, so nothing is left locked — this
+        // widening keeps whatever the step above settled on.
+        DispatchQueue.main.async {
+            scene.requestGeometryUpdate(.iOS(interfaceOrientations: declared))
+            for window in scene.windows {
+                window.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
+            }
+        }
     }
 
     private func circleLabel(_ symbol: String, size: CGFloat = 15) -> some View {
@@ -784,6 +949,7 @@ struct PlayerOverlay: View {
     }
 
     private func barButton(_ symbol: String, label: String, enabled: Bool = true,
+                           unavailable: String? = nil,
                            action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: symbol)
@@ -791,6 +957,9 @@ struct PlayerOverlay: View {
                 .frame(width: 44, height: 44)
         }
         .disabled(!enabled)
+        // A disabled control that says nothing is the same as a broken one to
+        // someone who cannot see that it is dimmed.
+        .accessibilityHint(enabled ? "" : (unavailable ?? ""))
         .opacity(enabled ? 1 : 0.35)
         .accessibilityLabel(label)
     }
