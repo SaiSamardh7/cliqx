@@ -8,6 +8,7 @@ struct CleanPlayerApp: App {
     @StateObject private var settings = ProtectionSettings()
     @StateObject private var gestureSettings = PlayerGestureSettings()
     @StateObject private var rules = RuleListController()
+    @StateObject private var playback = PlaybackPreferences()
 
     var body: some Scene {
         WindowGroup {
@@ -16,10 +17,10 @@ struct CleanPlayerApp: App {
                     OnboardingView(settings: settings)
                 } else if let url = model.current {
                     BrowserView(url: url, model: model, rules: rules, settings: settings,
-                                gestureSettings: gestureSettings)
+                                gestureSettings: gestureSettings, playback: playback)
                 } else {
                     HomeView(model: model, rules: rules, settings: settings,
-                             gestureSettings: gestureSettings)
+                             gestureSettings: gestureSettings, playback: playback)
                 }
             }
             .task {

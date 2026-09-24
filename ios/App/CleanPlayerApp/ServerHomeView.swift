@@ -16,12 +16,14 @@ extension View {
     /// it closes: progress bars on the shelf come from the server.
     func serverPlayer(_ playback: ServerPlayback, server: JellyfinServer, servers: JellyfinServers,
                       rules: RuleListController, gestureSettings: PlayerGestureSettings,
+                      subtitleStyle: SubtitleStyle,
                       onStop: @escaping () -> Void) -> some View {
         fullScreenCover(item: Binding(get: { playback.playing },
                                       set: { playback.playing = $0 }),
                         onDismiss: onStop) { item in
             ServerPlayerView(item: item, server: server, servers: servers,
                              rules: rules, gestureSettings: gestureSettings,
+                             subtitleStyle: subtitleStyle,
                              onClose: { playback.playing = nil })
         }
     }
@@ -38,6 +40,7 @@ struct ServerHomeView: View {
     let server: JellyfinServer
     @ObservedObject var rules: RuleListController
     @ObservedObject var gestureSettings: PlayerGestureSettings
+    @ObservedObject var preferences: PlaybackPreferences
 
     @State private var libraries: [JellyfinItem]?
     @State private var hero: JellyfinItem?
@@ -103,7 +106,8 @@ struct ServerHomeView: View {
         .task { await loadAll() }
         .refreshable { await loadAll() }
         .serverPlayer(playback, server: server, servers: servers, rules: rules,
-                      gestureSettings: gestureSettings) { Task { await loadRows() } }
+                      gestureSettings: gestureSettings,
+                      subtitleStyle: preferences.subtitles) { Task { await loadRows() } }
     }
 
     // MARK: Loading
@@ -147,7 +151,8 @@ struct ServerHomeView: View {
 
     private func browser(_ parent: JellyfinItem) -> some View {
         ServerBrowserView(servers: servers, server: server, parent: parent,
-                          rules: rules, gestureSettings: gestureSettings)
+                          rules: rules, gestureSettings: gestureSettings,
+                          preferences: preferences)
     }
 
     /// A titled, horizontally scrolling shelf. The title itself links to the

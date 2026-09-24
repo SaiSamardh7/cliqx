@@ -15,7 +15,9 @@ import VLCKitSPM
 @MainActor
 final class ServerEngine: NSObject, ObservableObject, @preconcurrency VLCMediaPlayerDelegate {
     let page = PageState()
-    let player = VLCMediaPlayer()
+    /// Built with the subtitle style: colour and the background band are read
+    /// from the PLAYER's options, not the media's — see SubtitleStyle.
+    let player: VLCMediaPlayer
 
     private let server: JellyfinServer
     private let client: JellyfinClient
@@ -27,11 +29,15 @@ final class ServerEngine: NSObject, ObservableObject, @preconcurrency VLCMediaPl
     private var didResume = false
     private var didReadTracks = false
     private var desiredRate: Float = 1
+    private let subtitleStyle: SubtitleStyle
     private let interruptions = AudioInterruptions()
     private var wasPlayingBeforeInterruption = false
     var onClose: () -> Void = {}
 
-    init(item: JellyfinItem, server: JellyfinServer, servers: JellyfinServers) {
+    init(item: JellyfinItem, server: JellyfinServer, servers: JellyfinServers,
+         subtitleStyle: SubtitleStyle = SubtitleStyle()) {
+        self.subtitleStyle = subtitleStyle
+        player = VLCMediaPlayer(options: subtitleStyle.playerOptions)
         self.item = item
         self.server = server
         self.client = servers.client(for: server)
@@ -105,7 +111,9 @@ final class ServerEngine: NSObject, ObservableObject, @preconcurrency VLCMediaPl
         didResume = item.resumeMs <= 0
         didReadTracks = false
         reportedStop = false
-        player.media = VLCMedia(url: url)
+        let media = VLCMedia(url: url)
+        for option in subtitleStyle.mediaOptions { media.addOption(option) }
+        player.media = media
         player.play()
         player.rate = desiredRate
         client.reportStart(itemID: item.id, positionMs: item.resumeMs)
@@ -323,8 +331,10 @@ struct ServerPlayerView: View {
 
     init(item: JellyfinItem, server: JellyfinServer, servers: JellyfinServers,
          rules: RuleListController, gestureSettings: PlayerGestureSettings,
+         subtitleStyle: SubtitleStyle = SubtitleStyle(),
          onClose: @escaping () -> Void) {
-        _engine = StateObject(wrappedValue: ServerEngine(item: item, server: server, servers: servers))
+        _engine = StateObject(wrappedValue: ServerEngine(
+            item: item, server: server, servers: servers, subtitleStyle: subtitleStyle))
         self.rules = rules
         self.gestureSettings = gestureSettings
         self.onClose = onClose

@@ -7,6 +7,7 @@ struct BrowserView: View {
     @ObservedObject var rules: RuleListController
     @ObservedObject var settings: ProtectionSettings
     @ObservedObject var gestureSettings: PlayerGestureSettings
+    @ObservedObject var playback: PlaybackPreferences
     @StateObject private var page = PageState()
     @State private var showingSettings = false
     @State private var loadedDuringRulePreparation = false
@@ -66,7 +67,7 @@ struct BrowserView: View {
         }
         .sheet(isPresented: $showingSettings) {
             SettingsView(model: model, rules: rules, settings: settings,
-                         gestureSettings: gestureSettings,
+                         gestureSettings: gestureSettings, playback: playback,
                          currentHost: page.host.isEmpty ? url.host() : page.host,
                          // Rules apply at navigation time, so a level change
                          // leaves the page in front of the user exactly as it

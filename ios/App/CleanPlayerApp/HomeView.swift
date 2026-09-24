@@ -8,6 +8,7 @@ struct HomeView: View {
     @ObservedObject var rules: RuleListController
     @ObservedObject var settings: ProtectionSettings
     @ObservedObject var gestureSettings: PlayerGestureSettings
+    @ObservedObject var playback: PlaybackPreferences
     @FocusState private var searchFocused: Bool
     @State private var showingSettings = false
     /// The browser entry is a button, not the first thing on screen: this app
@@ -93,7 +94,7 @@ struct HomeView: View {
                 // Nothing to reload: the home screen has no web view. The
                 // empty closure is the statement, not an omission.
                 SettingsView(model: model, rules: rules, settings: settings,
-                             gestureSettings: gestureSettings,
+                             gestureSettings: gestureSettings, playback: playback,
                              onProtectionChanged: {})
             }
             .sheet(isPresented: $addingServer) { AddServerSheet(servers: servers) }
@@ -141,7 +142,8 @@ struct HomeView: View {
             }
             .fullScreenCover(item: $playing) { video in
                 LocalPlayerView(video: video, onClose: { playing = nil },
-                                gestureSettings: gestureSettings) { position, duration in
+                                gestureSettings: gestureSettings,
+                                subtitleStyle: playback.subtitles) { position, duration in
                     guard let fingerprint = video.fingerprint else { return }
                     library.save(fingerprint: fingerprint, sourceKind: video.sourceKind,
                                  displayName: video.displayName,
@@ -201,7 +203,8 @@ struct HomeView: View {
                 ForEach(servers.servers) { server in
                     NavigationLink {
                         ServerHomeView(servers: servers, server: server,
-                                       rules: rules, gestureSettings: gestureSettings)
+                                       rules: rules, gestureSettings: gestureSettings,
+                                       preferences: playback)
                     } label: {
                         HStack(spacing: 12) {
                             Image(systemName: "server.rack")

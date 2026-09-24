@@ -33,7 +33,15 @@ struct LocalVideo: Identifiable {
 /// would sip less battery on MP4. Split by format only if that bites.
 @MainActor
 final class LocalPlayerModel: NSObject, ObservableObject, @preconcurrency VLCMediaPlayerDelegate {
-    let player = VLCMediaPlayer()
+    init(subtitleStyle: SubtitleStyle = SubtitleStyle()) {
+        self.subtitleStyle = subtitleStyle
+        player = VLCMediaPlayer(options: subtitleStyle.playerOptions)
+        super.init()
+    }
+
+    /// Built with the subtitle style, because colour and the background band
+    /// are only read from the PLAYER's options — see SubtitleStyle.
+    let player: VLCMediaPlayer
 
     @Published var isPlaying = false
     @Published var position: Float = 0          // 0…1, for the scrubber
@@ -61,11 +69,17 @@ final class LocalPlayerModel: NSObject, ObservableObject, @preconcurrency VLCMed
     private let interruptions = AudioInterruptions()
     private var wasPlayingBeforeInterruption = false
 
+    /// How subtitles should look. Applied as media options, because VLCKit
+    /// has no API for it — see SubtitleStyle.
+    private let subtitleStyle: SubtitleStyle
+
     func start(url: URL, resumeMs: Int = 0) {
         pendingResumeMs = resumeMs
         didResume = resumeMs <= 0
         player.delegate = self
-        player.media = VLCMedia(url: url)
+        let media = VLCMedia(url: url)
+        for option in subtitleStyle.mediaOptions { media.addOption(option) }
+        player.media = media
         player.play()
         // A call, an alarm, or headphones leaving. iOS pauses the audio for
         // the first two and says nothing; the third must always pause.
@@ -100,6 +114,26 @@ final class LocalPlayerModel: NSObject, ObservableObject, @preconcurrency VLCMed
 
     func selectSubtitle(_ id: Int32) {
         player.currentVideoSubTitleIndex = id
+    }
+
+    /// A subtitle file the user picked, alongside whatever the video carries.
+    /// `enforce` selects it immediately — someone who just chose a file means
+    /// to see it, not to go hunting in the menu for it.
+    @discardableResult
+    func addSubtitleFile(_ url: URL) -> Bool {
+        player.addPlaybackSlave(url, type: .subtitle, enforce: true) == 0
+    }
+
+    /// Nudge subtitles that run ahead of or behind the audio. VLC counts in
+    /// microseconds; this takes seconds, which is what a person adjusts in.
+    var subtitleDelay: Double {
+        get { Double(player.currentVideoSubTitleDelay) / 1_000_000 }
+        set { player.currentVideoSubTitleDelay = Int(newValue * 1_000_000) }
+    }
+
+    var audioDelay: Double {
+        get { Double(player.currentAudioPlaybackDelay) / 1_000_000 }
+        set { player.currentAudioPlaybackDelay = Int(newValue * 1_000_000) }
     }
 
     func selectAudio(_ id: Int32) {
@@ -268,7 +302,20 @@ struct LocalPlayerView: View {
     /// (positionMs, durationMs) at each of the plan's save points.
     var onProgress: (Int, Int) -> Void = { _, _ in }
 
-    @StateObject private var model = LocalPlayerModel()
+    @StateObject private var model: LocalPlayerModel
+
+    init(video: LocalVideo, onClose: @escaping () -> Void,
+         gestureSettings: PlayerGestureSettings,
+         subtitleStyle: SubtitleStyle = SubtitleStyle(),
+         onProgress: @escaping (Int, Int) -> Void = { _, _ in }) {
+        self.video = video
+        self.onClose = onClose
+        self.gestureSettings = gestureSettings
+        self.onProgress = onProgress
+        // The style is fixed when the player is built, which is here — see
+        // SubtitleStyle for why it cannot be changed on a running one.
+        _model = StateObject(wrappedValue: LocalPlayerModel(subtitleStyle: subtitleStyle))
+    }
     @State private var controlsVisible = true
     @State private var hideTask: Task<Void, Never>?
 

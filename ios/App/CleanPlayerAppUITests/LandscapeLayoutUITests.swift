@@ -46,7 +46,11 @@ final class LandscapeLayoutUITests: XCTestCase {
         // Add sheet on CI, where no server is signed in — and then failed for
         // the wrong reason. Skips rather than fails when there is none: this
         // asserts layout, not sign-in.
-        let server = app.descendants(matching: .any)["server.row"]
+        // `.firstMatch`: an install with more than one server signed in has
+        // more than one row carrying this identifier, and any of them will do
+        // — this asserts layout, not which server.
+        let server = app.descendants(matching: .any)
+            .matching(identifier: "server.row").firstMatch
         try XCTSkipUnless(server.waitForExistence(timeout: 5),
                           "no server signed in on this simulator")
         server.tap()

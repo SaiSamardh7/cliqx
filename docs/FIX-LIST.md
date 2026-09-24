@@ -266,7 +266,7 @@ browser group (S2-14 onwards).
 - [ ] **S2-37 VLC keeps decoding video in the background.**
   *Do:* on `didEnterBackground`, `player.drawable = nil` (audio continues);
   restore on foreground.
-- [ ] **S2-38 External subtitle import.** *Do:* `fileImporter` for
+- [x] **S2-38 External subtitle import.** *Do:* `fileImporter` for
   `.srt/.vtt/.ass`; `player.addPlaybackSlave(_:type:enforce:)`.
 - [ ] **S2-39 Photos temp copies are never deleted.**
   [LocalMedia.swift:223](../ios/App/CleanPlayerApp/LocalMedia.swift:223).

@@ -98,6 +98,7 @@ struct ServerBrowserView: View {
     let parent: JellyfinItem
     @ObservedObject var rules: RuleListController
     @ObservedObject var gestureSettings: PlayerGestureSettings
+    @ObservedObject var preferences: PlaybackPreferences
 
     @State private var items: [JellyfinItem]?
     @State private var error: String?
@@ -126,7 +127,8 @@ struct ServerBrowserView: View {
         .task(id: parent.id) { await load() }
         .refreshable { await load() }
         .serverPlayer(playback, server: server, servers: servers, rules: rules,
-                      gestureSettings: gestureSettings) { Task { await load() } }
+                      gestureSettings: gestureSettings,
+                      subtitleStyle: preferences.subtitles) { Task { await load() } }
     }
 
     private func load() async {
@@ -155,7 +157,8 @@ struct ServerBrowserView: View {
                         } else {
                             NavigationLink {
                                 ServerBrowserView(servers: servers, server: server, parent: item,
-                                                  rules: rules, gestureSettings: gestureSettings)
+                                                  rules: rules, gestureSettings: gestureSettings,
+                                                  preferences: preferences)
                             } label: { PosterCard(server: server, item: item, width: width) }
                                 .buttonStyle(.plain)
                         }
