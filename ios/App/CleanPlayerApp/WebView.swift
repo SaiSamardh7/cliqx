@@ -58,6 +58,15 @@ final class PageState: ObservableObject {
     /// Per-video level. 100 is normal; 101...200 is software amplification.
     @Published var volumePercent = 100
     @Published var mediaVolumeAvailable = false
+    /// A manifest recovered from this page that the app's own player could take
+    /// over, or nil when there is nothing to hand off. Non-nil is what offers
+    /// the user a player that actually owns its audio.
+    @Published var handoffStream: URL?
+    /// Whether the app's own player is on screen in front of this page.
+    @Published var isHandingOff = false
+    /// Where the page had got to when the handoff started, so the app's player
+    /// picks up there rather than at the beginning.
+    var handoffStartAt: Double = 0
     @Published var textTracks: [TextTrack] = []
     @Published var pipAvailable = false
     /// Decoded frame height — the only quality figure available from outside
@@ -175,6 +184,8 @@ final class PageState: ObservableObject {
         var setOverlayBlocking: (Bool) -> Void = { _ in }
         var openBlockedRequest: (URLRequest) -> Void = { _ in }
         var retryFailedNavigation: () -> Void = {}
+        var playInAppPlayer: () -> Void = {}
+        var returnFromAppPlayer: (Double) -> Void = { _ in }
     }
 
     func goBack() { webView?.goBack() }
@@ -262,6 +273,12 @@ struct WebView: UIViewRepresentable {
             },
             retryFailedNavigation: { [weak coordinator = context.coordinator] in
                 coordinator?.retryFailedNavigation()
+            },
+            playInAppPlayer: { [weak coordinator = context.coordinator] in
+                coordinator?.handOffToAppPlayer()
+            },
+            returnFromAppPlayer: { [weak coordinator = context.coordinator] reached in
+                coordinator?.returnFromAppPlayer(reached: reached)
             }
         )
 
@@ -501,6 +518,7 @@ struct WebView: UIViewRepresentable {
             releaseHostPage()
             page.isTheater = false
             page.mediaVolumeAvailable = false
+            page.handoffStream = nil
             // Nothing is playing now, so give the session back: .playback
             // interrupted whatever else was making sound, and only this ends
             // the interruption.
@@ -923,6 +941,59 @@ struct WebView: UIViewRepresentable {
             }
         }
 
+        /// Hands the recovered stream to the app's own player.
+        ///
+        /// The page keeps its video but is paused and muted first. It is still
+        /// loaded underneath, and two copies of the same stream playing at once
+        /// — one of them inaudible but still fetching — is both confusing and
+        /// expensive on a phone.
+        func handOffToAppPlayer() {
+            guard page.handoffStream != nil else { return }
+            callPlayer("setMuted(true)")
+            if page.isPlaying { callPlayer("togglePlay()") }
+            page.handoffStartAt = page.currentTime
+            page.isHandingOff = true
+        }
+
+        /// Puts the page back where the app's player got to, so returning to
+        /// the site does not start the episode again.
+        func returnFromAppPlayer(reached seconds: Double) {
+            page.isHandingOff = false
+            callPlayer("setMuted(false)")
+            guard seconds > 1 else { return }
+            callPlayer("seek(\(seconds))")
+        }
+
+        /// Looks for a manifest the app's own player could take over.
+        ///
+        /// Asked of the frame holding the video, because that is the frame that
+        /// fetched the manifest and therefore the only one whose resource
+        /// timing has it. An MSE stream's segment URLs never reach the DOM, but
+        /// the manifest is an ordinary network request, which is why this works
+        /// on sites where nothing is readable from the `<video>` element.
+        ///
+        /// Page-supplied, so it is re-validated here: https only, and a real
+        /// URL. It is handed to VLC, not navigated to, but it is still a URL
+        /// this app learned from a hostile document.
+        private func refreshHandoffStream() {
+            let js = "JSON.stringify(window.__cp ? window.__cp.streamCandidates() : [])"
+            page.webView?.evaluateJavaScript(js, in: theaterFrame,
+                                             in: BrowserSetup.world) { [weak self] result in
+                guard let self else { return }
+                guard case .success(let value) = result,
+                      let json = value as? String,
+                      let data = json.data(using: .utf8),
+                      let urls = try? JSONDecoder().decode([String].self, from: data)
+                else {
+                    self.page.handoffStream = nil
+                    return
+                }
+                self.page.handoffStream = urls.lazy
+                    .compactMap(URL.init(string:))
+                    .first { $0.scheme?.lowercased() == "https" && $0.host() != nil }
+            }
+        }
+
         /// The full episode list, for the player's episode picker. Asked of the
         /// MAIN frame: the links live in the site's page, never in the player
         /// frame. Every entry is re-validated against the current host before
@@ -1280,6 +1351,7 @@ struct WebView: UIViewRepresentable {
             page.blockedExternal = nil
             page.isTheater = false
             page.mediaVolumeAvailable = false
+            page.handoffStream = nil
             page.mediaError = nil
             // Not simply `false`: goToEpisode arms the resume and starts the
             // load, so this fires with the curtain already up. Deriving it from
@@ -1598,6 +1670,7 @@ struct WebView: UIViewRepresentable {
                 page.playbackEnded = false
                 page.airplayAvailable = airplay
                 page.pipAvailable = pip
+                refreshHandoffStream()
                 if let webView = page.webView { refreshEpisodes(webView) }
 
                 if let url = page.webView?.url { beginWatching(url) }
@@ -1626,6 +1699,7 @@ struct WebView: UIViewRepresentable {
                 releaseHostPage()
                 page.isTheater = false
                 page.mediaVolumeAvailable = false
+                page.handoffStream = nil
                 stopWatching()
             // The agent gave up finding a video to resume into. Only the frame
             // that was actually asked reports this, so the curtain comes down
@@ -1705,6 +1779,10 @@ struct WebView: UIViewRepresentable {
                     }
                 }
             case .video(let info):
+                // Asked again here because this arrives with loadedmetadata, by
+                // which point the player has actually fetched its manifest. At
+                // theater time it often has not, and resource timing is empty.
+                if page.handoffStream == nil { refreshHandoffStream() }
                 page.videoHeight = info.height
                 page.objectFit = info.fit
                 page.sources = info.sources.map { source in

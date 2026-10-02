@@ -34,6 +34,14 @@ struct PlayerOverlay: View {
     /// dim for everything the user did afterwards.
     @State private var brightnessOnEntry: CGFloat?
     @State private var showingBoostWarning = false
+    @State private var showingDeviceVolume = false
+    /// What the brightness slider shows.
+    ///
+    /// Held here rather than read from `UIScreen` at render time, because
+    /// `UIScreen.main.brightness` is a plain property with nothing to observe:
+    /// setting it gives SwiftUI no reason to redraw, so the track stayed where
+    /// it was while the screen changed underneath it.
+    @State private var brightnessLevel = Double(UIScreen.main.brightness)
     /// Whether the rotate button narrowed the app's supported orientations, so
     /// exiting knows whether it has anything to put back, and what the
     /// interface was showing before it did.
@@ -65,6 +73,15 @@ struct PlayerOverlay: View {
                 levelHUDs
             }
 
+            // Brightness left, volume right, matching the swipe zones they
+            // duplicate. Present with the rest of the chrome, because a
+            // control you have to know a gesture for is one most people never
+            // find — and on a web page the volume swipe cannot work at all.
+            if chrome.areControlsVisible, !chrome.isLocked,
+               gestureSettings.brightnessAndVolume, gestureBrightnessPercent == nil {
+                edgeSliders
+            }
+
             if let remaining = chrome.countdown, let next = page.nextEpisode,
                page.nextEpisodeIsEpisodic {
                 upNextCard(remaining: remaining, next: next)
@@ -78,6 +95,7 @@ struct PlayerOverlay: View {
         .animation(.easeInOut(duration: 0.18), value: chrome.isLocked)
         .onAppear {
             brightnessOnEntry = UIScreen.main.brightness
+            brightnessLevel = Double(UIScreen.main.brightness)
             // The three things the chrome initiates on its own. Everything
             // else is a button, and goes straight to `page.actions`.
             chrome.onAdvance = {
@@ -129,6 +147,13 @@ struct PlayerOverlay: View {
                  + "device volume. On headphones this gets loud quickly — turn "
                  + "the hardware volume down before raising this.")
         }
+        // A sheet, not a menu row: MPVolumeView is a real UIKit control the
+        // user drags, and a Menu cannot host one.
+        .sheet(isPresented: $showingDeviceVolume) {
+            DeviceVolumeRow()
+                .presentationDetents([.height(170)])
+                .presentationBackground(.thinMaterial)
+        }
         .alert("Video can't be sent to a TV from this site",
                isPresented: $showingAirPlayHelp) {
             Button("OK", role: .cancel) { }
@@ -173,10 +198,18 @@ struct PlayerOverlay: View {
         page.airplayAvailable && page.airplayCanSendVideo
     }
 
+    /// Shared by the menu and the vertical drag. They used to decide
+    /// separately, so a drag could amplify past a ceiling the menu was
+    /// refusing to offer — routing the element through Web Audio and taking
+    /// AirPlay's video with it, which is the exact thing the ceiling exists to
+    /// prevent.
+    private var volumeCeiling: Int {
+        PlayerVolume.ceiling(current: page.volumePercent,
+                             airplayCouldSendVideo: boostWithheldForAirPlay)
+    }
+
     private var volumeLevels: [Int] {
-        boostWithheldForAirPlay
-            ? [0, 25, 50, 75, 100]
-            : [0, 25, 50, 75, 100, 125, 150, 175, 200]
+        PlayerVolume.levels(upTo: volumeCeiling)
     }
 
     // MARK: Tap and double-tap
@@ -232,6 +265,54 @@ struct PlayerOverlay: View {
         chrome.flashSeek(seconds)
     }
 
+    // MARK: Edge sliders
+
+    /// The pair that sits in the margins. Two different mechanisms behind one
+    /// arrangement: brightness is the app's to set, and on a web page device
+    /// volume is not — see `VerticalSystemVolumeSlider` for why that one looks
+    /// like the system control, because it is one.
+    private var edgeSliders: some View {
+        HStack {
+            PlayerEdgeSlider(
+                symbol: "sun.max.fill",
+                fraction: brightnessLevel,
+                accent: brightnessLevel >= 0.99 ? .red : .white,
+                label: "Brightness"
+            ) { value in
+                brightnessLevel = value
+                UIScreen.main.brightness = CGFloat(value)
+                lastBrightnessSet = CGFloat(value)
+                chrome.interacted()
+            }
+
+            Spacer(minLength: 0)
+
+            if page.mediaVolumeAvailable {
+                // The app decodes this one, so the level is ours to set and
+                // the slider can be the same slider.
+                PlayerEdgeSlider(
+                    symbol: page.volumePercent > 100
+                        ? "speaker.wave.3.fill" : "speaker.wave.2.fill",
+                    fraction: Double(page.volumePercent) / Double(volumeCeiling),
+                    accent: page.volumePercent > 100 ? .red : .white,
+                    label: "Volume"
+                ) { value in
+                    let level = Int((value * Double(volumeCeiling)).rounded())
+                    if level > 100, !gestureSettings.hasSeenBoostWarning {
+                        gestureSettings.hasSeenBoostWarning = true
+                        showingBoostWarning = true
+                    }
+                    page.actions.setVolume(PlayerVolume.clamp(level, to: volumeCeiling))
+                    chrome.interacted()
+                }
+            } else {
+                VerticalSystemVolumeSlider()
+            }
+        }
+        .padding(.horizontal, 10)
+        .transition(.opacity)
+    }
+
     // MARK: Full-screen gestures
 
     private var playerDragGesture: some Gesture {
@@ -262,15 +343,30 @@ struct PlayerOverlay: View {
                     let brightness = min(max(dragStartBrightness + change, 0), 1)
                     UIScreen.main.brightness = brightness
                     lastBrightnessSet = brightness
+                    brightnessLevel = Double(brightness)
                     gestureBrightnessPercent = Int((brightness * 100).rounded())
                     gestureVolumePercent = page.mediaVolumeAvailable
                         ? page.volumePercent : nil
                 case .volume:
-                    guard gestureSettings.brightnessAndVolume,
-                          page.mediaVolumeAvailable else { return }
+                    guard gestureSettings.brightnessAndVolume else { return }
+                    // Where the app cannot set the level itself, the swipe
+                    // brings the controls up so the device slider in the right
+                    // margin is to hand, and stops there.
+                    //
+                    // It used to open that slider in a sheet, which put a panel
+                    // over the picture every time a thumb strayed down the
+                    // right-hand side — worst of all in landscape, where the
+                    // sheet covers the film. A gesture is not consent to be
+                    // interrupted.
+                    guard page.mediaVolumeAvailable else {
+                        chrome.interacted()
+                        return
+                    }
                     let change = Int((-value.translation.height
                                       / max(size.height, 1) * 200).rounded())
-                    let volume = min(max(dragStartVolume + change, 0), 200)
+                    // The menu's ceiling, not a second opinion.
+                    let volume = PlayerVolume.clamp(dragStartVolume + change,
+                                                    to: volumeCeiling)
                     page.actions.setVolume(volume)
                     gestureBrightnessPercent = Int((UIScreen.main.brightness * 100).rounded())
                     gestureVolumePercent = volume
@@ -667,6 +763,44 @@ struct PlayerOverlay: View {
 
     // MARK: Menus
 
+    /// Media gain: the app's own level for a stream it decodes itself.
+    private var mediaGainMenu: some View {
+        Menu {
+            Picker("Volume", selection: Binding(
+                get: { page.volumePercent },
+                set: { level in
+                    // Once, the first time anyone amplifies. Above 100% this is
+                    // software gain on top of whatever the device is already
+                    // doing, and on headphones that is loud.
+                    if level > 100, !gestureSettings.hasSeenBoostWarning {
+                        gestureSettings.hasSeenBoostWarning = true
+                        showingBoostWarning = true
+                    }
+                    page.actions.setVolume(level)
+                }
+            )) {
+                ForEach(volumeLevels, id: \.self) { level in
+                    Text(level > 100 ? "\(level)% Boost" : "\(level)%").tag(level)
+                }
+            }
+            Divider()
+            Button { showingDeviceVolume = true } label: {
+                Label("Device volume\u{2026}", systemImage: "iphone.gen3")
+            }
+            if boostWithheldForAirPlay {
+                Text("Boost is off while AirPlay can send this video")
+            } else {
+                Text("Above 100% may distort loud audio")
+            }
+        } label: {
+            Label("Volume \(page.volumePercent)%",
+                  systemImage: page.volumePercent > 100
+                    ? "speaker.wave.3.fill" : "speaker.wave.2.fill")
+        }
+        .accessibilityHint("Controls this video's audio level")
+    }
+
+
     private var subtitlesMenu: some View {
         Menu {
             if page.textTracks.isEmpty {
@@ -736,44 +870,38 @@ struct PlayerOverlay: View {
 
     private var moreMenu: some View {
         Menu {
-            Menu {
-                Picker("Volume", selection: Binding(
-                    get: { page.volumePercent },
-                    set: { level in
-                        // Once, the first time anyone amplifies. Above 100%
-                        // this is software gain on top of whatever the device
-                        // is already doing, and on headphones that is loud.
-                        if level > 100, !gestureSettings.hasSeenBoostWarning {
-                            gestureSettings.hasSeenBoostWarning = true
-                            showingBoostWarning = true
-                        }
-                        page.actions.setVolume(level)
-                    }
-                )) {
-                    // Boost is withheld while a route could carry the
-                    // picture: amplifying means routing the element through
-                    // Web Audio, and a routed element does not follow AirPlay
-                    // — the television would get silence. The plain levels
-                    // still work, because they do not route anything.
-                    ForEach(volumeLevels, id: \.self) { level in
-                        Text(level > 100 ? "\(level)% Boost" : "\(level)%").tag(level)
-                    }
+            // One Volume control, in one place, that always does something.
+            //
+            // Which mechanism it is depends on who decodes the audio, and the
+            // user should not have to know that. Where the app decodes — the
+            // Cliqx player, a server stream, a local file — it is media gain,
+            // 0 to 200%. Where a web page decodes, iOS gives JavaScript no way
+            // to change volume at all, so it is the device slider instead.
+            //
+            // The previous arrangement hid the row on a web page and put the
+            // device slider behind a differently-named item, which removed the
+            // obvious control exactly when it was the one that worked.
+            if page.mediaVolumeAvailable {
+                mediaGainMenu
+            } else {
+                Button { showingDeviceVolume = true } label: {
+                    Label("Volume", systemImage: "speaker.wave.2.fill")
                 }
-                Divider()
-                if boostWithheldForAirPlay {
-                    Text("Boost is off while AirPlay can send this video")
-                } else {
-                    Text("Above 100% may distort loud audio")
-                }
-            } label: {
-                Label("Volume \(page.volumePercent)%",
-                      systemImage: page.volumePercent > 100
-                        ? "speaker.wave.3.fill" : "speaker.wave.2.fill")
+                .accessibilityHint("Opens the device volume slider, because this "
+                                   + "site's own audio level cannot be changed on iOS")
             }
-            .disabled(!page.mediaVolumeAvailable)
-            .accessibilityHint(page.mediaVolumeAvailable
-                ? "Controls this video's audio level"
-                : "Unavailable for this stream; use the hardware volume buttons")
+
+            // The real answer to a stream whose audio the app cannot touch:
+            // stop letting the site decode it. Offered only when a manifest was
+            // actually recovered, so it is never a button that fails.
+            if page.handoffStream != nil {
+                Divider()
+                Button { page.actions.playInAppPlayer() } label: {
+                    Label("Play in Cliqx player", systemImage: "play.rectangle.on.rectangle")
+                }
+                .accessibilityHint("Plays this stream in the app's own player, "
+                                   + "where volume and speed work fully")
+            }
 
             Divider()
             Button {

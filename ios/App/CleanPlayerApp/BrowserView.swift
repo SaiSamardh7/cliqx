@@ -57,6 +57,23 @@ struct BrowserView: View {
         }
         .background(Color(.systemBackground))
         .animation(.easeInOut(duration: 0.2), value: immersive)
+        // Full screen, over the web view rather than replacing it: the page
+        // stays loaded and paused, so closing the player returns to the site
+        // where it was instead of reloading it.
+        .fullScreenCover(isPresented: $page.isHandingOff) {
+            if let stream = page.handoffStream, let pageURL = page.webView?.url {
+                WebStreamPlayerView(
+                    stream: stream,
+                    pageURL: pageURL,
+                    title: page.title.isEmpty ? host : page.title,
+                    startAt: page.handoffStartAt,
+                    rules: rules,
+                    gestureSettings: gestureSettings,
+                    subtitleStyle: playback.subtitles,
+                    onClose: { reached in page.actions.returnFromAppPlayer(reached) }
+                )
+            }
+        }
         .onAppear {
             loadedDuringRulePreparation = rules.status.isPreparing
         }
