@@ -141,6 +141,27 @@ struct ServerBrowserView: View {
     }
 
     private func grid(_ items: [JellyfinItem]) -> some View {
+        ServerItemGrid(servers: servers, server: server, items: items,
+                       rules: rules, gestureSettings: gestureSettings,
+                       preferences: preferences) { playback.play($0) }
+    }
+}
+
+/// The poster grid, shared by browsing and by search.
+///
+/// Shared rather than copied so a film found by typing its name looks and
+/// behaves exactly like the same film found by drilling down — including the
+/// part that matters: a folder pushes, a playable item plays.
+struct ServerItemGrid: View {
+    @ObservedObject var servers: JellyfinServers
+    let server: JellyfinServer
+    let items: [JellyfinItem]
+    @ObservedObject var rules: RuleListController
+    @ObservedObject var gestureSettings: PlayerGestureSettings
+    @ObservedObject var preferences: PlaybackPreferences
+    let onPlay: (JellyfinItem) -> Void
+
+    var body: some View {
         GeometryReader { geo in
             // Fill the row: as many 2:3 posters as fit at ≥110pt.
             let count = max(2, Int((geo.size.width - 32 + 14) / (110 + 14)))
@@ -150,7 +171,7 @@ struct ServerBrowserView: View {
                           spacing: 18) {
                     ForEach(items) { item in
                         if item.isPlayable {
-                            Button { playback.play(item) } label: {
+                            Button { onPlay(item) } label: {
                                 PosterCard(server: server, item: item, width: width)
                             }
                             .buttonStyle(.plain)

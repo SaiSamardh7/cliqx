@@ -277,6 +277,31 @@ struct JellyfinClient {
         try await get("Items/\(id)", query: ["userId": userID])
     }
 
+    /// Everything on the server matching what was typed.
+    ///
+    /// `Recursive`, because someone searching is not thinking in folders — a
+    /// show three levels down should be found from the home screen. Restricted
+    /// to the things worth opening: a hit on a library or a season folder is a
+    /// place, not something to play, and padding the results with those pushes
+    /// the actual films off the screen.
+    ///
+    /// The term goes in as a query item, so `URLComponents` escapes it — a
+    /// title with an ampersand in it is a search, not a second parameter.
+    func search(userID: String, term: String, limit: Int = 60) async throws -> [JellyfinItem] {
+        let page: Page = try await get("Items", query: [
+            "userId": userID,
+            "searchTerm": term,
+            "Recursive": "true",
+            "IncludeItemTypes": "Movie,Series,Episode",
+            "SortBy": "SortName",
+            "SortOrder": "Ascending",
+            "Limit": String(limit),
+            "Fields": Self.homeFields,
+            "EnableImageTypes": "Primary,Backdrop,Thumb",
+        ])
+        return page.Items
+    }
+
     // MARK: The home rows, same endpoints the web client uses
 
     static let homeFields = "PrimaryImageAspectRatio,Overview,Genres,ProductionYear,Status,EndDate,ChildCount"

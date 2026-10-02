@@ -50,6 +50,16 @@ struct ServerHomeView: View {
     @State private var error: String?
     @StateObject private var playback = ServerPlayback()
 
+    @State private var query = ""
+    @State private var results: [JellyfinItem]?
+    @State private var searchError: String?
+
+    /// Whitespace alone is not a search. Without this, tapping the field and
+    /// hitting space replaces the whole shelf with "No results".
+    private var searchTerm: String {
+        query.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     /// Libraries worth a Recently Added row on a video shelf. Music and
     /// photos have their own shapes and are left to the grid.
     private var videoLibraries: [JellyfinItem] {
@@ -57,6 +67,75 @@ struct ServerHomeView: View {
     }
 
     var body: some View {
+        Group {
+            if searchTerm.isEmpty { shelf } else { searchResults }
+        }
+        .background(Color(.systemGroupedBackground))
+        .navigationTitle(server.name)
+        .navigationBarTitleDisplayMode(.inline)
+        .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always),
+                    prompt: "Films, shows and episodes")
+        // `.task(id:)` cancels the previous run on every keystroke, so the
+        // sleep below is the whole debounce: nothing is sent until typing
+        // pauses, and no stale response can land after a newer one.
+        .task(id: searchTerm) { await runSearch() }
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu {
+                    Text("Signed in as \(server.username)")
+                    Button("Remove server", role: .destructive) { servers.remove(server) }
+                } label: { Image(systemName: "ellipsis.circle") }
+            }
+        }
+        .task { await loadAll() }
+        .serverPlayer(playback, server: server, servers: servers, rules: rules,
+                      gestureSettings: gestureSettings,
+                      subtitleStyle: preferences.subtitles) { Task { await loadRows() } }
+    }
+
+    // MARK: Search
+
+    @ViewBuilder
+    private var searchResults: some View {
+        if let searchError {
+            ContentUnavailableView {
+                Label("Couldn't search \(server.name)", systemImage: "wifi.exclamationmark")
+            } description: { Text(searchError) }
+        } else if let results {
+            if results.isEmpty {
+                ContentUnavailableView.search(text: searchTerm)
+            } else {
+                ServerItemGrid(servers: servers, server: server, items: results,
+                               rules: rules, gestureSettings: gestureSettings,
+                               preferences: preferences) { play($0) }
+            }
+        } else {
+            ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    private func runSearch() async {
+        let term = searchTerm
+        guard !term.isEmpty else {
+            results = nil
+            searchError = nil
+            return
+        }
+        try? await Task.sleep(for: .milliseconds(300))
+        guard !Task.isCancelled else { return }
+        do {
+            let found = try await servers.client(for: server)
+                .search(userID: server.userID, term: term)
+            guard !Task.isCancelled else { return }
+            results = found
+            searchError = nil
+        } catch {
+            guard !Task.isCancelled else { return }
+            searchError = error.localizedDescription
+        }
+    }
+
+    private var shelf: some View {
         ScrollView {
             if let error {
                 ContentUnavailableView {
@@ -92,22 +171,7 @@ struct ServerHomeView: View {
                 .padding(.vertical, 12)
             }
         }
-        .background(Color(.systemGroupedBackground))
-        .navigationTitle(server.name)
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                Menu {
-                    Text("Signed in as \(server.username)")
-                    Button("Remove server", role: .destructive) { servers.remove(server) }
-                } label: { Image(systemName: "ellipsis.circle") }
-            }
-        }
-        .task { await loadAll() }
         .refreshable { await loadAll() }
-        .serverPlayer(playback, server: server, servers: servers, rules: rules,
-                      gestureSettings: gestureSettings,
-                      subtitleStyle: preferences.subtitles) { Task { await loadRows() } }
     }
 
     // MARK: Loading
