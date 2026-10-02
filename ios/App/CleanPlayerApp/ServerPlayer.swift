@@ -45,6 +45,12 @@ final class ServerEngine: NSObject, ObservableObject, @preconcurrency VLCMediaPl
         page.isTheater = true
         page.host = server.name
         page.overlayBlocking = false
+        // VLC decodes this stream, so the app owns its audio outright: no Web
+        // Audio, no CORS, no routing to fail. The flag exists because a web
+        // page's volume often cannot be touched, and it defaults to false —
+        // which left the menu greyed out and the swipe dead on a player that
+        // could always have done it.
+        page.mediaVolumeAvailable = true
         page.actions = PageState.Actions(
             exitTheater: { [weak self] in self?.close() },
             togglePlay: { [weak self] in self?.togglePlay() },

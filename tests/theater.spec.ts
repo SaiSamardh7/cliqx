@@ -733,56 +733,10 @@ test.describe('playback control', () => {
       { v: 1, type: 'volume', percent: 100, boosted: false, available: false }));
   });
 
-  test('all website volume levels use the primed gain node and cap at 200 percent', async ({ page }) => {
-    await serve(page, PLAYER);
-    await page.evaluate(() => {
-      const gain = { gain: { value: 1 }, connect: () => {} };
-      (window as any).__gain = gain;
-      (window as any).AudioContext = class {
-        destination = {};
-        state = 'running';
-        createMediaElementSource() { return { connect: () => {} }; }
-        createGain() { return gain; }
-        resume() { return Promise.resolve(); }
-      };
-      const video = document.querySelector('video')!;
-      video.src = `${location.origin}/episode.mp4`;
-      __cp.enterTheater(video);
-    });
-
-    expect(await page.evaluate(() => __cp.setVolume(50))).toBe(true);
-    expect(await page.evaluate(() => (window as any).__gain.gain.value)).toBe(0.5);
-    expect(await posted(page)).toContainEqual(expect.objectContaining(
-      { v: 1, type: 'volume', percent: 50, boosted: false, available: true }));
-
-    expect(await page.evaluate(() => __cp.setVolume(250))).toBe(true);
-    expect(await page.evaluate(() => (window as any).__gain.gain.value)).toBe(2);
-    expect(await posted(page)).toContainEqual(expect.objectContaining(
-      { v: 1, type: 'volume', percent: 200, boosted: true, available: true }));
-  });
-
-  test('does not claim boost when WebKit rejects audio activation', async ({ page }) => {
-    await serve(page, PLAYER);
-    await page.evaluate(() => {
-      const gain = { gain: { value: 1 }, connect: () => {} };
-      (window as any).__gain = gain;
-      (window as any).AudioContext = class {
-        destination = {};
-        state = 'suspended';
-        createMediaElementSource() { return { connect: () => {} }; }
-        createGain() { return gain; }
-        resume() { return Promise.reject(new Error('activation denied')); }
-      };
-      const video = document.querySelector('video')!;
-      video.src = `${location.origin}/episode.mp4`;
-      __cp.enterTheater(video);
-    });
-
-    expect(await page.evaluate(() => __cp.setVolume(175))).toBe(true);
-    await expect.poll(() => posted(page)).toContainEqual(expect.objectContaining(
-      { v: 1, type: 'volume', percent: 100, boosted: false, available: false }));
-    expect(await page.evaluate(() => (window as any).__gain.gain.value)).toBe(1);
-  });
+  // The two tests that lived here drove a fake AudioContext to prove gain was
+  // applied and that a suspended context was not claimed as success. Both
+  // described a path that has been removed: see the 'website volume' block for
+  // what the app does instead, and why.
 });
 
 test.describe('frame announcement', () => {
@@ -2567,12 +2521,45 @@ test.describe('interstitial blocking', () => {
   });
 });
 
-test.describe('volume routing and AirPlay', () => {
-  // `createMediaElementSource` is irreversible for the element's lifetime, and
-  // an element routed through Web Audio does not follow AirPlay: the
-  // television gets silence. Theater used to build the graph on every entry,
-  // so the volume slider nobody touched broke the AirPlay button next to it.
-  async function stagedWithAudioSpy(page: Page) {
+test.describe('website volume', () => {
+  // There is no website volume on iOS, and the app's job is to say so rather
+  // than to move a control that changes nothing. Measured on an iPhone:
+  // HTMLMediaElement.volume is ignored, and a Web Audio gain node does not
+  // reach the sound. The routing that used to live here is gone; what replaces
+  // it is the device slider and the Cliqx player, neither of which is the
+  // page's to break.
+  async function staged(page: Page) {
+    await serve(page, PLAYER);
+    await page.evaluate(() => {
+      const v = document.querySelector('video')! as any;
+      Object.defineProperty(v, 'currentSrc',
+        { get: () => location.origin + '/clip.mp4', configurable: true });
+      v.play = () => Promise.resolve();
+    });
+    await watchClean(page).click();
+  }
+
+  const lastVolume = async (page: Page) =>
+    (await posted(page)).filter((m: any) => m.type === 'volume').slice(-1)[0];
+
+  test('reports the control as unavailable, whatever the source',
+    async ({ page }) => {
+      await staged(page);
+      expect(await lastVolume(page))
+        .toEqual(expect.objectContaining({ percent: 100, available: false }));
+    });
+
+  test('refuses a level rather than claiming one it cannot deliver',
+    async ({ page }) => {
+      await staged(page);
+      expect(await page.evaluate(() => __cp.setVolume(50))).toBe(false);
+      expect(await lastVolume(page))
+        .toEqual(expect.objectContaining({ percent: 100, available: false }));
+    });
+
+  // The element is left alone. Routing it through a graph was irreversible for
+  // its lifetime and cost AirPlay its audio; nothing here touches it any more.
+  test('never routes the element through Web Audio', async ({ page }) => {
     await serve(page, PLAYER);
     await page.evaluate(() => {
       (window as any).__routed = 0;
@@ -2582,53 +2569,13 @@ test.describe('volume routing and AirPlay', () => {
         (window as any).__routed++;
         return original.apply(this, args);
       };
-      const v = document.querySelector('video')! as any;
-      v.play = () => Promise.resolve();
+      (document.querySelector('video')! as any).play = () => Promise.resolve();
     });
     await watchClean(page).click();
-  }
-
-  const routed = (page: Page) => page.evaluate(() => (window as any).__routed as number);
-
-  test('entering theater does not route the element through Web Audio',
-    async ({ page }) => {
-      await stagedWithAudioSpy(page);
-      expect(await routed(page)).toBe(0);
-    });
-
-  test('setting 100% leaves the element unrouted and reports it as available',
-    async ({ page }) => {
-      await stagedWithAudioSpy(page);
-      await page.evaluate(() => __cp.setVolume(100));
-      expect(await routed(page)).toBe(0);
-      expect((await posted(page)).filter((m: any) => m.type === 'volume').slice(-1)[0])
-        .toEqual(expect.objectContaining({ percent: 100, boosted: false, available: true }));
-    });
-
-  test('asking for a different level routes once and only once',
-    async ({ page }) => {
-      await stagedWithAudioSpy(page);
-      await page.evaluate(() => __cp.setVolume(50));
-      expect(await routed(page)).toBe(1);
-      await page.evaluate(() => __cp.setVolume(150));
-      await page.evaluate(() => __cp.setVolume(75));
-      expect(await routed(page)).toBe(1);
-    });
-
-  test('a cross-origin stream without CORS says the control is unavailable',
-    async ({ page }) => {
-      await serve(page, PLAYER);
-      await page.evaluate(() => {
-        const v = document.querySelector('video')! as any;
-        Object.defineProperty(v, 'currentSrc',
-          { get: () => 'https://elsewhere.test/a.mp4', configurable: true });
-        v.play = () => Promise.resolve();
-      });
-      await watchClean(page).click();
-      await page.evaluate(() => __cp.setVolume(150));
-      expect((await posted(page)).filter((m: any) => m.type === 'volume').slice(-1)[0])
-        .toEqual(expect.objectContaining({ available: false }));
-    });
+    await page.evaluate(() => __cp.setVolume(50));
+    await page.evaluate(() => __cp.setVolume(175));
+    expect(await page.evaluate(() => (window as any).__routed)).toBe(0);
+  });
 });
 
 test.describe('what counts as a next episode', () => {

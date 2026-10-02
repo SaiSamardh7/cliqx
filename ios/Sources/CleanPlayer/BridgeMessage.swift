@@ -217,7 +217,13 @@ public enum BridgeMessage: Codable, Equatable, Sendable {
                     try values.decode(Int.self, forKey: .percent),
                     in: 0...200, field: "percent"),
                 boosted: try values.decode(Bool.self, forKey: .boosted),
-                available: try values.decode(Bool.self, forKey: .available))
+                // Absent means "not stated", not "unavailable". `available`
+                // was added to this message inside schema v1 without a version
+                // bump, so an agent build that predates it would otherwise make
+                // every volume message fail to decode and vanish — and with a
+                // warm standby there is a second web view that can be running
+                // exactly that.
+                available: try values.decodeIfPresent(Bool.self, forKey: .available) ?? true)
         case "time":
             self = .time(
                 at: try Self.validatedNumber(

@@ -537,98 +537,40 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     return true;
   }
 
-  // iOS exposes device output volume as read-only and ignores writes to
-  // HTMLMediaElement.volume, so the in-app level goes through Web Audio when
-  // the stream is CORS-safe. Hardware buttons continue to own the device.
+  // --- Website volume: there is none, and the app says so ------------------
   //
-  // In TWO steps, deliberately. `createMediaElementSource` is irreversible for
-  // the element's lifetime, and an element routed through Web Audio does not
-  // follow AirPlay: the TV gets silence. Doing it on every theater entry meant
-  // the volume slider nobody touched broke the AirPlay button next to it.
+  // Measured on an iPhone, not assumed. Three things are true at once on iOS:
   //
-  // The AudioContext still has to be built during the entry gesture —
-  // watchClean runs in the site's real click, while a later native
-  // evaluateJavaScript call has no WebKit user activation and leaves a context
-  // suspended for good. So: context eagerly, routing only when a level other
-  // than 100 is actually asked for.
-  const boostedAudio = new WeakMap();
-
-  function canRouteAudio(video) {
-    const sourceURL = video.currentSrc || video.src || '';
-    if (sourceURL.startsWith('blob:') || sourceURL.startsWith('data:')) return true;
-    try {
-      const parsed = new URL(sourceURL, location.href);
-      return parsed.origin === location.origin || !!video.crossOrigin;
-    } catch (_) {
-      return false;
-    }
+  //   1. `HTMLMediaElement.volume` is ignored. Writing 0.25 reads back 1, in
+  //      this app and in Safari alike.
+  //   2. `AVAudioSession.outputVolume` has no setter, and the only supported
+  //      way to offer device volume is to SHOW an `MPVolumeView` for the user
+  //      to drag. The app does that — see SystemVolumeSlider.
+  //   3. A Web Audio gain node does not reach the sound. The app used to route
+  //      the element through one; the control moved and nothing changed, on
+  //      device, on ordinary sites.
+  //
+  // So a web page on iOS has no supported way to change its own volume, and
+  // every arrangement of these three that this project has tried has been a
+  // way of not saying that. `MPVolumeView`'s private slider said it by using
+  // an undocumented view hierarchy; Web Audio said it by moving a control that
+  // was outside the audible path; both reported success they had not had.
+  //
+  // What replaces it is not a cleverer workaround. It is two controls that
+  // genuinely work: the device slider, which never fails, and the Cliqx
+  // player, which decodes the stream itself and therefore owns its audio
+  // outright — volume, boost and all. See WebStreamPlayer.
+  //
+  // `setVolume` stays on the bridge because native calls it on theater entry,
+  // and answers honestly rather than disappearing.
+  function setVolume() {
+    reportVolumeAvailability();
+    return false;
   }
 
-  /// The context alone, built inside the user gesture. No routing yet, so the
-  /// element still plays straight to the device and AirPlay still works.
-  function prepareAudioContext(video) {
-    if (boostedAudio.has(video)) return boostedAudio.get(video);
-    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-    if (!canRouteAudio(video) || !AudioContextClass) return null;
-    try {
-      const chain = { context: new AudioContextClass(), source: null, gain: null };
-      boostedAudio.set(video, chain);
-      return chain;
-    } catch (_) {
-      return null;
-    }
-  }
-
-  /// Route the element through the graph. From here the element's audio
-  /// belongs to Web Audio and AirPlay can no longer carry it, which is why
-  /// nothing calls this until a level other than 100 is requested.
-  function prepareVolume(video) {
-    const chain = prepareAudioContext(video);
-    if (!chain) return null;
-    if (chain.gain) return chain;
-    try {
-      chain.source = chain.context.createMediaElementSource(video);
-      chain.gain = chain.context.createGain();
-      chain.source.connect(chain.gain);
-      chain.gain.connect(chain.context.destination);
-      return chain;
-    } catch (_) {
-      return null;
-    }
-  }
-
-  function setVolume(percent) {
-    if (!staged) return false;
-    const wanted = Math.min(Math.max(Math.round(Number(percent) || 0), 0), 200);
-    // 100 is the element's own level: nothing to route, so the graph is not
-    // built and AirPlay keeps working for anyone who never moves the slider.
-    if (wanted === 100 && !(boostedAudio.get(staged) || {}).gain) {
-      staged.volume = 1;
-      post({ type: 'volume', percent: 100, boosted: false,
-             available: canRouteAudio(staged) });
-      return true;
-    }
-    const chain = prepareVolume(staged);
-    if (!chain) {
-      // Cross-origin streams without CORS cannot be routed through Web Audio.
-      // Say so instead of moving a control that has no effect.
-      post({ type: 'volume', percent: 100, boosted: false, available: false });
-      return false;
-    }
-    staged.volume = 1;
-    chain.gain.gain.value = wanted / 100;
-    Promise.resolve(chain.context.resume()).then(() => {
-      if (chain.context.state && chain.context.state !== 'running') {
-        chain.gain.gain.value = 1;
-        post({ type: 'volume', percent: 100, boosted: false, available: false });
-        return;
-      }
-      post({ type: 'volume', percent: wanted, boosted: wanted > 100, available: true });
-    }).catch(() => {
-      chain.gain.gain.value = 1;
-      post({ type: 'volume', percent: 100, boosted: false, available: false });
-    });
-    return true;
+  function reportVolumeAvailability() {
+    if (!staged) return;
+    post({ type: 'volume', percent: 100, boosted: false, available: false });
   }
 
   /// Only tracks the page exposes as real TextTracks. Sites that paint their
@@ -741,7 +683,11 @@ html[data-cp-unlock], html[data-cp-unlock] body {
   }
 
   function reportVideo() {
-    if (staged) post({ type: 'video', info: videoInfo() });
+    if (!staged) return;
+    post({ type: 'video', info: videoInfo() });
+    // Wired to loadedmetadata, which is where a late `currentSrc` arrives and
+    // the honest answer about routing can change.
+    reportVolumeAvailability();
   }
 
   /// The whole episode list, not just the neighbours, so the player can offer
@@ -856,7 +802,6 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     staged = video;
     reportedProtected = false;
     if (startMuted) video.muted = true;
-    prepareAudioContext(video);
     trackAirPlay(video);
     // Theater hides the page, and the page is where the player's own play
     // button lives. The native bar has to know whether it is showing play or
