@@ -479,7 +479,9 @@ struct LocalPlayerView: View {
                 get: { model.volumePercent },
                 set: { model.setVolume($0); scheduleHide() }
             )) {
-                ForEach([0, 25, 50, 75, 100, 125, 150, 175, 200], id: \.self) { level in
+                // The full range: this player decodes locally and never routes
+                // through Web Audio, so boost costs it no AirPlay.
+                ForEach(PlayerVolume.levels, id: \.self) { level in
                     Text(level > 100 ? "\(level)% Boost" : "\(level)%").tag(level)
                 }
             }

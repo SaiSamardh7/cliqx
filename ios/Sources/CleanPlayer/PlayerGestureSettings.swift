@@ -53,6 +53,34 @@ public enum PlayerDragAction: Equatable {
     case dismiss
 }
 
+/// One definition of how loud the controls may go, because there are two ways
+/// to ask — the menu and the vertical drag — and they disagreed.
+public enum PlayerVolume {
+    public static let levels = [0, 25, 50, 75, 100, 125, 150, 175, 200]
+
+    /// The highest level the controls may offer.
+    ///
+    /// Amplifying past 100% routes the element through Web Audio, and a routed
+    /// element cannot follow AirPlay: the television would get the picture and
+    /// no sound. So while a route could carry the video, boost is withheld.
+    ///
+    /// Except once the video is *already* boosted. That routing has happened
+    /// and is irreversible for the element's lifetime, so there is nothing left
+    /// to protect — and withholding the level it is already playing at would
+    /// leave the menu showing a selection none of its rows carry.
+    public static func ceiling(current: Int, airplayCouldSendVideo: Bool) -> Int {
+        airplayCouldSendVideo && current <= 100 ? 100 : levels.last!
+    }
+
+    public static func levels(upTo ceiling: Int) -> [Int] {
+        levels.filter { $0 <= ceiling }
+    }
+
+    public static func clamp(_ percent: Int, to ceiling: Int) -> Int {
+        min(max(percent, 0), ceiling)
+    }
+}
+
 /// Pure gesture arbitration kept outside SwiftUI so edge cases are testable.
 public enum PlayerGestureClassifier {
     public static func classify(dx: Double, dy: Double,
