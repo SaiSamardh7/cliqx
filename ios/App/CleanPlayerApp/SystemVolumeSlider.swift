@@ -17,6 +17,13 @@ import UIKit
 /// to this slider. Media gain, which the app does own, is separate — see
 /// `PlayerVolume`.
 ///
+/// Its *appearance*, unlike its behaviour, is ours. `setMinimumVolumeSliderImage`,
+/// `setMaximumVolumeSliderImage` and `setVolumeThumbImage` are public API, so
+/// the track is drawn to match `PlayerEdgeSlider` instead of inheriting system
+/// defaults. That matters beyond tidiness: tinting the whole control white left
+/// a white thumb sitting on a white filled track, so at high volume the slider
+/// was a featureless white slab showing neither level nor handle.
+///
 /// It does not render in the Simulator. There is no audio route there to
 /// attach to, so the slider is simply absent; it only shows on a device.
 struct SystemVolumeSlider: UIViewRepresentable {
@@ -25,52 +32,53 @@ struct SystemVolumeSlider: UIViewRepresentable {
         view.showsVolumeSlider = true
         // The route picker lives in the player's top bar already.
         view.showsRouteButton = false
+        view.setMinimumVolumeSliderImage(Self.filledTrack, for: .normal)
+        view.setMaximumVolumeSliderImage(Self.emptyTrack, for: .normal)
         view.setVolumeThumbImage(Self.thumb, for: .normal)
-        view.tintColor = .white
         return view
     }
 
     func updateUIView(_ view: MPVolumeView, context: Context) {}
 
+    /// Matches `PlayerEdgeSlider`: an 8pt capsule, white where filled and 22%
+    /// white where not. Drawn rather than bundled so there is no asset to keep
+    /// in step with the SwiftUI control it has to resemble.
+    private static func track(_ color: UIColor) -> UIImage {
+        let height = 8.0
+        // Wide enough to hold both round caps plus one stretchable column.
+        let width = height + 1
+        let image = UIGraphicsImageRenderer(size: CGSize(width: width, height: height))
+            .image { _ in
+                color.setFill()
+                UIBezierPath(roundedRect: CGRect(x: 0, y: 0, width: width, height: height),
+                             cornerRadius: height / 2).fill()
+            }
+        // Stretch the middle column only, so the caps stay round at any length.
+        let cap = height / 2
+        return image.resizableImage(
+            withCapInsets: UIEdgeInsets(top: 0, left: cap, bottom: 0, right: cap),
+            resizingMode: .stretch)
+    }
+
+    private static let filledTrack = track(.white)
+    private static let emptyTrack = track(UIColor(white: 1, alpha: 0.22))
+
     /// The default thumb is sized for a settings row and looks lost on a dark
-    /// player. Drawn rather than bundled so there is no asset to keep in step.
+    /// player. The ring is not decoration: on a nearly full track the thumb is
+    /// white on white, and without it there is no handle to see or aim at.
     private static let thumb: UIImage = {
         let side = 14.0
+        let inset = 0.75
         return UIGraphicsImageRenderer(size: CGSize(width: side, height: side))
             .image { _ in
+                let circle = UIBezierPath(ovalIn: CGRect(x: inset, y: inset,
+                                                         width: side - inset * 2,
+                                                         height: side - inset * 2))
                 UIColor.white.setFill()
-                UIBezierPath(ovalIn: CGRect(x: 0, y: 0, width: side, height: side)).fill()
+                circle.fill()
+                UIColor(white: 0, alpha: 0.45).setStroke()
+                circle.lineWidth = inset * 2
+                circle.stroke()
             }
     }()
-}
-
-/// The device-volume row offered inside the player.
-///
-/// Always present and always working, whatever the stream is: this is the
-/// iPhone's own volume, so MSE, DRM and cross-origin make no difference to it.
-/// That is the whole point — it is the control that survives everything the
-/// media-gain path cannot do.
-struct DeviceVolumeRow: View {
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Label("Device volume", systemImage: "iphone.gen3")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-            HStack(spacing: 10) {
-                Image(systemName: "speaker.fill")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                SystemVolumeSlider()
-                    .frame(height: 28)
-                Image(systemName: "speaker.wave.3.fill")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-            Text("Same as the buttons on the side of your iPhone.")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-        }
-        .padding(.horizontal, 18)
-        .padding(.vertical, 14)
-    }
 }

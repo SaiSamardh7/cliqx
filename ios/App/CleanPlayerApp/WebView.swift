@@ -964,7 +964,7 @@ struct WebView: UIViewRepresentable {
             callPlayer("seek(\(seconds))")
         }
 
-        /// Looks for a manifest the app's own player could take over.
+        /// Looks for a stream the app's own player could take over.
         ///
         /// Asked of the frame holding the video, because that is the frame that
         /// fetched the manifest and therefore the only one whose resource
@@ -972,11 +972,15 @@ struct WebView: UIViewRepresentable {
         /// the manifest is an ordinary network request, which is why this works
         /// on sites where nothing is readable from the `<video>` element.
         ///
+        /// Where the element does play an ordinary URL, that URL is preferred —
+        /// see `handoffCandidates`. Asking only for manifests meant a site
+        /// serving a plain file offered no handoff, and so no volume control.
+        ///
         /// Page-supplied, so it is re-validated here: https only, and a real
         /// URL. It is handed to VLC, not navigated to, but it is still a URL
         /// this app learned from a hostile document.
         private func refreshHandoffStream() {
-            let js = "JSON.stringify(window.__cp ? window.__cp.streamCandidates() : [])"
+            let js = "JSON.stringify(window.__cp ? window.__cp.handoffCandidates() : [])"
             page.webView?.evaluateJavaScript(js, in: theaterFrame,
                                              in: BrowserSetup.world) { [weak self] result in
                 guard let self else { return }

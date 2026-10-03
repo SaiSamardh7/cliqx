@@ -28,13 +28,25 @@ struct PlayerOverlay: View {
     @State private var dragStartVolume = 100
     @State private var gestureBrightnessPercent: Int?
     @State private var gestureVolumePercent: Int?
+    /// Set when a volume swipe landed on a page whose audio the app cannot
+    /// touch, but whose stream it could take over. An offer, not an action:
+    /// handing off pauses the page and restarts the video in VLC, which is far
+    /// too much to do because a thumb strayed down the right-hand edge.
+    @State private var offeringHandoff = false
+    @State private var offeringHandoffHide: Task<Void, Never>?
+    /// The stream already moved to the Cliqx player automatically.
+    ///
+    /// Without this, returning to the page would hand it straight back and the
+    /// two players would trade the video forever — and a stream VLC cannot
+    /// play would retry on every exit. A *different* stream is a new video and
+    /// a fresh decision, so this holds the URL rather than a flag.
+    @State private var autoHandedOffStream: URL?
     @State private var heldPreviousRate: Double?
     /// The screen brightness before this player touched it, so it can be put
     /// back. Without this, one swipe down during a dark scene left the phone
     /// dim for everything the user did afterwards.
     @State private var brightnessOnEntry: CGFloat?
     @State private var showingBoostWarning = false
-    @State private var showingDeviceVolume = false
     /// What the brightness slider shows.
     ///
     /// Held here rather than read from `UIScreen` at render time, because
@@ -82,6 +94,10 @@ struct PlayerOverlay: View {
                 edgeSliders
             }
 
+            if offeringHandoff {
+                handoffOfferCard
+            }
+
             if let remaining = chrome.countdown, let next = page.nextEpisode,
                page.nextEpisodeIsEpisodic {
                 upNextCard(remaining: remaining, next: next)
@@ -107,12 +123,22 @@ struct PlayerOverlay: View {
         }
         // The chrome's "only auto-hide while playing" needs frames on screen,
         // not merely a play() that has been requested.
+        // The offer is about this page's audio. Once the app owns the level —
+        // the handoff happened — it is answered and should go.
+        .onChange(of: page.mediaVolumeAvailable) { _, available in
+            if available { dismissHandoffOffer() }
+        }
         .onChange(of: page.isPlaying) { _, _ in
             chrome.playbackChanged(isPlaying: isShowingFrames)
+            autoHandOffIfUseful()
         }
         .onChange(of: page.isBuffering) { _, _ in
             chrome.playbackChanged(isPlaying: isShowingFrames)
+            autoHandOffIfUseful()
         }
+        // The manifest is recovered asynchronously, so it usually arrives after
+        // playback has already started.
+        .onChange(of: page.handoffStream) { _, _ in autoHandOffIfUseful() }
         .onChange(of: page.playbackEnded) { _, ended in
             guard ended else { return }
             // Only a real episode signal starts the countdown. A "Next »" in a
@@ -146,13 +172,6 @@ struct PlayerOverlay: View {
             Text("Above 100% amplifies the video's own audio on top of the "
                  + "device volume. On headphones this gets loud quickly — turn "
                  + "the hardware volume down before raising this.")
-        }
-        // A sheet, not a menu row: MPVolumeView is a real UIKit control the
-        // user drags, and a Menu cannot host one.
-        .sheet(isPresented: $showingDeviceVolume) {
-            DeviceVolumeRow()
-                .presentationDetents([.height(170)])
-                .presentationBackground(.thinMaterial)
         }
         .alert("Video can't be sent to a TV from this site",
                isPresented: $showingAirPlayHelp) {
@@ -359,6 +378,12 @@ struct PlayerOverlay: View {
                     // sheet covers the film. A gesture is not consent to be
                     // interrupted.
                     guard page.mediaVolumeAvailable else {
+                        // Where a manifest was recovered there is a way to make
+                        // this swipe work — play the stream here instead of in
+                        // the page — so say so rather than doing nothing. With
+                        // no manifest (DRM, or nothing in resource timing) the
+                        // margin slider is the only answer, so bring it up.
+                        if page.handoffStream != nil { offerHandoff() }
                         chrome.interacted()
                         return
                     }
@@ -397,6 +422,98 @@ struct PlayerOverlay: View {
                 chrome.flashSeek(delta)
                 chrome.interacted()
             }
+    }
+
+    /// Moves a web page's stream to the app's own player as soon as the video
+    /// is up and genuinely playing.
+    ///
+    /// This is what makes the right-hand swipe work on a web page. Volume is
+    /// not a control the app can offer while the site decodes the media —
+    /// `HTMLMediaElement.volume` is ignored on iOS and device volume has no
+    /// setter — so the only way for that swipe to behave like the brightness
+    /// swipe is for the app to own the audio, which means owning the decode.
+    ///
+    /// Waits for frames rather than firing on entry: a stream that never plays
+    /// should stay where it is, so a page that was merely opened is not taken
+    /// over on the strength of a manifest that may lead nowhere.
+    private func autoHandOffIfUseful() {
+        // `mediaVolumeAvailable` already being true means the app owns the
+        // audio — this is the Cliqx player or Jellyfin, with nothing to move.
+        guard page.isTheater, !page.mediaVolumeAvailable, !page.isHandingOff,
+              isShowingFrames,
+              let stream = page.handoffStream,
+              stream != autoHandedOffStream
+        else { return }
+        autoHandedOffStream = stream
+        dismissHandoffOffer()
+        page.actions.playInAppPlayer()
+    }
+
+    private func offerHandoff() {
+        guard !offeringHandoff else { return }
+        offeringHandoff = true
+        offeringHandoffHide?.cancel()
+        offeringHandoffHide = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(6))
+            guard !Task.isCancelled else { return }
+            offeringHandoff = false
+        }
+    }
+
+    private func dismissHandoffOffer() {
+        offeringHandoffHide?.cancel()
+        offeringHandoffHide = nil
+        offeringHandoff = false
+    }
+
+    /// Offered when the volume swipe cannot work but could be made to.
+    ///
+    /// Deliberately a card with a button rather than an automatic switch: the
+    /// handoff pauses and mutes the page and starts the stream again in VLC,
+    /// and a swipe is not consent to that. Sited on the right, under the
+    /// thumb that just swiped.
+    private var handoffOfferCard: some View {
+        VStack {
+            Spacer()
+            HStack {
+                Spacer()
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Volume")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    Text("This site keeps its own audio. Play it in the Cliqx "
+                         + "player and the volume swipe works.")
+                        .font(.subheadline)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    HStack(spacing: 10) {
+                        Button {
+                            dismissHandoffOffer()
+                            page.actions.playInAppPlayer()
+                        } label: {
+                            Label("Switch", systemImage: "play.rectangle.on.rectangle")
+                                .font(.footnote.weight(.semibold))
+                                .frame(maxWidth: .infinity, minHeight: 34)
+                        }
+                        .buttonStyle(.borderedProminent)
+
+                        Button("Not now") { dismissHandoffOffer() }
+                            .font(.footnote.weight(.medium))
+                            .frame(minWidth: 66, minHeight: 34)
+                            .buttonStyle(.bordered)
+                    }
+                }
+                .padding(14)
+                .frame(maxWidth: 280)
+                .background(.ultraThinMaterial, in: .rect(cornerRadius: 14))
+                .padding(.trailing, 18)
+                .padding(.bottom, 96)      // clear of the timeline and bar
+            }
+        }
+        .transition(.move(edge: .trailing).combined(with: .opacity))
+        .animation(.easeOut(duration: 0.22), value: offeringHandoff)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Volume needs the Cliqx player for this site")
     }
 
     /// Mirrors the physical layout of the gesture: brightness on the left,
@@ -784,9 +901,6 @@ struct PlayerOverlay: View {
                 }
             }
             Divider()
-            Button { showingDeviceVolume = true } label: {
-                Label("Device volume\u{2026}", systemImage: "iphone.gen3")
-            }
             if boostWithheldForAirPlay {
                 Text("Boost is off while AirPlay can send this video")
             } else {
@@ -881,14 +995,12 @@ struct PlayerOverlay: View {
             // The previous arrangement hid the row on a web page and put the
             // device slider behind a differently-named item, which removed the
             // obvious control exactly when it was the one that worked.
+            // Only where the app owns the level. Device volume is not in this
+            // menu at all: it lives in the right margin, on screen with the
+            // rest of the chrome, where it can be dragged without a panel
+            // coming up over the film.
             if page.mediaVolumeAvailable {
                 mediaGainMenu
-            } else {
-                Button { showingDeviceVolume = true } label: {
-                    Label("Volume", systemImage: "speaker.wave.2.fill")
-                }
-                .accessibilityHint("Opens the device volume slider, because this "
-                                   + "site's own audio level cannot be changed on iOS")
             }
 
             // The real answer to a stream whose audio the app cannot touch:

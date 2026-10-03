@@ -1020,6 +1020,43 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     }
   }
 
+  /// What the app's own player could take over, best first.
+  ///
+  /// `streamCandidates` answers a different question. It was written for
+  /// AirPlay, where a wrong URL is handed silently to a television, so it
+  /// trusts nothing but a manifest seen in resource timing and rejects `.mp4`
+  /// outright — an `.mp4` there is as likely to be an init segment as a whole
+  /// file.
+  ///
+  /// For a handoff that reasoning inverts. Where the element plays an ordinary
+  /// URL — a progressive file, or an HLS manifest it loaded directly — that URL
+  /// is not a guess at all: it is what is playing, read off the element. VLC
+  /// opens it, so the app owns the audio and the volume swipe works. Leaving it
+  /// out meant every site that serves a plain file had no handoff and therefore
+  /// no volume control, which is most of them.
+  ///
+  /// MSE keeps the old route, because a `blob:` means nothing outside this
+  /// process and resource timing is the only way to find what fed it.
+  function handoffCandidates() {
+    const video = staged || largestVideo();
+    const out = [];
+    if (video) {
+      const kind = sourceKind(video);
+      if (kind === 'file' || kind === 'hls') {
+        const src = video.currentSrc || video.src || '';
+        // https only, and a real URL: the native side re-validates this, but
+        // there is no reason to offer it something it will only reject.
+        try {
+          if (new URL(src, location.href).protocol === 'https:') out.push(src);
+        } catch (_) { /* not a URL we can use */ }
+      }
+    }
+    for (const url of streamCandidates()) {
+      if (!out.includes(url)) out.push(url);
+    }
+    return out;
+  }
+
   function sourceKind(video) {
     const src = video.currentSrc || video.src || '';
     if (!src) return 'none';
@@ -2193,7 +2230,7 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     largestVideo, allVideos, resumeCandidate, scan,
     checkStaged,
     showAirPlay, nativeFullscreen, untrackAirPlay, isManifestURL,
-    streamCandidates, sourceKind, attachAirPlaySource,
+    streamCandidates, handoffCandidates, sourceKind, attachAirPlaySource,
     blockOverlays, setOverlayBlocking, hideTheaterIntruders,
   };
 })();

@@ -72,9 +72,16 @@ struct PlayerEdgeSlider: View {
 /// Rotated by -90°: sized horizontally first, turned, then given the vertical
 /// footprint it should occupy, because `rotationEffect` does not change layout.
 ///
+/// Track length, padding and backing deliberately match `PlayerEdgeSlider`, so
+/// the two margins read as one pair of controls rather than as the app's slider
+/// beside a system one that wandered in. The post-rotation width is the thumb's,
+/// not the control's: `frame` does not clip, so the slider still draws in full.
+///
 /// Renders nothing in the Simulator — there is no audio route for it to attach
 /// to — so it can only be judged on a device.
 struct VerticalSystemVolumeSlider: View {
+    private static let trackHeight: CGFloat = 132
+
     var body: some View {
         VStack(spacing: 8) {
             Image(systemName: "speaker.wave.2.fill")
@@ -82,12 +89,12 @@ struct VerticalSystemVolumeSlider: View {
                 .foregroundStyle(.white.opacity(0.9))
 
             SystemVolumeSlider()
-                .frame(width: 132, height: 28)
+                .frame(width: Self.trackHeight, height: 28)
                 .rotationEffect(.degrees(-90))
-                .frame(width: 28, height: 132)
+                .frame(width: 14, height: Self.trackHeight)
         }
         .padding(.vertical, 10)
-        .padding(.horizontal, 4)
+        .padding(.horizontal, 8)
         .background(RoundedRectangle(cornerRadius: 14, style: .continuous)
             .fill(Color(white: 0, opacity: 0.28)))
         .accessibilityLabel("Device volume")

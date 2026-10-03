@@ -565,6 +565,61 @@ test.describe('AirPlay source for MSE', () => {
     expect(candidates).toContain(`${ORIGIN}/lonely/solo.m3u8`);
   });
 
+  // The gap that left most sites without a volume control. `streamCandidates`
+  // answers AirPlay's question and takes manifests only, so a site serving an
+  // ordinary file offered the app's player nothing to take over — and without
+  // the handoff there is no volume, because a page's own audio cannot be
+  // touched on iOS.
+  test('offers the element\u2019s own file, which AirPlay\u2019s list omits',
+    async ({ page }) => {
+      await serve(page, PLAYER);
+      // https, because that is all the native side will accept — the test
+      // origin is http, so it cannot stand in for a real source here.
+      await page.evaluate(() => {
+        Object.defineProperty(document.querySelector('video')!, 'currentSrc',
+                              { get: () => 'https://cdn.example.test/movie.mp4' });
+      });
+
+      expect(await page.evaluate(() => __cp.streamCandidates())).toEqual([]);
+      expect(await page.evaluate(() => __cp.handoffCandidates()))
+        .toEqual(['https://cdn.example.test/movie.mp4']);
+    });
+
+  test('puts the playing file ahead of a manifest merely seen', async ({ page }) => {
+    await serve(page, PLAYER);
+    await page.evaluate(async (o) => {
+      Object.defineProperty(document.querySelector('video')!, 'currentSrc',
+                            { get: () => 'https://cdn.example.test/movie.mp4' });
+      await fetch(o + '/hls/master.m3u8').then((r) => r.text()).catch(() => {});
+    }, ORIGIN);
+
+    const candidates = await page.evaluate(() => __cp.handoffCandidates());
+    expect(candidates[0]).toBe('https://cdn.example.test/movie.mp4');
+    expect(candidates).toContain(`${ORIGIN}/hls/master.m3u8`);
+  });
+
+  // A blob means nothing outside this process, so MSE keeps the old route.
+  test('falls back to resource timing for a MediaSource', async ({ page }) => {
+    await serve(page, PLAYER);
+    await asMSE(page);
+    await fetchManifest(page);
+
+    expect(await page.evaluate(() => __cp.handoffCandidates()))
+      .toEqual([`${ORIGIN}/master.m3u8`]);
+  });
+
+  // http, data: and a bare filename are all things VLC would be handed and
+  // fail on, or worse, fetch in the clear.
+  test('refuses a source that is not https', async ({ page }) => {
+    await serve(page, PLAYER);
+    await page.evaluate(() => {
+      Object.defineProperty(document.querySelector('video')!, 'currentSrc',
+                            { get: () => 'data:video/mp4;base64,AAAA' });
+    });
+
+    expect(await page.evaluate(() => __cp.handoffCandidates())).toEqual([]);
+  });
+
   test('does nothing when the page requested no manifest', async ({ page }) => {
     await serve(page, PLAYER);
     await asMSE(page);
