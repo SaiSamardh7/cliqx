@@ -136,6 +136,30 @@ final class BrowserModel: ObservableObject {
         address = url.absoluteString
     }
 
+    /// A card from the library: this URL is already known to be a video.
+    ///
+    /// Typing an address is a request to see a page; tapping a card you watched
+    /// before is a request to carry on watching it. Without this the two were
+    /// the same, so a recent landed on the site and the player had to be found
+    /// and opened by hand every time, resume position and all.
+    ///
+    /// The flag is consumed on the next navigation, not held: it says something
+    /// about this one tap, and must not still be armed for whatever the user
+    /// browses to afterwards.
+    func openWatched(_ url: URL) {
+        pendingAutoTheater = url
+        open(url)
+    }
+
+    /// Set by `openWatched`, read once by the web view.
+    @Published var pendingAutoTheater: URL?
+
+    func consumeAutoTheater(for url: URL) -> Bool {
+        guard let armed = pendingAutoTheater, armed == url else { return false }
+        pendingAutoTheater = nil
+        return true
+    }
+
     /// WebKit can navigate without going through `open` (links, redirects,
     /// forms and hash routes). Keep the SwiftUI source of truth on the page
     /// that is actually visible so rebuilding the web view, especially when
@@ -172,6 +196,14 @@ final class BrowserModel: ObservableObject {
                         lastPlayed: Date(), seriesKey: key,
                         seriesTitle: show,
                         episodeLabel: PlayerFormatting.episodeLabel(name))
+        // Exact URL first, and never only by series.
+        //
+        // The series key is derived from the title, and the title is not stable
+        // across a page's life, so the same URL could be saved twice under keys
+        // that differed by a few characters of truncation. Two cards then
+        // carried the same `Site.id`, and `ForEach` given duplicate ids reuses
+        // rows — which is how tapping one show opened another.
+        recents.removeAll { $0.url == url }
         // One visible card per series. Episode progress is retained separately.
         recents.removeAll { ($0.seriesKey ?? seriesIdentity(for: $0)) == key }
         recents.insert(site, at: 0)
@@ -183,6 +215,44 @@ final class BrowserModel: ObservableObject {
         // Keep the pinned copy's title fresh too.
         if let index = pinned.firstIndex(where: { $0.url == url }) {
             pinned[index].title = name
+            persistPinned()
+        }
+    }
+
+    /// Corrects a recent's name once the page's title has caught up.
+    ///
+    /// `recordWatched` has to run the moment theater opens, because resume and
+    /// the poster hang off it. The title is not reliable then: these sites
+    /// change episode by replacing the player and pushing history, so the URL
+    /// updates at once and `WKWebView.title` lags. The card was therefore
+    /// saved with the new URL under the previous episode's name — tap it and
+    /// the other show played. `urlDidChange` already defers its own title read
+    /// for exactly this reason.
+    ///
+    /// The URL was never wrong, so this repairs the label and everything
+    /// derived from it, rather than re-recording the entry.
+    func retitleWatched(_ url: URL, title: String?) {
+        guard let corrected = title, !corrected.isEmpty,
+              let index = recents.firstIndex(where: { $0.url == url }),
+              recents[index].title != corrected
+        else { return }
+
+        let key = PlayerFormatting.seriesIdentity(title: corrected, url: url)
+        recents[index].title = corrected
+        recents[index].seriesKey = key
+        recents[index].seriesTitle = PlayerFormatting.seriesTitle(corrected,
+                                                                 host: url.host() ?? "")
+        recents[index].episodeLabel = PlayerFormatting.episodeLabel(corrected)
+        // The name decides the series, so a corrected name can belong to a card
+        // already standing for that show. One visible card per series still.
+        recents.removeAll { $0.url != url && ($0.seriesKey ?? seriesIdentity(for: $0)) == key }
+        // A corrected title can also reveal a plain duplicate of this URL.
+        var seenURLs = Set<URL>()
+        recents.removeAll { !seenURLs.insert($0.url).inserted }
+        persist()
+
+        if let index = pinned.firstIndex(where: { $0.url == url }) {
+            pinned[index].title = corrected
             persistPinned()
         }
     }
@@ -319,6 +389,7 @@ final class BrowserModel: ObservableObject {
     /// every old card first contributes its resume point to hidden history.
     private func migrateAndCollapseRecents() {
         var seen = Set<String>()
+        var seenURLs = Set<URL>()
         var collapsed: [Site] = []
         for var site in recents.sorted(by: {
             ($0.lastPlayed ?? .distantPast) > ($1.lastPlayed ?? .distantPast)
@@ -327,6 +398,10 @@ final class BrowserModel: ObservableObject {
                 episodeProgress[AddressResolver.resumeKey(for: site.url)] = EpisodeProgress(position: at,
                                                                           duration: duration)
             }
+            // Drops duplicates already written by earlier builds, newest kept
+            // — its resume point has just been folded into `episodeProgress`,
+            // so nothing is lost by discarding the older card.
+            guard seenURLs.insert(site.url).inserted else { continue }
             let key = site.seriesKey ?? seriesIdentity(for: site)
             guard seen.insert(key).inserted else { continue }
             site.seriesKey = key

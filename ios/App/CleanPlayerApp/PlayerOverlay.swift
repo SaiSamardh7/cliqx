@@ -89,8 +89,7 @@ struct PlayerOverlay: View {
             // duplicate. Present with the rest of the chrome, because a
             // control you have to know a gesture for is one most people never
             // find — and on a web page the volume swipe cannot work at all.
-            if chrome.areControlsVisible, !chrome.isLocked,
-               gestureSettings.brightnessAndVolume, gestureBrightnessPercent == nil {
+            if isShowingEdgeSliders {
                 edgeSliders
             }
 
@@ -108,6 +107,9 @@ struct PlayerOverlay: View {
         // sliver at the bottom and every tap lands on the page behind it.
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .animation(.easeInOut(duration: 0.18), value: chrome.areControlsVisible)
+        // Its own value, so the swap for the HUD is not carried by the
+        // chrome's animation and left fading on screen beside it.
+        .animation(.easeInOut(duration: 0.12), value: isShowingEdgeSliders)
         .animation(.easeInOut(duration: 0.18), value: chrome.isLocked)
         .onAppear {
             brightnessOnEntry = UIScreen.main.brightness
@@ -285,6 +287,19 @@ struct PlayerOverlay: View {
     }
 
     // MARK: Edge sliders
+
+    /// The margin sliders and the mid-swipe HUD show the same two levels, so
+    /// only one of them may be on screen.
+    ///
+    /// Tested against *both* gesture values, not just brightness. Testing one
+    /// of a pair that the HUD treats as either/or left a gap: anything setting
+    /// a volume level alone put the slider and the HUD up together, each
+    /// drawing the same number beside the other.
+    private var isShowingEdgeSliders: Bool {
+        chrome.areControlsVisible && !chrome.isLocked
+            && gestureSettings.brightnessAndVolume
+            && gestureBrightnessPercent == nil && gestureVolumePercent == nil
+    }
 
     /// The pair that sits in the margins. Two different mechanisms behind one
     /// arrangement: brightness is the app's to set, and on a web page device

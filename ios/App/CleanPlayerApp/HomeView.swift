@@ -346,7 +346,7 @@ struct HomeView: View {
 
     private func posterCard(_ site: Site) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Button { model.open(site.url) } label: { posterArt(site) }
+            Button { model.openWatched(site.url) } label: { posterArt(site) }
                 .buttonStyle(.plain)
                 .overlay(alignment: .topTrailing) {
                     cardMenu(site).padding(6)

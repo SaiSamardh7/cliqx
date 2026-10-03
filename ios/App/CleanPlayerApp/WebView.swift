@@ -62,11 +62,26 @@ final class PageState: ObservableObject {
     /// over, or nil when there is nothing to hand off. Non-nil is what offers
     /// the user a player that actually owns its audio.
     @Published var handoffStream: URL?
-    /// Whether the app's own player is on screen in front of this page.
-    @Published var isHandingOff = false
-    /// Where the page had got to when the handoff started, so the app's player
-    /// picks up there rather than at the beginning.
-    var handoffStartAt: Double = 0
+    /// The app's own player, on screen in front of this page.
+    ///
+    /// Everything that player needs, captured together at the moment the
+    /// handoff is decided, and carrying its own identity. It replaces a bare
+    /// `isHandingOff` flag that presented the player while it read the stream,
+    /// title and position separately from shared state: a `@StateObject` is
+    /// built once per presentation identity, so a second handoff could show a
+    /// cover whose engine still held the first stream, and the URL, title and
+    /// resume point could each come from a different moment.
+    @Published var handoff: Handoff?
+
+    struct Handoff: Identifiable, Equatable {
+        let id = UUID()
+        let stream: URL
+        let pageURL: URL
+        let title: String
+        let startAt: Double
+    }
+
+    var isHandingOff: Bool { handoff != nil }
     @Published var textTracks: [TextTrack] = []
     @Published var pipAvailable = false
     /// Decoded frame height — the only quality figure available from outside
@@ -310,6 +325,7 @@ struct WebView: UIViewRepresentable {
         // a just-promoted standby straight back to the episode it replaced.
         guard let target = model.current, context.coordinator.loaded != target else { return }
         context.coordinator.loaded = target
+        context.coordinator.armAutoTheater(for: target)
         page.webView?.load(URLRequest(url: target))
     }
 
@@ -348,6 +364,20 @@ struct WebView: UIViewRepresentable {
         /// next unrelated site the user opened would drop straight into a player
         /// they did not ask for.
         private var resumeTheaterFor: URL?
+        /// A library card asked for this page, so open its player once a frame
+        /// announces a video. Deliberately not `resumeTheaterFor`: that one
+        /// also marks an episode transition, carries the volume across and
+        /// holds the media session, none of which is true of a fresh tap.
+        private var autoTheaterFor: URL?
+        /// Which document the current answers belong to.
+        ///
+        /// `refreshHandoffStream` asks the page a question and is answered
+        /// later. Nothing tied that answer to the page that was asked, so a
+        /// reply arriving after an episode change published the *previous*
+        /// video's stream — and the automatic handoff, seeing a valid stream,
+        /// opened the wrong video. Bumped on every provisional navigation, and
+        /// carried into the callback so a late reply can be dropped.
+        private var navigationGeneration = UUID()
         private var resumeOutgoingFrame: WKFrameInfo?
         private var resumeOutgoingSourceChanged = false
         /// The resume attempt has to outlast the site: these players sit
@@ -486,6 +516,13 @@ struct WebView: UIViewRepresentable {
         }
 
         private var routeRefresh: Task<Void, Never>?
+
+        /// Carries the library's "this is a video" over to the navigation it
+        /// asked for. Consumed there, so it cannot still be armed for whatever
+        /// the user browses to next.
+        func armAutoTheater(for url: URL) {
+            autoTheaterFor = model.consumeAutoTheater(for: url) ? url : nil
+        }
 
         private func urlDidChange(_ webView: WKWebView) {
             guard !webView.isLoading, let url = webView.url else { return }
@@ -937,6 +974,9 @@ struct WebView: UIViewRepresentable {
             Task { [weak self] in
                 try? await Task.sleep(for: .seconds(1.5))
                 guard let self, self.page.isTheater, self.watchingURL == url else { return }
+                // By now the title has caught up with a pushState episode
+                // change, which it had not when this was recorded.
+                self.model.retitleWatched(url, title: self.page.webView?.title)
                 self.captureThumbnail(for: url)
             }
         }
@@ -948,17 +988,22 @@ struct WebView: UIViewRepresentable {
         /// — one of them inaudible but still fetching — is both confusing and
         /// expensive on a phone.
         func handOffToAppPlayer() {
-            guard page.handoffStream != nil else { return }
+            // Read together, so the player cannot be handed one video's stream
+            // under another's name.
+            guard let stream = page.handoffStream,
+                  let pageURL = page.webView?.url else { return }
             callPlayer("setMuted(true)")
             if page.isPlaying { callPlayer("togglePlay()") }
-            page.handoffStartAt = page.currentTime
-            page.isHandingOff = true
+            page.handoff = PageState.Handoff(
+                stream: stream, pageURL: pageURL,
+                title: page.title.isEmpty ? (pageURL.host() ?? "") : page.title,
+                startAt: page.currentTime)
         }
 
         /// Puts the page back where the app's player got to, so returning to
         /// the site does not start the episode again.
         func returnFromAppPlayer(reached seconds: Double) {
-            page.isHandingOff = false
+            page.handoff = nil
             callPlayer("setMuted(false)")
             guard seconds > 1 else { return }
             callPlayer("seek(\(seconds))")
@@ -981,9 +1026,16 @@ struct WebView: UIViewRepresentable {
         /// this app learned from a hostile document.
         private func refreshHandoffStream() {
             let js = "JSON.stringify(window.__cp ? window.__cp.handoffCandidates() : [])"
+            let asked = navigationGeneration
+            let askedFrame = theaterFrame
             page.webView?.evaluateJavaScript(js, in: theaterFrame,
                                              in: BrowserSetup.world) { [weak self] result in
                 guard let self else { return }
+                // The document that was asked is the only one this answers for.
+                // A reply for a page that has since gone must not become the
+                // stream the app hands to its own player.
+                guard self.navigationGeneration == asked,
+                      self.theaterFrame == askedFrame else { return }
                 guard case .success(let value) = result,
                       let json = value as? String,
                       let data = json.data(using: .utf8),
@@ -1346,7 +1398,9 @@ struct WebView: UIViewRepresentable {
             // last video stopped before the old document goes away.
             stopWatching()
             if !waitingForStandby { discardStandby() }
-            // The old frame handle dies with the old document.
+            // The old frame handle dies with the old document, and so does
+            // anything still in flight that was asked of it.
+            navigationGeneration = UUID()
             theaterFrame = nil
             clearFrameCapabilities()
             page.blockedCount = 0
@@ -1644,11 +1698,17 @@ struct WebView: UIViewRepresentable {
                 // always documented to be: checking only for non-nil meant a
                 // resume armed for one episode could fire on whatever page
                 // happened to load next.
-                guard let armed = resumeTheaterFor,
-                      let current = page.webView?.url,
+                // Same scoping for a card-opened page: a redirect must not let
+                // this fire on whatever the site sent us to instead.
+                let armed = resumeTheaterFor ?? autoTheaterFor
+                guard let armed, let current = page.webView?.url,
                       EpisodeTransition.mayResume(expected: armed, current: current)
                 else { break }
-                Self.transitionLog.notice("Player frame ready during episode transition")
+                if resumeTheaterFor != nil {
+                    Self.transitionLog.notice("Player frame ready during episode transition")
+                } else {
+                    Self.transitionLog.notice("Player frame ready for a library card")
+                }
                 page.webView?.evaluateJavaScript(
                     "window.__cp && window.__cp.autoTheater()",
                     in: frameInfo, in: BrowserSetup.world,
@@ -1677,6 +1737,7 @@ struct WebView: UIViewRepresentable {
                 refreshHandoffStream()
                 if let webView = page.webView { refreshEpisodes(webView) }
 
+                autoTheaterFor = nil
                 if let url = page.webView?.url { beginWatching(url) }
 
                 // A player in a cross-origin frame stages the video against

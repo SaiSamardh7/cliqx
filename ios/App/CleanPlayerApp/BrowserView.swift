@@ -60,19 +60,22 @@ struct BrowserView: View {
         // Full screen, over the web view rather than replacing it: the page
         // stays loaded and paused, so closing the player returns to the site
         // where it was instead of reloading it.
-        .fullScreenCover(isPresented: $page.isHandingOff) {
-            if let stream = page.handoffStream, let pageURL = page.webView?.url {
-                WebStreamPlayerView(
-                    stream: stream,
-                    pageURL: pageURL,
-                    title: page.title.isEmpty ? host : page.title,
-                    startAt: page.handoffStartAt,
-                    rules: rules,
-                    gestureSettings: gestureSettings,
-                    subtitleStyle: playback.subtitles,
-                    onClose: { reached in page.actions.returnFromAppPlayer(reached) }
-                )
-            }
+        // By item, not by a flag: the cover's identity is the handoff's, so a
+        // second handoff is a different presentation and always gets its own
+        // `WebStreamEngine`. Presented on a Boolean, SwiftUI kept the first
+        // engine — and with it the first video — behind the second cover.
+        .fullScreenCover(item: $page.handoff) { handoff in
+            WebStreamPlayerView(
+                stream: handoff.stream,
+                pageURL: handoff.pageURL,
+                title: handoff.title.isEmpty ? host : handoff.title,
+                startAt: handoff.startAt,
+                rules: rules,
+                gestureSettings: gestureSettings,
+                subtitleStyle: playback.subtitles,
+                onClose: { reached in page.actions.returnFromAppPlayer(reached) }
+            )
+            .id(handoff.id)
         }
         .onAppear {
             loadedDuringRulePreparation = rules.status.isPreparing
