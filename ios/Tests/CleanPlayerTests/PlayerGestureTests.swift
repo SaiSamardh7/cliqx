@@ -90,4 +90,42 @@ final class PlayerGestureTests: XCTestCase {
         XCTAssertEqual(PlayerGestureClassifier.seekDelta(dx: -500, width: 300), -90)
         XCTAssertEqual(PlayerGestureClassifier.seekDelta(dx: 150, width: 300), 45)
     }
+
+    // MARK: Volume ceiling
+
+    func testBoostIsOfferedWhenNoRouteCouldCarryTheVideo() {
+        XCTAssertEqual(
+            PlayerVolume.ceiling(current: 100, airplayCouldSendVideo: false), 200)
+        XCTAssertEqual(PlayerVolume.levels(upTo: 200), PlayerVolume.levels)
+    }
+
+    /// Amplifying routes the element through Web Audio and a routed element
+    /// cannot follow AirPlay, so the television would get the picture and no
+    /// sound.
+    func testBoostIsWithheldWhileARouteCouldCarryTheVideo() {
+        XCTAssertEqual(
+            PlayerVolume.ceiling(current: 100, airplayCouldSendVideo: true), 100)
+        XCTAssertEqual(PlayerVolume.levels(upTo: 100), [0, 25, 50, 75, 100])
+    }
+
+    /// The routing is irreversible for the element's lifetime, so once it has
+    /// happened there is nothing left to protect. Withholding the level the
+    /// video is already playing at would only leave the menu showing a
+    /// selection that none of its rows carry.
+    func testAnAlreadyBoostedVideoKeepsTheLevelsItIsUsing() {
+        XCTAssertEqual(
+            PlayerVolume.ceiling(current: 150, airplayCouldSendVideo: true), 200)
+        XCTAssertTrue(PlayerVolume.levels(upTo: 200).contains(150))
+    }
+
+    /// The bug this closes: the menu withheld boost and the vertical drag did
+    /// not, so a swipe could amplify past a ceiling the menu was refusing to
+    /// offer — breaking AirPlay by the one route that skipped the check.
+    func testTheDragCannotAmplifyPastTheMenusCeiling() {
+        let ceiling = PlayerVolume.ceiling(current: 100,
+                                           airplayCouldSendVideo: true)
+        XCTAssertEqual(PlayerVolume.clamp(180, to: ceiling), 100)
+        XCTAssertEqual(PlayerVolume.clamp(-40, to: ceiling), 0)
+        XCTAssertEqual(PlayerVolume.clamp(75, to: ceiling), 75)
+    }
 }

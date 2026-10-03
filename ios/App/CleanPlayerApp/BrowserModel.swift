@@ -15,6 +15,14 @@ struct Site: Codable, Hashable, Identifiable {
     /// array position, so replaying something old moves it to the front no
     /// matter what pinning or removal did to the list.
     var lastPlayed: Date?
+    /// Keep this site's login across launches, by giving its session cookies
+    /// an expiry the server did not.
+    ///
+    /// Off unless the user asks. A session cookie is short-lived because the
+    /// server said so; overriding that silently means a stolen unlocked phone
+    /// holds a month of logins the server believed had ended. Optional so
+    /// existing payloads migrate; nil reads as off.
+    var staySignedIn: Bool?
     /// Visible grouping metadata. Optional so the existing recents.v1 payload
     /// migrates without a decoding break.
     var seriesKey: String?
@@ -71,17 +79,32 @@ final class BrowserModel: ObservableObject {
     private let episodeProgressKey = "episode-progress.v1"
     private var episodeProgress: [String: EpisodeProgress] = [:]
 
+    /// A store that would not decode. Nothing may be written back over it:
+    /// persisting an empty list is what turns one unreadable payload into a
+    /// library that is gone for good.
+    private var unreadable: Set<String> = []
+
+    private func load<T: Decodable>(_ type: T.Type, key: String) -> T? {
+        StoreRecovery.decode(type, from: store.data(forKey: key), named: key) { kept in
+            self.unreadable.insert(key)
+            StoreHealth.shared.record(store: key, keptAt: kept)
+        }
+    }
+
     init() {
-        if let data = store.data(forKey: recentsKey),
-           let saved = try? JSONDecoder().decode([Site].self, from: data) {
+        if let saved = load([Site].self, key: recentsKey) {
             recents = saved
         }
-        if let data = store.data(forKey: episodeProgressKey),
-           let saved = try? JSONDecoder().decode([String: EpisodeProgress].self, from: data) {
-            episodeProgress = saved
+        if let saved = load([String: EpisodeProgress].self, key: episodeProgressKey) {
+            // Keys used to be absolute URL strings. Fold each onto its
+            // normalised key; where two collapse, keep the further position.
+            for (key, progress) in saved {
+                let folded = URL(string: key).map(AddressResolver.resumeKey(for:)) ?? key
+                if let existing = episodeProgress[folded], existing.position >= progress.position { continue }
+                episodeProgress[folded] = progress
+            }
         }
-        if let data = store.data(forKey: pinnedKey),
-           let saved = try? JSONDecoder().decode([Site].self, from: data) {
+        if let saved = load([Site].self, key: pinnedKey) {
             pinned = saved
         }
         migrateAndCollapseRecents()
@@ -113,6 +136,30 @@ final class BrowserModel: ObservableObject {
         address = url.absoluteString
     }
 
+    /// A card from the library: this URL is already known to be a video.
+    ///
+    /// Typing an address is a request to see a page; tapping a card you watched
+    /// before is a request to carry on watching it. Without this the two were
+    /// the same, so a recent landed on the site and the player had to be found
+    /// and opened by hand every time, resume position and all.
+    ///
+    /// The flag is consumed on the next navigation, not held: it says something
+    /// about this one tap, and must not still be armed for whatever the user
+    /// browses to afterwards.
+    func openWatched(_ url: URL) {
+        pendingAutoTheater = url
+        open(url)
+    }
+
+    /// Set by `openWatched`, read once by the web view.
+    @Published var pendingAutoTheater: URL?
+
+    func consumeAutoTheater(for url: URL) -> Bool {
+        guard let armed = pendingAutoTheater, armed == url else { return false }
+        pendingAutoTheater = nil
+        return true
+    }
+
     /// WebKit can navigate without going through `open` (links, redirects,
     /// forms and hash routes). Keep the SwiftUI source of truth on the page
     /// that is actually visible so rebuilding the web view, especially when
@@ -142,13 +189,21 @@ final class BrowserModel: ObservableObject {
         let key = PlayerFormatting.seriesIdentity(title: name, url: url)
         let show = PlayerFormatting.seriesTitle(name, host: url.host() ?? "")
         let existing = recents.first { $0.url == url } ?? pinned.first { $0.url == url }
-        let saved = episodeProgress[url.absoluteString]
+        let saved = episodeProgress[AddressResolver.resumeKey(for: url)]
         let site = Site(url: url, title: name,
                         resumeAt: saved?.position ?? existing?.resumeAt,
                         resumeDuration: saved?.duration ?? existing?.resumeDuration,
                         lastPlayed: Date(), seriesKey: key,
                         seriesTitle: show,
                         episodeLabel: PlayerFormatting.episodeLabel(name))
+        // Exact URL first, and never only by series.
+        //
+        // The series key is derived from the title, and the title is not stable
+        // across a page's life, so the same URL could be saved twice under keys
+        // that differed by a few characters of truncation. Two cards then
+        // carried the same `Site.id`, and `ForEach` given duplicate ids reuses
+        // rows — which is how tapping one show opened another.
+        recents.removeAll { $0.url == url }
         // One visible card per series. Episode progress is retained separately.
         recents.removeAll { ($0.seriesKey ?? seriesIdentity(for: $0)) == key }
         recents.insert(site, at: 0)
@@ -164,11 +219,49 @@ final class BrowserModel: ObservableObject {
         }
     }
 
+    /// Corrects a recent's name once the page's title has caught up.
+    ///
+    /// `recordWatched` has to run the moment theater opens, because resume and
+    /// the poster hang off it. The title is not reliable then: these sites
+    /// change episode by replacing the player and pushing history, so the URL
+    /// updates at once and `WKWebView.title` lags. The card was therefore
+    /// saved with the new URL under the previous episode's name — tap it and
+    /// the other show played. `urlDidChange` already defers its own title read
+    /// for exactly this reason.
+    ///
+    /// The URL was never wrong, so this repairs the label and everything
+    /// derived from it, rather than re-recording the entry.
+    func retitleWatched(_ url: URL, title: String?) {
+        guard let corrected = title, !corrected.isEmpty,
+              let index = recents.firstIndex(where: { $0.url == url }),
+              recents[index].title != corrected
+        else { return }
+
+        let key = PlayerFormatting.seriesIdentity(title: corrected, url: url)
+        recents[index].title = corrected
+        recents[index].seriesKey = key
+        recents[index].seriesTitle = PlayerFormatting.seriesTitle(corrected,
+                                                                 host: url.host() ?? "")
+        recents[index].episodeLabel = PlayerFormatting.episodeLabel(corrected)
+        // The name decides the series, so a corrected name can belong to a card
+        // already standing for that show. One visible card per series still.
+        recents.removeAll { $0.url != url && ($0.seriesKey ?? seriesIdentity(for: $0)) == key }
+        // A corrected title can also reveal a plain duplicate of this URL.
+        var seenURLs = Set<URL>()
+        recents.removeAll { !seenURLs.insert($0.url).inserted }
+        persist()
+
+        if let index = pinned.firstIndex(where: { $0.url == url }) {
+            pinned[index].title = corrected
+            persistPinned()
+        }
+    }
+
     /// Remember where playback stopped, in both lists so the bar shows wherever
     /// the card lives.
     func saveResume(_ url: URL, at seconds: Double, duration: Double) {
         guard duration > 0 else { return }
-        episodeProgress[url.absoluteString] = EpisodeProgress(position: seconds,
+        episodeProgress[AddressResolver.resumeKey(for: url)] = EpisodeProgress(position: seconds,
                                                               duration: duration)
         for index in recents.indices where recents[index].url == url {
             recents[index].resumeAt = seconds
@@ -185,7 +278,7 @@ final class BrowserModel: ObservableObject {
 
     /// Saved position for a URL, or 0.
     func resume(for url: URL) -> Double {
-        episodeProgress[url.absoluteString]?.position
+        episodeProgress[AddressResolver.resumeKey(for: url)]?.position
             ?? (recents.first { $0.url == url } ?? pinned.first { $0.url == url })?.resumeAt
             ?? 0
     }
@@ -223,6 +316,34 @@ final class BrowserModel: ObservableObject {
         return pinned.contains { $0.url == root }
     }
 
+    /// A host the user pinned. The one signal that a server is theirs.
+    func isPinnedHost(_ host: String) -> Bool {
+        guard let wanted = HostKey.canonical(host) else { return false }
+        return pinned.contains { $0.url.host().flatMap(HostKey.canonical) == wanted }
+    }
+
+    /// Pinned AND asked to stay signed in. Only these sites have their session
+    /// cookies given an expiry.
+    func keepsSignIn(_ host: String) -> Bool {
+        guard let wanted = HostKey.canonical(host) else { return false }
+        return pinned.contains {
+            $0.staySignedIn == true
+                && $0.url.host().flatMap(HostKey.canonical) == wanted
+        }
+    }
+
+    func setStaySignedIn(_ on: Bool, for site: Site) {
+        guard let index = pinned.firstIndex(where: { $0.url == site.url }) else { return }
+        pinned[index].staySignedIn = on
+        persistPinned()
+    }
+
+    /// Pinned, or on the local network: where a saved password may live in
+    /// the keychain rather than die with the session.
+    func isOwnHost(_ host: String) -> Bool {
+        isPinnedHost(host) || AddressResolver.isLocalHost(host)
+    }
+
     func unpinSite(_ url: URL) {
         guard let root = AddressResolver.siteRoot(of: url) else { return }
         pinned.removeAll { $0.url == root }
@@ -239,18 +360,25 @@ final class BrowserModel: ObservableObject {
     }
 
     private func persist() {
-        guard let data = try? JSONEncoder().encode(recents) else { return }
-        store.set(data, forKey: recentsKey)
+        write(recents, key: recentsKey)
     }
 
     private func persistPinned() {
-        guard let data = try? JSONEncoder().encode(pinned) else { return }
-        store.set(data, forKey: pinnedKey)
+        write(pinned, key: pinnedKey)
     }
 
     private func persistEpisodeProgress() {
-        guard let data = try? JSONEncoder().encode(episodeProgress) else { return }
-        store.set(data, forKey: episodeProgressKey)
+        write(episodeProgress, key: episodeProgressKey)
+    }
+
+    /// Never writes over a payload that failed to decode this launch.
+    private func write<T: Encodable>(_ value: T, key: String) {
+        guard !unreadable.contains(key) else { return }
+        guard let data = try? JSONEncoder().encode(value) else {
+            StoreHealth.shared.record(store: key, keptAt: nil)
+            return
+        }
+        store.set(data, forKey: key)
     }
 
     private func seriesIdentity(for site: Site) -> String {
@@ -261,14 +389,19 @@ final class BrowserModel: ObservableObject {
     /// every old card first contributes its resume point to hidden history.
     private func migrateAndCollapseRecents() {
         var seen = Set<String>()
+        var seenURLs = Set<URL>()
         var collapsed: [Site] = []
         for var site in recents.sorted(by: {
             ($0.lastPlayed ?? .distantPast) > ($1.lastPlayed ?? .distantPast)
         }) {
             if let at = site.resumeAt, let duration = site.resumeDuration {
-                episodeProgress[site.url.absoluteString] = EpisodeProgress(position: at,
+                episodeProgress[AddressResolver.resumeKey(for: site.url)] = EpisodeProgress(position: at,
                                                                           duration: duration)
             }
+            // Drops duplicates already written by earlier builds, newest kept
+            // — its resume point has just been folded into `episodeProgress`,
+            // so nothing is lost by discarding the older card.
+            guard seenURLs.insert(site.url).inserted else { continue }
             let key = site.seriesKey ?? seriesIdentity(for: site)
             guard seen.insert(key).inserted else { continue }
             site.seriesKey = key

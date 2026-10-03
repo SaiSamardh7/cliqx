@@ -29,13 +29,21 @@ requests the filter lists block.
 - No device or advertising identifiers.
 - No location, contacts, photos, or health data.
 - No crash or usage analytics.
-- No third-party SDKs are linked into the app, so nothing is collected on
-  anyone else's behalf either.
+- No analytics, advertising or tracking SDKs are linked into the app, so
+  nothing is collected on anyone else's behalf either. The app links one
+  third-party component, VLCKit, which decodes video on this device; it
+  collects nothing and contacts nothing on its own. See `NOTICE.md`.
 
 ## Filter lists
 
 The blocking rules are bundled with the app and update when the app updates.
 The app does not contact any server to fetch them.
+
+The code that *would* download rule updates is present in the app but is not
+wired to anything, because the format it fetches is not the format the app
+reads. A check in CI fails the build if that ever changes without this policy
+changing with it. If rule updating is switched on in a future version, this
+section will say so before it ships.
 
 ## Private browsing
 

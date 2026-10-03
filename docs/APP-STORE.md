@@ -69,7 +69,7 @@ Verified in `CleanPlayerApp.xcodeproj/project.pbxproj` rather than from memory:
 
 ## Open — must be closed before submission
 
-1. **Marketing version** is `0.1`. Ship `1.0`.
+1. **Marketing version** is `0.8.0`. Ship `1.0`.
 2. **Privacy policy URL.** `PRIVACY.md` needs publishing somewhere with a
    stable URL, and a contact address filling in.
 3. **Filter lists cannot update between app releases.** Settings warns after 30

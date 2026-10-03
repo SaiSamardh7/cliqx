@@ -28,7 +28,37 @@ struct PlayerOverlay: View {
     @State private var dragStartVolume = 100
     @State private var gestureBrightnessPercent: Int?
     @State private var gestureVolumePercent: Int?
+    /// Set when a volume swipe landed on a page whose audio the app cannot
+    /// touch, but whose stream it could take over. An offer, not an action:
+    /// handing off pauses the page and restarts the video in VLC, which is far
+    /// too much to do because a thumb strayed down the right-hand edge.
+    @State private var offeringHandoff = false
+    @State private var offeringHandoffHide: Task<Void, Never>?
+    /// The stream already moved to the Cliqx player automatically.
+    ///
+    /// Without this, returning to the page would hand it straight back and the
+    /// two players would trade the video forever — and a stream VLC cannot
+    /// play would retry on every exit. A *different* stream is a new video and
+    /// a fresh decision, so this holds the URL rather than a flag.
+    @State private var autoHandedOffStream: URL?
     @State private var heldPreviousRate: Double?
+    /// The screen brightness before this player touched it, so it can be put
+    /// back. Without this, one swipe down during a dark scene left the phone
+    /// dim for everything the user did afterwards.
+    @State private var brightnessOnEntry: CGFloat?
+    @State private var showingBoostWarning = false
+    /// What the brightness slider shows.
+    ///
+    /// Held here rather than read from `UIScreen` at render time, because
+    /// `UIScreen.main.brightness` is a plain property with nothing to observe:
+    /// setting it gives SwiftUI no reason to redraw, so the track stayed where
+    /// it was while the screen changed underneath it.
+    @State private var brightnessLevel = Double(UIScreen.main.brightness)
+    /// Whether the rotate button narrowed the app's supported orientations, so
+    /// exiting knows whether it has anything to put back, and what the
+    /// interface was showing before it did.
+    @State private var didNarrowOrientation = false
+    @State private var orientationBeforeRotate: UIInterfaceOrientation?
 
     var body: some View {
         ZStack {
@@ -47,13 +77,28 @@ struct PlayerOverlay: View {
                 .transition(.opacity)
             }
 
+            if let message = page.mediaError { mediaErrorCard(message) }
+
             if let flash = chrome.seekFlash { seekFlashLabel(flash) }
 
             if gestureBrightnessPercent != nil || gestureVolumePercent != nil {
                 levelHUDs
             }
 
-            if let remaining = chrome.countdown, let next = page.nextEpisode {
+            // Brightness left, volume right, matching the swipe zones they
+            // duplicate. Present with the rest of the chrome, because a
+            // control you have to know a gesture for is one most people never
+            // find — and on a web page the volume swipe cannot work at all.
+            if isShowingEdgeSliders {
+                edgeSliders
+            }
+
+            if offeringHandoff {
+                handoffOfferCard
+            }
+
+            if let remaining = chrome.countdown, let next = page.nextEpisode,
+               page.nextEpisodeIsEpisodic {
                 upNextCard(remaining: remaining, next: next)
             }
         }
@@ -62,8 +107,13 @@ struct PlayerOverlay: View {
         // sliver at the bottom and every tap lands on the page behind it.
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .animation(.easeInOut(duration: 0.18), value: chrome.areControlsVisible)
+        // Its own value, so the swap for the HUD is not carried by the
+        // chrome's animation and left fading on screen beside it.
+        .animation(.easeInOut(duration: 0.12), value: isShowingEdgeSliders)
         .animation(.easeInOut(duration: 0.18), value: chrome.isLocked)
         .onAppear {
+            brightnessOnEntry = UIScreen.main.brightness
+            brightnessLevel = Double(UIScreen.main.brightness)
             // The three things the chrome initiates on its own. Everything
             // else is a button, and goes straight to `page.actions`.
             chrome.onAdvance = {
@@ -71,23 +121,60 @@ struct PlayerOverlay: View {
             }
             chrome.onSeek = { page.actions.seek($0) }
             chrome.onBeginScrub = { page.actions.beginScrub() }
-            chrome.playbackChanged(isPlaying: page.isPlaying)
+            chrome.playbackChanged(isPlaying: isShowingFrames)
         }
-        .onChange(of: page.isPlaying) { _, playing in
-            chrome.playbackChanged(isPlaying: playing)
+        // The chrome's "only auto-hide while playing" needs frames on screen,
+        // not merely a play() that has been requested.
+        // The offer is about this page's audio. Once the app owns the level —
+        // the handoff happened — it is answered and should go.
+        .onChange(of: page.mediaVolumeAvailable) { _, available in
+            if available { dismissHandoffOffer() }
         }
+        .onChange(of: page.isPlaying) { _, _ in
+            chrome.playbackChanged(isPlaying: isShowingFrames)
+            autoHandOffIfUseful()
+        }
+        .onChange(of: page.isBuffering) { _, _ in
+            chrome.playbackChanged(isPlaying: isShowingFrames)
+            autoHandOffIfUseful()
+        }
+        // The manifest is recovered asynchronously, so it usually arrives after
+        // playback has already started.
+        .onChange(of: page.handoffStream) { _, _ in autoHandOffIfUseful() }
         .onChange(of: page.playbackEnded) { _, ended in
             guard ended else { return }
-            chrome.playbackEnded(hasNext: page.nextEpisode != nil)
+            // Only a real episode signal starts the countdown. A "Next »" in a
+            // forum footer gives a button, not a reason to leave the page
+            // while the user is looking away.
+            chrome.playbackEnded(
+                hasNext: page.nextEpisode != nil && page.nextEpisodeIsEpisodic)
         }
         // A new episode is a new video: whatever the user declined last time
         // has nothing to do with this one.
         .onChange(of: page.nextEpisode) { _, _ in chrome.itemChanged() }
-        .onDisappear { chrome.cancelEverything() }
+        .onDisappear {
+            chrome.cancelEverything()
+            restoreOrientation()
+            // Put the screen back the way it was found. Only if nothing else
+            // changed it since — the user may have used Control Centre, and
+            // overriding that would be the same rudeness in reverse.
+            if let entry = brightnessOnEntry,
+               let last = lastBrightnessSet,
+               abs(UIScreen.main.brightness - last) < 0.01 {
+                UIScreen.main.brightness = entry
+            }
+        }
         .sheet(isPresented: $showingEpisodes) { episodeSheet }
         // Says what AirPlay will and will not do here, and names the thing
         // that does work. "AirPlay is broken" and "AirPlay cannot carry this
         // stream, mirroring can" are very different messages to receive.
+        .alert("Careful with your hearing", isPresented: $showingBoostWarning) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text("Above 100% amplifies the video's own audio on top of the "
+                 + "device volume. On headphones this gets loud quickly — turn "
+                 + "the hardware volume down before raising this.")
+        }
         .alert("Video can't be sent to a TV from this site",
                isPresented: $showingAirPlayHelp) {
             Button("OK", role: .cancel) { }
@@ -96,6 +183,54 @@ struct PlayerOverlay: View {
                  + "only the sound would reach the TV.\n\nUse Screen Mirroring "
                  + "from Control Centre instead — it sends the picture as well.")
         }
+    }
+
+    /// Said plainly, over the black. A protected stream used to give a black
+    /// rectangle with a full set of controls that did nothing.
+    private func mediaErrorCard(_ message: String) -> some View {
+        VStack(spacing: 14) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.largeTitle)
+                .foregroundStyle(.secondary)
+            Text(message)
+                .multilineTextAlignment(.center)
+                .font(.callout)
+                .foregroundStyle(.white)
+            Button("Close") { page.actions.exitTheater() }
+                .buttonStyle(.borderedProminent)
+        }
+        .padding(28)
+        .frame(maxWidth: 380)
+        .background(.black.opacity(0.82), in: .rect(cornerRadius: 18))
+        .accessibilityElement(children: .combine)
+    }
+
+    /// Playing as the user would mean it: not paused, and with a picture.
+    private var isShowingFrames: Bool { page.isPlaying && !page.isBuffering }
+
+    /// Amplification routes the element through Web Audio, which AirPlay
+    /// cannot forward. While a route could carry the picture, that trade is
+    /// not worth making silently.
+    /// The last brightness this view set, so it can tell its own change from
+    /// one the user made in Control Centre.
+    @State private var lastBrightnessSet: CGFloat?
+
+    private var boostWithheldForAirPlay: Bool {
+        page.airplayAvailable && page.airplayCanSendVideo
+    }
+
+    /// Shared by the menu and the vertical drag. They used to decide
+    /// separately, so a drag could amplify past a ceiling the menu was
+    /// refusing to offer — routing the element through Web Audio and taking
+    /// AirPlay's video with it, which is the exact thing the ceiling exists to
+    /// prevent.
+    private var volumeCeiling: Int {
+        PlayerVolume.ceiling(current: page.volumePercent,
+                             airplayCouldSendVideo: boostWithheldForAirPlay)
+    }
+
+    private var volumeLevels: [Int] {
+        PlayerVolume.levels(upTo: volumeCeiling)
     }
 
     // MARK: Tap and double-tap
@@ -151,6 +286,67 @@ struct PlayerOverlay: View {
         chrome.flashSeek(seconds)
     }
 
+    // MARK: Edge sliders
+
+    /// The margin sliders and the mid-swipe HUD show the same two levels, so
+    /// only one of them may be on screen.
+    ///
+    /// Tested against *both* gesture values, not just brightness. Testing one
+    /// of a pair that the HUD treats as either/or left a gap: anything setting
+    /// a volume level alone put the slider and the HUD up together, each
+    /// drawing the same number beside the other.
+    private var isShowingEdgeSliders: Bool {
+        chrome.areControlsVisible && !chrome.isLocked
+            && gestureSettings.brightnessAndVolume
+            && gestureBrightnessPercent == nil && gestureVolumePercent == nil
+    }
+
+    /// The pair that sits in the margins. Two different mechanisms behind one
+    /// arrangement: brightness is the app's to set, and on a web page device
+    /// volume is not — see `VerticalSystemVolumeSlider` for why that one looks
+    /// like the system control, because it is one.
+    private var edgeSliders: some View {
+        HStack {
+            PlayerEdgeSlider(
+                symbol: "sun.max.fill",
+                fraction: brightnessLevel,
+                accent: brightnessLevel >= 0.99 ? .red : .white,
+                label: "Brightness"
+            ) { value in
+                brightnessLevel = value
+                UIScreen.main.brightness = CGFloat(value)
+                lastBrightnessSet = CGFloat(value)
+                chrome.interacted()
+            }
+
+            Spacer(minLength: 0)
+
+            if page.mediaVolumeAvailable {
+                // The app decodes this one, so the level is ours to set and
+                // the slider can be the same slider.
+                PlayerEdgeSlider(
+                    symbol: page.volumePercent > 100
+                        ? "speaker.wave.3.fill" : "speaker.wave.2.fill",
+                    fraction: Double(page.volumePercent) / Double(volumeCeiling),
+                    accent: page.volumePercent > 100 ? .red : .white,
+                    label: "Volume"
+                ) { value in
+                    let level = Int((value * Double(volumeCeiling)).rounded())
+                    if level > 100, !gestureSettings.hasSeenBoostWarning {
+                        gestureSettings.hasSeenBoostWarning = true
+                        showingBoostWarning = true
+                    }
+                    page.actions.setVolume(PlayerVolume.clamp(level, to: volumeCeiling))
+                    chrome.interacted()
+                }
+            } else {
+                VerticalSystemVolumeSlider()
+            }
+        }
+        .padding(.horizontal, 10)
+        .transition(.opacity)
+    }
+
     // MARK: Full-screen gestures
 
     private var playerDragGesture: some Gesture {
@@ -180,13 +376,37 @@ struct PlayerOverlay: View {
                     let change = -value.translation.height / max(size.height, 1)
                     let brightness = min(max(dragStartBrightness + change, 0), 1)
                     UIScreen.main.brightness = brightness
+                    lastBrightnessSet = brightness
+                    brightnessLevel = Double(brightness)
                     gestureBrightnessPercent = Int((brightness * 100).rounded())
-                    gestureVolumePercent = page.volumePercent
+                    gestureVolumePercent = page.mediaVolumeAvailable
+                        ? page.volumePercent : nil
                 case .volume:
                     guard gestureSettings.brightnessAndVolume else { return }
+                    // Where the app cannot set the level itself, the swipe
+                    // brings the controls up so the device slider in the right
+                    // margin is to hand, and stops there.
+                    //
+                    // It used to open that slider in a sheet, which put a panel
+                    // over the picture every time a thumb strayed down the
+                    // right-hand side — worst of all in landscape, where the
+                    // sheet covers the film. A gesture is not consent to be
+                    // interrupted.
+                    guard page.mediaVolumeAvailable else {
+                        // Where a manifest was recovered there is a way to make
+                        // this swipe work — play the stream here instead of in
+                        // the page — so say so rather than doing nothing. With
+                        // no manifest (DRM, or nothing in resource timing) the
+                        // margin slider is the only answer, so bring it up.
+                        if page.handoffStream != nil { offerHandoff() }
+                        chrome.interacted()
+                        return
+                    }
                     let change = Int((-value.translation.height
                                       / max(size.height, 1) * 200).rounded())
-                    let volume = min(max(dragStartVolume + change, 0), 200)
+                    // The menu's ceiling, not a second opinion.
+                    let volume = PlayerVolume.clamp(dragStartVolume + change,
+                                                    to: volumeCeiling)
                     page.actions.setVolume(volume)
                     gestureBrightnessPercent = Int((UIScreen.main.brightness * 100).rounded())
                     gestureVolumePercent = volume
@@ -217,6 +437,98 @@ struct PlayerOverlay: View {
                 chrome.flashSeek(delta)
                 chrome.interacted()
             }
+    }
+
+    /// Moves a web page's stream to the app's own player as soon as the video
+    /// is up and genuinely playing.
+    ///
+    /// This is what makes the right-hand swipe work on a web page. Volume is
+    /// not a control the app can offer while the site decodes the media —
+    /// `HTMLMediaElement.volume` is ignored on iOS and device volume has no
+    /// setter — so the only way for that swipe to behave like the brightness
+    /// swipe is for the app to own the audio, which means owning the decode.
+    ///
+    /// Waits for frames rather than firing on entry: a stream that never plays
+    /// should stay where it is, so a page that was merely opened is not taken
+    /// over on the strength of a manifest that may lead nowhere.
+    private func autoHandOffIfUseful() {
+        // `mediaVolumeAvailable` already being true means the app owns the
+        // audio — this is the Cliqx player or Jellyfin, with nothing to move.
+        guard page.isTheater, !page.mediaVolumeAvailable, !page.isHandingOff,
+              isShowingFrames,
+              let stream = page.handoffStream,
+              stream != autoHandedOffStream
+        else { return }
+        autoHandedOffStream = stream
+        dismissHandoffOffer()
+        page.actions.playInAppPlayer()
+    }
+
+    private func offerHandoff() {
+        guard !offeringHandoff else { return }
+        offeringHandoff = true
+        offeringHandoffHide?.cancel()
+        offeringHandoffHide = Task { @MainActor in
+            try? await Task.sleep(for: .seconds(6))
+            guard !Task.isCancelled else { return }
+            offeringHandoff = false
+        }
+    }
+
+    private func dismissHandoffOffer() {
+        offeringHandoffHide?.cancel()
+        offeringHandoffHide = nil
+        offeringHandoff = false
+    }
+
+    /// Offered when the volume swipe cannot work but could be made to.
+    ///
+    /// Deliberately a card with a button rather than an automatic switch: the
+    /// handoff pauses and mutes the page and starts the stream again in VLC,
+    /// and a swipe is not consent to that. Sited on the right, under the
+    /// thumb that just swiped.
+    private var handoffOfferCard: some View {
+        VStack {
+            Spacer()
+            HStack {
+                Spacer()
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Volume")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    Text("This site keeps its own audio. Play it in the Cliqx "
+                         + "player and the volume swipe works.")
+                        .font(.subheadline)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    HStack(spacing: 10) {
+                        Button {
+                            dismissHandoffOffer()
+                            page.actions.playInAppPlayer()
+                        } label: {
+                            Label("Switch", systemImage: "play.rectangle.on.rectangle")
+                                .font(.footnote.weight(.semibold))
+                                .frame(maxWidth: .infinity, minHeight: 34)
+                        }
+                        .buttonStyle(.borderedProminent)
+
+                        Button("Not now") { dismissHandoffOffer() }
+                            .font(.footnote.weight(.medium))
+                            .frame(minWidth: 66, minHeight: 34)
+                            .buttonStyle(.bordered)
+                    }
+                }
+                .padding(14)
+                .frame(maxWidth: 280)
+                .background(.ultraThinMaterial, in: .rect(cornerRadius: 14))
+                .padding(.trailing, 18)
+                .padding(.bottom, 96)      // clear of the timeline and bar
+            }
+        }
+        .transition(.move(edge: .trailing).combined(with: .opacity))
+        .animation(.easeOut(duration: 0.22), value: offeringHandoff)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Volume needs the Cliqx player for this site")
     }
 
     /// Mirrors the physical layout of the gesture: brightness on the left,
@@ -418,13 +730,20 @@ struct PlayerOverlay: View {
                 page.actions.togglePlay()
                 chrome.interacted()
             } label: {
-                Image(systemName: page.isPlaying ? "pause.fill" : "play.fill")
-                    .font(.system(size: 30, weight: .semibold))
-                    .foregroundStyle(.black)
-                    .frame(width: 66, height: 66)
-                    .background(.white, in: .circle)
+                Group {
+                    if page.isBuffering {
+                        ProgressView().tint(.black).controlSize(.large)
+                    } else {
+                        Image(systemName: page.isPlaying ? "pause.fill" : "play.fill")
+                            .font(.system(size: 30, weight: .semibold))
+                    }
+                }
+                .foregroundStyle(.black)
+                .frame(width: 66, height: 66)
+                .background(.white, in: .circle)
             }
-            .accessibilityLabel(page.isPlaying ? "Pause" : "Play")
+            .accessibilityLabel(page.isBuffering ? "Loading, tap to pause"
+                                : page.isPlaying ? "Pause" : "Play")
             circleButton("goforward.10", label: "Forward 10 seconds", size: 30) {
                 page.actions.skip(10)
                 chrome.interacted()
@@ -527,7 +846,8 @@ struct PlayerOverlay: View {
     private func episodeControls(showsLabel: Bool) -> some View {
         HStack(spacing: 2) {
             barButton("backward.end.fill", label: "Previous episode",
-                      enabled: page.previousEpisode != nil) {
+                      enabled: page.previousEpisode != nil,
+                      unavailable: page.episodeUnavailableReason) {
                 if let previous = page.previousEpisode {
                     page.actions.goToEpisode(previous)
                 }
@@ -547,7 +867,8 @@ struct PlayerOverlay: View {
             }
             .accessibilityLabel("Episode list")
             barButton("forward.end.fill", label: "Next episode",
-                      enabled: page.nextEpisode != nil) {
+                      enabled: page.nextEpisode != nil,
+                      unavailable: page.episodeUnavailableReason) {
                 if let next = page.nextEpisode {
                     page.actions.goToEpisode(next)
                 }
@@ -573,6 +894,41 @@ struct PlayerOverlay: View {
     }
 
     // MARK: Menus
+
+    /// Media gain: the app's own level for a stream it decodes itself.
+    private var mediaGainMenu: some View {
+        Menu {
+            Picker("Volume", selection: Binding(
+                get: { page.volumePercent },
+                set: { level in
+                    // Once, the first time anyone amplifies. Above 100% this is
+                    // software gain on top of whatever the device is already
+                    // doing, and on headphones that is loud.
+                    if level > 100, !gestureSettings.hasSeenBoostWarning {
+                        gestureSettings.hasSeenBoostWarning = true
+                        showingBoostWarning = true
+                    }
+                    page.actions.setVolume(level)
+                }
+            )) {
+                ForEach(volumeLevels, id: \.self) { level in
+                    Text(level > 100 ? "\(level)% Boost" : "\(level)%").tag(level)
+                }
+            }
+            Divider()
+            if boostWithheldForAirPlay {
+                Text("Boost is off while AirPlay can send this video")
+            } else {
+                Text("Above 100% may distort loud audio")
+            }
+        } label: {
+            Label("Volume \(page.volumePercent)%",
+                  systemImage: page.volumePercent > 100
+                    ? "speaker.wave.3.fill" : "speaker.wave.2.fill")
+        }
+        .accessibilityHint("Controls this video's audio level")
+    }
+
 
     private var subtitlesMenu: some View {
         Menu {
@@ -643,22 +999,37 @@ struct PlayerOverlay: View {
 
     private var moreMenu: some View {
         Menu {
-            Menu {
-                Picker("Volume", selection: Binding(
-                    get: { page.volumePercent },
-                    set: { page.actions.setVolume($0) }
-                )) {
-                    ForEach([0, 25, 50, 75, 100, 125, 150, 175, 200], id: \.self) { level in
-                        Text(level > 100 ? "\(level)% Boost" : "\(level)%").tag(level)
-                    }
-                }
-                Divider()
-                Text("Above 100% may distort loud audio")
-            } label: {
-                Label("Volume \(page.volumePercent)%",
-                      systemImage: page.volumePercent > 100
-                        ? "speaker.wave.3.fill" : "speaker.wave.2.fill")
+            // One Volume control, in one place, that always does something.
+            //
+            // Which mechanism it is depends on who decodes the audio, and the
+            // user should not have to know that. Where the app decodes — the
+            // Cliqx player, a server stream, a local file — it is media gain,
+            // 0 to 200%. Where a web page decodes, iOS gives JavaScript no way
+            // to change volume at all, so it is the device slider instead.
+            //
+            // The previous arrangement hid the row on a web page and put the
+            // device slider behind a differently-named item, which removed the
+            // obvious control exactly when it was the one that worked.
+            // Only where the app owns the level. Device volume is not in this
+            // menu at all: it lives in the right margin, on screen with the
+            // rest of the chrome, where it can be dragged without a panel
+            // coming up over the film.
+            if page.mediaVolumeAvailable {
+                mediaGainMenu
             }
+
+            // The real answer to a stream whose audio the app cannot touch:
+            // stop letting the site decode it. Offered only when a manifest was
+            // actually recovered, so it is never a button that fails.
+            if page.handoffStream != nil {
+                Divider()
+                Button { page.actions.playInAppPlayer() } label: {
+                    Label("Play in Cliqx player", systemImage: "play.rectangle.on.rectangle")
+                }
+                .accessibilityHint("Plays this stream in the app's own player, "
+                                   + "where volume and speed work fully")
+            }
+
             Divider()
             Button {
                 page.actions.setObjectFit(page.objectFit == "cover" ? "contain" : "cover")
@@ -710,11 +1081,17 @@ struct PlayerOverlay: View {
         NavigationStack {
             Group {
                 if page.episodes.isEmpty {
+                    // The specific reason when there is one. "No episode list"
+                    // alone reads the same whether the server refused the
+                    // request, the show has one episode, or the site draws its
+                    // controls with scripts — and those want different things
+                    // from the person reading it.
                     ContentUnavailableView(
                         "No episode list",
                         systemImage: "list.bullet",
-                        description: Text("This page does not link its episodes "
-                                          + "in a way the player can read."))
+                        description: Text(page.episodeUnavailableReason
+                            ?? "This page does not link its episodes in a way "
+                             + "the player can read."))
                 } else {
                     List(page.episodes) { episode in
                         Button {
@@ -768,11 +1145,54 @@ struct PlayerOverlay: View {
             ? "Rotate to portrait" : "Rotate to landscape"
     }
 
+    /// Turn the screen, and remember that we narrowed what the app supports.
+    ///
+    /// `requestGeometryUpdate` REPLACES the scene's supported orientations
+    /// rather than simply rotating: after asking for `.landscape` the scene no
+    /// longer follows the device, and it stayed that way after the player
+    /// closed — the whole app stuck in landscape until it was relaunched.
     private func rotatePlayer() {
         guard let scene = foregroundScene else { return }
-        let orientation: UIInterfaceOrientationMask = scene.interfaceOrientation.isLandscape
-            ? .portrait : .landscape
-        scene.requestGeometryUpdate(.iOS(interfaceOrientations: orientation))
+        if !didNarrowOrientation { orientationBeforeRotate = scene.interfaceOrientation }
+        didNarrowOrientation = true
+        scene.requestGeometryUpdate(
+            .iOS(interfaceOrientations:
+                    InterfaceOrientationPolicy.flipped(from: scene.interfaceOrientation)))
+    }
+
+    /// Give the app back every orientation it declares in its Info.plist.
+    ///
+    /// Only when this player narrowed it. A user who rotated the device by
+    /// hand, or who has Portrait Orientation Lock on, chose that — and asking
+    /// for a geometry update they did not ask for is the same rudeness in the
+    /// other direction.
+    private func restoreOrientation() {
+        guard didNarrowOrientation, let scene = foregroundScene else { return }
+        didNarrowOrientation = false
+        let declared = InterfaceOrientationPolicy.declared()
+
+        // Two steps, and the first one is the point.
+        //
+        // Widening back to everything the app allows does NOT undo the rotate
+        // button: landscape is still in that set, so UIKit has no reason to
+        // leave it and waits for a device-orientation change that never comes
+        // for a phone already being held still. So send the interface to where
+        // the device actually is first...
+        if let target = InterfaceOrientationPolicy.restoreTarget(
+            device: UIDevice.current.orientation,
+            before: orientationBeforeRotate,
+            allowed: declared) {
+            scene.requestGeometryUpdate(.iOS(interfaceOrientations: target))
+        }
+        orientationBeforeRotate = nil
+        // ...then hand every orientation back, so nothing is left locked — this
+        // widening keeps whatever the step above settled on.
+        DispatchQueue.main.async {
+            scene.requestGeometryUpdate(.iOS(interfaceOrientations: declared))
+            for window in scene.windows {
+                window.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
+            }
+        }
     }
 
     private func circleLabel(_ symbol: String, size: CGFloat = 15) -> some View {
@@ -784,6 +1204,7 @@ struct PlayerOverlay: View {
     }
 
     private func barButton(_ symbol: String, label: String, enabled: Bool = true,
+                           unavailable: String? = nil,
                            action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: symbol)
@@ -791,6 +1212,9 @@ struct PlayerOverlay: View {
                 .frame(width: 44, height: 44)
         }
         .disabled(!enabled)
+        // A disabled control that says nothing is the same as a broken one to
+        // someone who cannot see that it is dimmed.
+        .accessibilityHint(enabled ? "" : (unavailable ?? ""))
         .opacity(enabled ? 1 : 0.35)
         .accessibilityLabel(label)
     }

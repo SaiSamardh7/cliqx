@@ -11,6 +11,7 @@ declare const __cp: {
   largestFrame(): Element | null;
   showAirPlay(): boolean;
   sourceKind(v: HTMLVideoElement): string;
+  handoffCandidates(): string[];
   attachAirPlaySource(v: HTMLVideoElement): string;
   autoTheater(ms?: number): Promise<boolean>;
   checkStaged(timeoutMs?: number): void;
