@@ -2,7 +2,10 @@
 """Count the test suites, so the README cannot claim a number nobody checked.
 
 The README said 66 XCTest and 198 agent specs long after both had moved. With
---check this fails when the documented counts drift from the source.
+--check this fails when the documented counts drift from the source, and with
+--write it corrects them — because a check whose only remedy is "go and edit
+two files by hand" is a chore that fails the build on every commit that adds
+a test, which is most of them.
 """
 import pathlib
 import re
@@ -42,16 +45,50 @@ summary = (
     f"{specs * browsers} agent ({specs} specs, {browsers} engines)"
 )
 
-if "--check" in sys.argv:
+DOCUMENTS = ("README.md", "docs/ROADMAP.md")
+counts = {"Swift": package, "UI": ui, "agent": specs * browsers}
+
+
+def rewrite(text: str) -> str:
+    """Correct every count and total this file states."""
+    text = re.sub(
+        r"(\d+)\s+(Swift|UI|agent)\b",
+        lambda m: f"{counts[m.group(2)]} {m.group(2)}",
+        text,
+    )
+    # The totals line, and the spec count wherever it is phrased — the README
+    # writes "(204 specs across" and the roadmap "(204 specs, two engines)".
+    text = re.sub(r"\*\*\d+\*\* —", f"**{total}** —", text)
+    return re.sub(r"\(\d+ specs\b", f"({specs} specs", text)
+
+
+if "--write" in sys.argv:
+    changed = []
+    for name in DOCUMENTS:
+        path = root / name
+        before = path.read_text()
+        after = rewrite(before)
+        if after != before:
+            path.write_text(after)
+            changed.append(name)
+    print(f"{summary}\n" + ("updated: " + ", ".join(changed) if changed
+                            else "already correct"))
+elif "--check" in sys.argv:
     problems = []
-    for name in ("README.md", "docs/ROADMAP.md"):
+    for name in DOCUMENTS:
         text = (root / name).read_text()
         for claimed, label in re.findall(r"(\d+)\s+(Swift|UI|agent)\b", text):
-            actual = {"Swift": package, "UI": ui, "agent": specs * browsers}[label]
-            if int(claimed) != actual:
-                problems.append(f"{name}: says {claimed} {label}, found {actual}")
+            if int(claimed) != counts[label]:
+                problems.append(f"{name}: says {claimed} {label}, found {counts[label]}")
+        # The spec count too. It drifted unnoticed because only the run totals
+        # were ever checked, and the two are written differently in each file.
+        for claimed in re.findall(r"\((\d+) specs\b", text):
+            if int(claimed) != specs:
+                problems.append(f"{name}: says {claimed} specs, found {specs}")
     if problems:
-        sys.exit("\n".join(problems) + f"\n\nCurrent: {summary}")
+        sys.exit("\n".join(problems)
+                 + f"\n\nCurrent: {summary}"
+                 + "\n\nRun `python3 tools/count-tests.py --write` to correct them.")
     print(f"documented counts match: {summary}")
 else:
     print(summary)
