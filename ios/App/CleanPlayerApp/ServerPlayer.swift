@@ -131,6 +131,10 @@ final class ServerEngine: NSObject, ObservableObject, @preconcurrency VLCMediaPl
         player.play()
         player.rate = desiredRate
         client.reportStart(itemID: item.id, positionMs: item.resumeMs)
+        // Remembered on this device too, so the home screen can still offer
+        // this when the server is off or out of reach. The server stays the
+        // authority whenever it answers — see ServerHistory.
+        ServerHistory.shared.remember(item, on: server)
         publishNeighbours()
     }
 
@@ -286,6 +290,13 @@ final class ServerEngine: NSObject, ObservableObject, @preconcurrency VLCMediaPl
             page.isPlaying = false
             report(final: true)
         }
+        // A black screen with working-looking controls was the whole of what
+        // an unreachable server used to look like — and the home screen can
+        // now offer an item from a server that has since gone away.
+        if player.state == .error {
+            page.mediaError = "Couldn't play this from \(server.name). The "
+                + "server may be off, or on a network this device can't reach."
+        }
     }
 
     func mediaPlayerTimeChanged(_ notification: Notification!) {
@@ -330,6 +341,7 @@ final class ServerEngine: NSObject, ObservableObject, @preconcurrency VLCMediaPl
         if final {
             reportedStop = true
             client.reportStopped(itemID: item.id, positionMs: position)
+            ServerHistory.shared.remember(item, on: server, positionMs: position)
         } else {
             client.reportProgress(itemID: item.id, positionMs: position, paused: !player.isPlaying)
         }

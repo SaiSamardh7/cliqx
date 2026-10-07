@@ -28,6 +28,10 @@ struct HomeView: View {
     /// the browser already agree.
     @State private var serverResume: [ServerResumeItem] = []
     @StateObject private var serverPlayback = ServerPlayback()
+    /// What this device remembers watching from a server, for when the server
+    /// itself cannot be reached. Shared, because the engine writes to it from
+    /// wherever playback was started.
+    @ObservedObject private var serverMemory = ServerHistory.shared
     @Environment(\.scenePhase) private var scenePhase
 
     @State private var importingFile = false
@@ -64,23 +68,7 @@ struct HomeView: View {
                     serversSection
                     browseBar
                     if rules.status.isPreparing { preparingNote }
-                    if !serverResume.isEmpty || !library.continueWatching.isEmpty {
-                        continueWatchingSection
-                    }
-                    if model.pinned.isEmpty && model.recents.isEmpty
-                        && library.continueWatching.isEmpty && serverResume.isEmpty {
-                        emptyLibrary
-                    } else {
-                        // Recent sits above Pinned: what you just watched is
-                        // what you are most likely to want back, so it stays in
-                        // view without scrolling past the pins.
-                        if !model.unpinnedRecents.isEmpty {
-                            librarySection(title: "Recent", sites: model.unpinnedRecents, showClear: true)
-                        }
-                        if !model.pinned.isEmpty {
-                            librarySection(title: "Pinned", sites: model.pinned, showClear: false)
-                        }
-                    }
+                    shelves
                     tiles(title: "Places to start", sites: model.shortcuts)
                 }
                 .padding(20)
@@ -447,115 +435,248 @@ struct HomeView: View {
                              sourceKind: item.sourceKind, bookmark: bookmark)
     }
 
-    /// Everything you were partway through, wherever it lives: the servers
-    /// first, because their position is live and theirs is the one that moves
-    /// while you are away, then the files on this device.
-    private var continueWatchingSection: some View {
+    /// One thing to carry on with, wherever it came from.
+    ///
+    /// A server episode, a file on this device and a page on the web are three
+    /// unrelated things to the code and the same thing to the person looking at
+    /// the shelf: something they were part way through. The shelf is sorted
+    /// across all three, so they need one notion of when it was last watched
+    /// and one of what to draw.
+    private enum ContinueItem: Identifiable {
+        case server(ServerResumeItem)
+        case file(MediaProgress)
+        case page(Site)
+
+        var id: String {
+            switch self {
+            case .server(let entry): "server|\(entry.id)"
+            case .file(let item): "file|\(item.fingerprint)"
+            case .page(let site): "page|\(site.url.absoluteString)"
+            }
+        }
+
+        var lastPlayed: Date {
+            switch self {
+            case .server(let entry): entry.item.userData?.lastPlayedDate ?? .distantPast
+            case .file(let item): item.updatedAt
+            case .page(let site): site.lastPlayed ?? .distantPast
+            }
+        }
+
+        var progress: Double? {
+            switch self {
+            case .server(let entry): entry.item.progress
+            case .file(let item): item.progress
+            case .page(let site): site.progress
+            }
+        }
+
+        var title: String {
+            switch self {
+            case .server(let entry): entry.item.seriesName ?? entry.item.name
+            case .file(let item): item.displayName
+            case .page(let site): site.seriesTitle ?? site.title
+            }
+        }
+
+        /// The second line: which episode, how much is left, or which site.
+        var detail: String {
+            switch self {
+            case .server(let entry):
+                let item = entry.item
+                if item.seriesName == nil { return item.subtitle ?? entry.server.name }
+                return [item.subtitle, item.name].compactMap { $0 }.joined(separator: " \u{00B7} ")
+            case .file(let item): return HomeView.remaining(item)
+            case .page(let site): return site.episodeLabel ?? site.host
+            }
+        }
+    }
+
+    /// Everything part way through, newest first, whatever holds it. This was
+    /// three shelves — a server row, a local grid and "Recent" — which is three
+    /// places to look for the one thing the question "what was I watching?"
+    /// means.
+    private var continueItems: [ContinueItem] {
+        (serverResume.map(ContinueItem.server)
+            + library.continueWatching.map(ContinueItem.file)
+            + model.unpinnedRecents.map(ContinueItem.page))
+            .sorted { $0.lastPlayed > $1.lastPlayed }
+    }
+
+    /// Lifted out of `body`: with every shelf inline the whole view stopped
+    /// type-checking in reasonable time.
+    @ViewBuilder
+    private var shelves: some View {
+        let carryOn = continueItems
+        if !carryOn.isEmpty { continueWatchingSection(carryOn) }
+        // Pinned stays its own shelf: pinning is how you say "keep this",
+        // which is a different statement from "I was part way through this".
+        if !model.pinned.isEmpty {
+            librarySection(title: "Pinned", sites: model.pinned, showClear: false)
+        }
+        if carryOn.isEmpty && model.pinned.isEmpty { emptyLibrary }
+    }
+
+    private func continueWatchingSection(_ items: [ContinueItem]) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Continue watching").font(.title3.weight(.semibold))
-            if !serverResume.isEmpty { serverResumeRow }
+            HStack {
+                Text("Continue Watching").font(.title3.weight(.semibold))
+                Spacer()
+                Button("Clear", role: .destructive) { clearShelf() }
+                    .font(.subheadline)
+            }
             LazyVGrid(columns: posterColumns, spacing: 16) {
-                ForEach(library.continueWatching) { item in
-                    VStack(alignment: .leading, spacing: 8) {
-                        Button { resume(item) } label: {
-                            Color(.tertiarySystemFill)
-                                .aspectRatio(16.0 / 9.0, contentMode: .fit)
-                                .frame(maxWidth: .infinity)
-                                .overlay {
-                                    Image(systemName: "film")
-                                        .font(.system(size: 34))
-                                        .foregroundStyle(.secondary)
-                                }
-                                .overlay(alignment: .bottomTrailing) {
-                                    Image(systemName: "play.circle.fill")
-                                        .font(.title)
-                                        .foregroundStyle(.white, .black.opacity(0.45))
-                                        .padding(10)
-                                }
-                                .overlay(alignment: .bottom) {
-                                    if let progress = item.progress {
-                                        GeometryReader { geo in
-                                            Rectangle().fill(.red)
-                                                .frame(width: geo.size.width * progress, height: 3)
-                                                .frame(maxHeight: .infinity, alignment: .bottom)
-                                        }
-                                    }
-                                }
-                                .clipShape(.rect(cornerRadius: 14))
-                        }
-                        .buttonStyle(.plain)
-                        .overlay(alignment: .topTrailing) {
-                            Menu {
-                                Button(role: .destructive) {
-                                    library.remove(item.fingerprint)
-                                } label: { Label("Remove", systemImage: "trash") }
-                            } label: {
-                                Image(systemName: "ellipsis")
-                                    .font(.footnote.weight(.bold))
-                                    .foregroundStyle(.white)
-                                    .frame(width: 30, height: 30)
-                                    .background(.black.opacity(0.45), in: .circle)
-                            }
-                            .padding(6)
-                        }
-                        Text(item.displayName).font(.subheadline).lineLimit(2)
-                        Text(Self.remaining(item)).font(.caption).foregroundStyle(.secondary)
-                    }
-                    .accessibilityElement(children: .contain)
-                    .accessibilityLabel("\(item.displayName), \(Self.remaining(item))")
-                }
+                ForEach(items) { continueTile($0) }
             }
         }
     }
 
-    /// The server's own Continue Watching, on the home screen. Tapping one
-    /// opens the Cliqx player at the position the server holds — which is what
-    /// "where I left off" has to mean when the same account is also watched
-    /// from a television and a browser.
-    private var serverResumeRow: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            LazyHStack(alignment: .top, spacing: 12) {
-                ForEach(serverResume) { entry in
-                    Button {
-                        serverPlayback.play(entry.item, on: entry.server)
-                    } label: {
-                        WideCard(server: entry.server, item: entry.item)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-        }
-        // The row is full-bleed inside a padded column, so the cards reach the
-        // edge as they scroll instead of stopping 20pt short of it.
-        .padding(.horizontal, -20)
-        .safeAreaPadding(.horizontal, 20)
+    /// Clears what THIS DEVICE holds. An item the server still lists in its own
+    /// Continue Watching comes back on the next read, because the server is the
+    /// authority on its own history and this button is not a way to argue with
+    /// it — remove it there, or finish watching it.
+    private func clearShelf() {
+        model.clearRecents()
+        library.clear()
+        serverMemory.forgetAll()
+        Task { await loadServerResume() }
     }
 
-    /// Asked of every server, and a server that will not answer is simply left
-    /// out: one that is off, or off this network, must not take the home
-    /// screen down with it.
+    private func continueTile(_ entry: ContinueItem) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Button { open(entry) } label: { continueArt(entry) }
+                .buttonStyle(.plain)
+                .overlay(alignment: .topTrailing) { continueMenu(entry).padding(6) }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(entry.title).font(.subheadline).lineLimit(2)
+                Text(entry.detail).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("\(entry.title), \(entry.detail)")
+    }
+
+    private func open(_ entry: ContinueItem) {
+        switch entry {
+        case .server(let e): serverPlayback.play(e.item, on: e.server)
+        case .file(let item): resume(item)
+        case .page(let site): model.openWatched(site.url)
+        }
+    }
+
+    /// The 16:9 tile every kind shares: its own artwork, the play glyph, and
+    /// the resume bar. One slot defines the size and the art fills it, so a
+    /// shelf of three different sources is still one shelf.
+    private func continueArt(_ entry: ContinueItem) -> some View {
+        Color(.tertiarySystemFill)
+            .aspectRatio(16.0 / 9.0, contentMode: .fit)
+            .frame(maxWidth: .infinity)
+            .overlay { artwork(entry) }
+            .overlay(alignment: .bottomTrailing) {
+                Image(systemName: "play.circle.fill")
+                    .font(.title)
+                    .foregroundStyle(.white, .black.opacity(0.45))
+                    .padding(10)
+            }
+            .overlay(alignment: .bottom) {
+                if let progress = entry.progress {
+                    GeometryReader { geo in
+                        Rectangle().fill(.red)
+                            .frame(width: geo.size.width * progress, height: 3)
+                            .frame(maxHeight: .infinity, alignment: .bottom)
+                    }
+                }
+            }
+            .clipShape(.rect(cornerRadius: 14))
+    }
+
+    @ViewBuilder
+    private func artwork(_ entry: ContinueItem) -> some View {
+        switch entry {
+        case .server(let e):
+            // The wide still where the server has one, its poster otherwise.
+            if let backdrop = e.item.backdrop {
+                RemoteImage(url: JellyfinAPI.imageURL(server: e.server.url, itemID: backdrop.itemID,
+                                                      tag: backdrop.tag, kind: .backdrop, maxHeight: 300))
+            } else {
+                RemoteImage(url: JellyfinAPI.imageURL(server: e.server.url, itemID: e.item.id,
+                                                      tag: e.item.primaryImageTag, maxHeight: 300))
+            }
+        case .file:
+            Image(systemName: "film").font(.system(size: 34)).foregroundStyle(.secondary)
+        case .page(let site):
+            if let poster = Thumbnails.image(for: site.url) {
+                Image(uiImage: poster).resizable().scaledToFill()
+            } else {
+                Text(site.initials)
+                    .font(.system(size: 40, weight: .semibold))
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    /// A server item has no menu: removing it here would not remove it there,
+    /// and a Remove that does nothing is worse than none.
+    @ViewBuilder
+    private func continueMenu(_ entry: ContinueItem) -> some View {
+        switch entry {
+        case .server:
+            EmptyView()
+        case .file(let item):
+            Menu {
+                Button(role: .destructive) {
+                    library.remove(item.fingerprint)
+                } label: { Label("Remove", systemImage: "trash") }
+            } label: { menuGlyph }
+        case .page(let site):
+            cardMenu(site)
+        }
+    }
+
+    private var menuGlyph: some View {
+        Image(systemName: "ellipsis")
+            .font(.footnote.weight(.bold))
+            .foregroundStyle(.white)
+            .frame(width: 30, height: 30)
+            .background(.black.opacity(0.45), in: .circle)
+    }
+
     private func loadServerResume() async {
         // In parallel, like the server shelf's own rows: a server that is off
         // sits on a 15-second timeout, and asking them in turn would make the
         // live one wait behind the dead one on every return to the app.
+        //
+        // nil from a server means it could not be answered at all, which is a
+        // different thing from an empty list and the only case where what this
+        // device remembers gets to stand in.
         let clients = servers.servers.map { ($0, servers.client(for: $0)) }
-        let found = await withTaskGroup(of: [ServerResumeItem].self) { group in
+        let replies = await withTaskGroup(of: (JellyfinServer, [JellyfinItem]?).self) { group in
             for (server, client) in clients {
                 group.addTask {
-                    let items = (try? await client.resume(userID: server.userID)) ?? []
-                    return items.map { ServerResumeItem(server: server, item: $0) }
+                    (server, try? await client.resume(userID: server.userID))
                 }
             }
-            var all: [ServerResumeItem] = []
-            for await part in group { all += part }
+            var all: [(JellyfinServer, [JellyfinItem]?)] = []
+            for await reply in group { all.append(reply) }
             return all
         }
-        // Each server sorts its own answer; across two of them only the date
-        // can say which was really last.
-        serverResume = found.sorted {
-            ($0.item.userData?.lastPlayedDate ?? .distantPast)
-                > ($1.item.userData?.lastPlayedDate ?? .distantPast)
+
+        var live: [ServerResumeItem] = []
+        var answered: Set<String> = []
+        for (server, items) in replies {
+            guard let items else { continue }
+            answered.insert(server.id)
+            live += items.map { ServerResumeItem(server: server, item: $0) }
         }
+
+        // A server that answered has had its say, including when it said
+        // nothing: an item it no longer lists is one the user finished.
+        let byID = Dictionary(uniqueKeysWithValues: servers.servers.map { ($0.id, $0) })
+        let remembered = serverMemory.standingIn(forServersOtherThan: answered)
+            .compactMap { entry in
+                byID[entry.serverID].map { ServerResumeItem(server: $0, item: entry.item) }
+            }
+        serverResume = live + remembered
     }
 
     private static func remaining(_ item: MediaProgress) -> String {

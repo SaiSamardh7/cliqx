@@ -473,6 +473,9 @@ final class JellyfinServers: ObservableObject {
 
     func remove(_ server: JellyfinServer) {
         servers.removeAll { $0.id == server.id }
+        // Nothing of a server the user has signed out of should outlive it on
+        // the home screen.
+        ServerHistory.shared.forgetServer(server.id)
         // The token outlives this row while another address of the same
         // account still uses it.
         if !servers.contains(where: { $0.tokenKey == server.tokenKey }) {
