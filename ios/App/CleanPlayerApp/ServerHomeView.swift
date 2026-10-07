@@ -5,23 +5,37 @@ import SwiftUI
 
 /// What a screen is playing from the server, if anything. The engine and
 /// the progress reporting live in `ServerEngine`; this just holds the cover.
+///
+/// The server travels with the item rather than being fixed by the screen
+/// presenting the player. A per-server shelf knows which server it is looking
+/// at; the home screen shows what you were part-way through across all of
+/// them, and only the item says which one it came from.
 @MainActor
 final class ServerPlayback: ObservableObject {
-    @Published var playing: JellyfinItem?
-    func play(_ item: JellyfinItem) { playing = item }
+    struct Playing: Identifiable {
+        let item: JellyfinItem
+        let server: JellyfinServer
+        var id: String { "\(server.id)|\(item.id)" }
+    }
+
+    @Published var playing: Playing?
+
+    func play(_ item: JellyfinItem, on server: JellyfinServer) {
+        playing = Playing(item: item, server: server)
+    }
 }
 
 extension View {
     /// The full-screen Cliqx player over a server stream, and the reload once
     /// it closes: progress bars on the shelf come from the server.
-    func serverPlayer(_ playback: ServerPlayback, server: JellyfinServer, servers: JellyfinServers,
+    func serverPlayer(_ playback: ServerPlayback, servers: JellyfinServers,
                       rules: RuleListController, gestureSettings: PlayerGestureSettings,
                       subtitleStyle: SubtitleStyle,
                       onStop: @escaping () -> Void) -> some View {
         fullScreenCover(item: Binding(get: { playback.playing },
                                       set: { playback.playing = $0 }),
-                        onDismiss: onStop) { item in
-            ServerPlayerView(item: item, server: server, servers: servers,
+                        onDismiss: onStop) { playing in
+            ServerPlayerView(item: playing.item, server: playing.server, servers: servers,
                              rules: rules, gestureSettings: gestureSettings,
                              subtitleStyle: subtitleStyle,
                              onClose: { playback.playing = nil })
@@ -88,7 +102,7 @@ struct ServerHomeView: View {
             }
         }
         .task { await loadAll() }
-        .serverPlayer(playback, server: server, servers: servers, rules: rules,
+        .serverPlayer(playback, servers: servers, rules: rules,
                       gestureSettings: gestureSettings,
                       subtitleStyle: preferences.subtitles) { Task { await loadRows() } }
     }
@@ -211,7 +225,7 @@ struct ServerHomeView: View {
 
     // MARK: Pieces
 
-    private func play(_ item: JellyfinItem) { playback.play(item) }
+    private func play(_ item: JellyfinItem) { playback.play(item, on: server) }
 
     private func browser(_ parent: JellyfinItem) -> some View {
         ServerBrowserView(servers: servers, server: server, parent: parent,
@@ -445,7 +459,8 @@ private struct LibraryCard: View {
 }
 
 /// Continue Watching / Next Up: 16:9 still, progress bar, show and episode.
-private struct WideCard: View {
+/// Shared with the home screen, which shows the same row across every server.
+struct WideCard: View {
     let server: JellyfinServer
     let item: JellyfinItem
 

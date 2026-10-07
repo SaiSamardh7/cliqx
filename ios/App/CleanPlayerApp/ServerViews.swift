@@ -126,7 +126,7 @@ struct ServerBrowserView: View {
         .navigationTitle(parent.name)
         .task(id: parent.id) { await load() }
         .refreshable { await load() }
-        .serverPlayer(playback, server: server, servers: servers, rules: rules,
+        .serverPlayer(playback, servers: servers, rules: rules,
                       gestureSettings: gestureSettings,
                       subtitleStyle: preferences.subtitles) { Task { await load() } }
     }
@@ -143,7 +143,7 @@ struct ServerBrowserView: View {
     private func grid(_ items: [JellyfinItem]) -> some View {
         ServerItemGrid(servers: servers, server: server, items: items,
                        rules: rules, gestureSettings: gestureSettings,
-                       preferences: preferences) { playback.play($0) }
+                       preferences: preferences) { playback.play($0, on: server) }
     }
 }
 

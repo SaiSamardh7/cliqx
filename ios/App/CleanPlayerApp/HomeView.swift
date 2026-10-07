@@ -22,6 +22,13 @@ struct HomeView: View {
     /// Media servers the user signed into. Their own shelf, above the web.
     @StateObject private var servers = JellyfinServers()
     @State private var addingServer = false
+    /// What every signed-in server says you were part-way through. The server
+    /// is the source of truth for position, so this is read from it rather
+    /// than stored here — nothing to keep in step, and the phone, the TV and
+    /// the browser already agree.
+    @State private var serverResume: [ServerResumeItem] = []
+    @StateObject private var serverPlayback = ServerPlayback()
+    @Environment(\.scenePhase) private var scenePhase
 
     @State private var importingFile = false
     @State private var pickingPhoto = false
@@ -57,9 +64,11 @@ struct HomeView: View {
                     serversSection
                     browseBar
                     if rules.status.isPreparing { preparingNote }
-                    if !library.continueWatching.isEmpty { continueWatchingSection }
+                    if !serverResume.isEmpty || !library.continueWatching.isEmpty {
+                        continueWatchingSection
+                    }
                     if model.pinned.isEmpty && model.recents.isEmpty
-                        && library.continueWatching.isEmpty {
+                        && library.continueWatching.isEmpty && serverResume.isEmpty {
                         emptyLibrary
                     } else {
                         // Recent sits above Pinned: what you just watched is
@@ -98,6 +107,20 @@ struct HomeView: View {
                              onProtectionChanged: {})
             }
             .sheet(isPresented: $addingServer) { AddServerSheet(servers: servers) }
+            // Re-read when a server is added or removed, and again whenever the
+            // app comes back to the front: the position moves while you are
+            // watching on the television, and a stale row is the whole reason
+            // this is read from the server rather than remembered here.
+            .task(id: servers.servers.map(\.id)) { await loadServerResume() }
+            .onChange(of: scenePhase) { _, phase in
+                guard phase == .active else { return }
+                Task { await loadServerResume() }
+            }
+            .serverPlayer(serverPlayback, servers: servers, rules: rules,
+                          gestureSettings: gestureSettings,
+                          subtitleStyle: playback.subtitles) {
+                Task { await loadServerResume() }
+            }
             .fileImporter(isPresented: $importingFile,
                           allowedContentTypes: Self.playableTypes,
                           allowsMultipleSelection: false) { result in
@@ -424,10 +447,13 @@ struct HomeView: View {
                              sourceKind: item.sourceKind, bookmark: bookmark)
     }
 
-    /// Local files you were partway through — the plan's Continue Watching.
+    /// Everything you were partway through, wherever it lives: the servers
+    /// first, because their position is live and theirs is the one that moves
+    /// while you are away, then the files on this device.
     private var continueWatchingSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Continue watching").font(.title3.weight(.semibold))
+            if !serverResume.isEmpty { serverResumeRow }
             LazyVGrid(columns: posterColumns, spacing: 16) {
                 ForEach(library.continueWatching) { item in
                     VStack(alignment: .leading, spacing: 8) {
@@ -479,6 +505,56 @@ struct HomeView: View {
                     .accessibilityLabel("\(item.displayName), \(Self.remaining(item))")
                 }
             }
+        }
+    }
+
+    /// The server's own Continue Watching, on the home screen. Tapping one
+    /// opens the Cliqx player at the position the server holds — which is what
+    /// "where I left off" has to mean when the same account is also watched
+    /// from a television and a browser.
+    private var serverResumeRow: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            LazyHStack(alignment: .top, spacing: 12) {
+                ForEach(serverResume) { entry in
+                    Button {
+                        serverPlayback.play(entry.item, on: entry.server)
+                    } label: {
+                        WideCard(server: entry.server, item: entry.item)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+        // The row is full-bleed inside a padded column, so the cards reach the
+        // edge as they scroll instead of stopping 20pt short of it.
+        .padding(.horizontal, -20)
+        .safeAreaPadding(.horizontal, 20)
+    }
+
+    /// Asked of every server, and a server that will not answer is simply left
+    /// out: one that is off, or off this network, must not take the home
+    /// screen down with it.
+    private func loadServerResume() async {
+        // In parallel, like the server shelf's own rows: a server that is off
+        // sits on a 15-second timeout, and asking them in turn would make the
+        // live one wait behind the dead one on every return to the app.
+        let clients = servers.servers.map { ($0, servers.client(for: $0)) }
+        let found = await withTaskGroup(of: [ServerResumeItem].self) { group in
+            for (server, client) in clients {
+                group.addTask {
+                    let items = (try? await client.resume(userID: server.userID)) ?? []
+                    return items.map { ServerResumeItem(server: server, item: $0) }
+                }
+            }
+            var all: [ServerResumeItem] = []
+            for await part in group { all += part }
+            return all
+        }
+        // Each server sorts its own answer; across two of them only the date
+        // can say which was really last.
+        serverResume = found.sorted {
+            ($0.item.userData?.lastPlayedDate ?? .distantPast)
+                > ($1.item.userData?.lastPlayedDate ?? .distantPast)
         }
     }
 
@@ -559,4 +635,11 @@ struct HomeView: View {
         }
     }
 
+}
+
+/// One thing to carry on with, and the server it came from.
+struct ServerResumeItem: Identifiable {
+    let server: JellyfinServer
+    let item: JellyfinItem
+    var id: String { "\(server.id)|\(item.id)" }
 }

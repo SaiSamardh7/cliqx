@@ -105,7 +105,15 @@ final class ServerEngine: NSObject, ObservableObject, @preconcurrency VLCMediaPl
     private func load(_ item: JellyfinItem) {
         guard let token = client.token,
               let url = JellyfinAPI.streamURL(server: server.url, itemID: item.id, token: token)
-        else { return }
+        else {
+            // Returning quietly left a player with no title, no duration and a
+            // button that did nothing. Reachable in one tap now that the home
+            // screen offers server items directly, so it has to say what is
+            // wrong — a sign-in that has expired or been revoked elsewhere.
+            page.mediaError = "Cliqx is signed out of \(server.name). "
+                + "Open the server from the home screen and sign in again."
+            return
+        }
         self.item = item
         page.title = item.seriesName.map { "\($0) — \(item.name)" } ?? item.name
         page.playbackEnded = false

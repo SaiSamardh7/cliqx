@@ -47,12 +47,17 @@ struct JellyfinItem: Codable, Identifiable, Hashable {
         var playedPercentage: Double?
         var unplayedItemCount: Int?
         var isFavorite: Bool?
+        /// When this was last watched. Only the home screen needs it, to put
+        /// one order on items coming back from several servers at once — each
+        /// server sorts its own answer and knows nothing of the others.
+        var lastPlayedDate: Date?
         enum CodingKeys: String, CodingKey {
             case playbackPositionTicks = "PlaybackPositionTicks"
             case played = "Played"
             case playedPercentage = "PlayedPercentage"
             case unplayedItemCount = "UnplayedItemCount"
             case isFavorite = "IsFavorite"
+            case lastPlayedDate = "LastPlayedDate"
         }
     }
 
