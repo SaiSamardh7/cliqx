@@ -128,7 +128,12 @@ public enum PlayerFormatting {
     /// preferred because sites change URL shapes; the path fallback covers
     /// pages whose title is only "Episode 5".
     public static func seriesIdentity(title: String, url: URL) -> String {
-        let host = HostKey.canonical(url.host() ?? "") ?? (url.host() ?? "")
+        // The PORT is part of which server this is. Without it two home
+        // servers on one machine — `localhost:8096` and `localhost:8920`, a
+        // real pair found in a live store — were the same site, so a show on
+        // one evicted the show on the other from the shelf.
+        let bare = HostKey.canonical(url.host() ?? "") ?? (url.host() ?? "")
+        let host = url.port.map { "\(bare):\($0)" } ?? bare
         if let series = seriesTitle(title, host: host),
            series.range(of: #"(?i)^episode\s*\d+$"#, options: .regularExpression) == nil {
             let folded = series.folding(options: [.caseInsensitive, .diacriticInsensitive],

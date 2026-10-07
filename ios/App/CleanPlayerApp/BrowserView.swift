@@ -158,7 +158,10 @@ struct BrowserView: View {
                 .foregroundStyle(.secondary)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 1) {
-                Text("Blocked a popup").font(.footnote.weight(.medium))
+                Text(page.blockedExternalIsRedirect
+                     ? "Stopped a redirect off this page"
+                     : "Blocked a popup")
+                    .font(.footnote.weight(.medium))
                 Text(destination?.host() ?? destination?.absoluteString ?? "Unknown destination")
                     .font(.caption).foregroundStyle(.secondary).lineLimit(1)
             }

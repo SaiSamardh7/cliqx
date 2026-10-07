@@ -12,7 +12,7 @@ priority.
 |---|---|
 | Rules active | **183,950** at Strict, 134,397 at Standard, across four lists |
 | Ad hosts covered | **~104,182** distinct domains in block rules |
-| Tests passing | **661** — 242 Swift · 11 UI · 408 agent (204 specs, two engines) |
+| Tests passing | **674** — 243 Swift · 11 UI · 420 agent (210 specs, two engines) |
 | Commits | **6**, pushed to `SaiSamardh7/cliqx`, CI green |
 
 ---

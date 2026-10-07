@@ -148,6 +148,10 @@ final class PageState: ObservableObject {
     /// A cross-origin window the page tried to open. Held rather than followed,
     /// so the user decides whether to leave the page they are watching.
     @Published var blockedExternal: URLRequest?
+    /// Whether that was a REDIRECT off the page rather than a new window. The
+    /// bar names one or the other, because calling a filter's redirect "a
+    /// popup" tells the user to look for the wrong thing.
+    @Published var blockedExternalIsRedirect = false
 
     weak var webView: WKWebView?
 
@@ -309,6 +313,7 @@ struct WebView: UIViewRepresentable {
         // for was the one path that never armed it. Tapping a card opened the
         // site's raw page, header, ads and its own player included.
         context.coordinator.armAutoTheater(for: url)
+        context.coordinator.requestedURL = url
         webView.load(URLRequest(url: url))
 
         // A plain container rather than the web view itself, so the warm
@@ -332,6 +337,7 @@ struct WebView: UIViewRepresentable {
         guard let target = model.current, context.coordinator.loaded != target else { return }
         context.coordinator.loaded = target
         context.coordinator.armAutoTheater(for: target)
+        context.coordinator.requestedURL = target
         page.webView?.load(URLRequest(url: target))
     }
 
@@ -350,6 +356,21 @@ struct WebView: UIViewRepresentable {
         private var recoveredFrom: URL?
         private var pendingMainFrameRequest: URLRequest?
         private var failedMainFrameRequest: URLRequest?
+
+        /// The page the APP was told to open — a library card, an address, an
+        /// episode — for as long as it has not arrived.
+        ///
+        /// A redirect that lands on a different site before that page commits
+        /// is not that page. It is a network filter, a parked domain or an ad
+        /// hop, and following it silently is what makes a library card look
+        /// like it points at the wrong thing: the user asked for One Piece,
+        /// their provider's filter answered 302, and the app obediently showed
+        /// them somewhere else with no explanation.
+        ///
+        /// Nil once the asked-for page commits, so ordinary navigation
+        /// afterwards — links, SSO hops, the site's own redirects — is
+        /// untouched.
+        var requestedURL: URL?
 
         private lazy var localNetworkProbeSession = URLSession(
             configuration: BrowserSetup.makeLocalNetworkProbeConfiguration())
@@ -625,8 +646,17 @@ struct WebView: UIViewRepresentable {
             guard let webView = page.webView else { return }
             let config = WKSnapshotConfiguration()
             config.snapshotWidth = 480          // points; a poster, not a frame grab
-            webView.takeSnapshot(with: config) { image, _ in
-                guard let image else { return }
+            // The document that was asked is the only one this answers for.
+            // `takeSnapshot` replies later, and nothing tied the picture it
+            // brings back to the page it was asked of — so a reply landing
+            // after a navigation saved whatever was on screen THEN under the
+            // URL asked for BEFORE, and a card ended up wearing another
+            // video's picture. Same guard as `refreshHandoffStream`.
+            let asked = navigationGeneration
+            webView.takeSnapshot(with: config) { [weak self] image, _ in
+                guard let self, let image,
+                      self.navigationGeneration == asked,
+                      self.watchingURL == url else { return }
                 Thumbnails.save(image, for: url)
             }
         }
@@ -750,6 +780,7 @@ struct WebView: UIViewRepresentable {
 
         private func loadEpisodePage(_ destination: URL, in webView: WKWebView) {
             loaded = destination
+            requestedURL = destination
             model.open(destination)
             webView.load(URLRequest(url: destination))
         }
@@ -1181,6 +1212,7 @@ struct WebView: UIViewRepresentable {
                 webView.load(navigationAction.request)
             } else {
                 page.blockedExternal = navigationAction.request
+                page.blockedExternalIsRedirect = false
                 page.popupsBlocked += 1
             }
             return nil
@@ -1223,7 +1255,31 @@ struct WebView: UIViewRepresentable {
                 if page.isTheater, navigationAction.navigationType == .other,
                    !HostKey.isSameSite(url, as: webView.url) {
                     page.blockedExternal = navigationAction.request
+                    page.blockedExternalIsRedirect = true
                     page.popupsBlocked += 1
+                    decisionHandler(.cancel)
+                    return
+                }
+
+                // And the same for a page the app was told to open that has
+                // not arrived yet — see `requestedURL`. Held rather than
+                // refused: the bar names the destination and one tap goes
+                // there, which is what a link shortener or a site that really
+                // has moved needs, and what a filter page does not get to do
+                // behind the user's back.
+                if navigationAction.navigationType == .other,
+                   let requested = requestedURL,
+                   !HostKey.isSameSite(url, as: requested) {
+                    page.blockedExternal = navigationAction.request
+                    page.blockedExternalIsRedirect = true
+                    requestedURL = nil
+                    // The origin indicator was moved to the redirect's host a
+                    // few lines up, before anyone knew it would be refused.
+                    // Put it back: nothing from there is on screen, and an
+                    // address bar naming a site the user never reached is the
+                    // same lie the padlock rules exist to prevent.
+                    page.host = Self.displayHost(requested)
+                    page.isSecure = requested.scheme?.lowercased() == "https"
                     decisionHandler(.cancel)
                     return
                 }
@@ -1239,6 +1295,9 @@ struct WebView: UIViewRepresentable {
             guard let webView = page.webView, let url = request.url else { return }
             page.blockedExternal = nil
             loaded = url
+            // The user has just said yes to this destination, so it is not
+            // held again — including when it is itself a redirect.
+            requestedURL = nil
             model.synchronizeCurrent(url)
             // The URL only. The request the page built carried its method,
             // headers and body; "Open" means "show me where this goes", not
@@ -1251,6 +1310,7 @@ struct WebView: UIViewRepresentable {
             guard let webView = page.webView else { return }
             if let request = failedMainFrameRequest {
                 pendingMainFrameRequest = request
+                requestedURL = request.url
                 webView.load(request)
             } else {
                 webView.reload()
@@ -1466,6 +1526,13 @@ struct WebView: UIViewRepresentable {
             let ns = error as NSError
             // -999 is "a newer navigation replaced this one" — not a failure.
             guard ns.code != NSURLErrorCancelled else { return }
+            // 102 is WebKit's "a policy decision stopped this load", which is
+            // this app cancelling a popup or a redirect on purpose. Reporting
+            // it put "Frame load interrupted" on screen OVER the bar offering
+            // the destination — so the one thing explaining what happened was
+            // hidden by a message about an error that is not one.
+            guard !(ns.domain == "WebKitErrorDomain" && ns.code == 102) else { return }
+            requestedURL = nil
             // An episode that will not load has nothing to resume into.
             endResume()
 
@@ -1480,8 +1547,19 @@ struct WebView: UIViewRepresentable {
                 + "this network."
             case NSURLErrorTimedOut:
                 "The server took too long to respond."
-            case NSURLErrorSecureConnectionFailed,
-                 NSURLErrorServerCertificateUntrusted,
+            // Kept apart from the certificate errors below. This one fires
+            // when the handshake never finished, so there was no certificate
+            // to be wrong — and the usual cause is something answering on the
+            // site's behalf: a filter on the Wi-Fi, in the router or at the
+            // provider, or a captive portal. Blaming the site's certificate
+            // sent people to look in the one place the fault was not.
+            case NSURLErrorSecureConnectionFailed:
+                "The secure connection failed before this site could prove who "
+                + "it is.\n\nSomething on the network usually answers in its "
+                + "place when this happens — a content filter on your Wi\u{2011}Fi, "
+                + "router or broadband provider, or a Wi\u{2011}Fi sign-in page. "
+                + "Trying another network tells the two apart."
+            case NSURLErrorServerCertificateUntrusted,
                  NSURLErrorServerCertificateHasBadDate,
                  NSURLErrorServerCertificateHasUnknownRoot:
                 "Secure connection failed. The site's HTTPS certificate is not "
@@ -1546,6 +1624,13 @@ struct WebView: UIViewRepresentable {
                 model.synchronizeCurrent(url)
             }
             failedMainFrameRequest = nil
+            // It arrived; everything after this is ordinary browsing.
+            requestedURL = nil
+            // A page that commits has recovered. Without this, a renderer that
+            // died once — most often while the app was in the background —
+            // left the second death reported as "this page keeps running out
+            // of memory", however long ago and however well it has run since.
+            recoveredFrom = nil
             page.host = Self.displayHost(webView.url)
             page.isSecure = webView.url?.scheme?.lowercased() == "https"
         }
@@ -1964,6 +2049,7 @@ struct WebView: UIViewRepresentable {
         /// and with it the handler. That frame was then frozen for good.
         private var dialogQueue: [(UIViewController, () -> Void)] = []
         private var dialogShowing = false
+        private var dialogRetry: Task<Void, Never>?
 
         /// Presents now, or waits for the one on screen to finish. `fallback`
         /// runs if the dialog can never be shown, so the page is answered
@@ -1987,11 +2073,41 @@ struct WebView: UIViewRepresentable {
                     presentNextDialog()
                 } else {
                     dialogQueue.insert((alert, fallback), at: 0)
+                    scheduleDialogRetry()
                 }
                 return
             }
             dialogShowing = true
             presenter.present(alert, animated: true)
+        }
+
+        /// Waits for a presenter that is busy with something that is not ours.
+        ///
+        /// Nothing reports a SwiftUI sheet or a full-screen cover going away,
+        /// and the only things that retried were a new dialog arriving and one
+        /// of our own alerts being dismissed — neither of which happens while
+        /// the queue is stuck. Meanwhile WebKit's `alert()` holds the page's
+        /// JavaScript suspended, so the page was frozen for the rest of its
+        /// life. After a while the page is answered anyway: a dialog nobody
+        /// saw is better than a document that never runs again.
+        private func scheduleDialogRetry() {
+            guard dialogRetry == nil else { return }
+            dialogRetry = Task { [weak self] in
+                for _ in 0..<40 {                       // about twelve seconds
+                    try? await Task.sleep(for: .milliseconds(300))
+                    guard let self, !Task.isCancelled else { return }
+                    guard !self.dialogQueue.isEmpty else { self.dialogRetry = nil; return }
+                    if let presenter = Self.presenter(for: self.page.webView),
+                       presenter.presentedViewController == nil {
+                        self.dialogRetry = nil
+                        self.presentNextDialog()
+                        return
+                    }
+                }
+                guard let self, !Task.isCancelled else { return }
+                self.dialogRetry = nil
+                self.drainDialogs()
+            }
         }
 
         /// Called from every action, after the handler the action carries.
@@ -2003,6 +2119,8 @@ struct WebView: UIViewRepresentable {
         /// A navigation replaces the document that asked. Answer anything still
         /// queued so no handler is dropped.
         private func drainDialogs() {
+            dialogRetry?.cancel()
+            dialogRetry = nil
             let pending = dialogQueue
             dialogQueue.removeAll()
             for (_, fallback) in pending { fallback() }
@@ -2060,5 +2178,12 @@ struct WebView: UIViewRepresentable {
 
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!,
                      withError error: Error) { failed() }
+
+        /// The standby is a second web process, off screen, and it is the
+        /// first thing iOS jettisons — above all while the app is in the
+        /// background, which is exactly when an episode is queued up. Nothing
+        /// was listening, so a dead standby stayed "not ready yet" and Next
+        /// held the curtain until the watchdog gave up 45 seconds later.
+        func webViewWebContentProcessDidTerminate(_ webView: WKWebView) { failed() }
     }
 }

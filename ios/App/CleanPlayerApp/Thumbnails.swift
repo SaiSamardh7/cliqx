@@ -40,14 +40,30 @@ enum Thumbnails {
             return false
         }
         try? data.write(to: file(for: url), options: .atomic)
+        cache.setObject(image, forKey: file(for: url).path as NSString)
         return true
     }
 
+    /// Decoded posters, kept in memory.
+    ///
+    /// `image(for:)` is called from inside a card's body, so SwiftUI asks for
+    /// it again on every pass — and each ask was a file read and a decode of a
+    /// 1440×2746 JPEG, on the main thread, for every visible card. Coming back
+    /// to the app re-renders the whole shelf at once, which is exactly when
+    /// that was felt. `NSCache` empties itself under memory pressure, which is
+    /// the right behaviour for something regenerable.
+    private static let cache = NSCache<NSString, UIImage>()
+
     static func image(for url: URL) -> UIImage? {
-        UIImage(contentsOfFile: file(for: url).path)
+        let key = file(for: url).path as NSString
+        if let cached = cache.object(forKey: key) { return cached }
+        guard let image = UIImage(contentsOfFile: key as String) else { return nil }
+        cache.setObject(image, forKey: key)
+        return image
     }
 
     static func remove(for url: URL) {
+        cache.removeObject(forKey: file(for: url).path as NSString)
         try? FileManager.default.removeItem(at: file(for: url))
     }
 }

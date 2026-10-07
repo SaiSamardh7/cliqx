@@ -1498,25 +1498,37 @@ html[data-cp-unlock], html[data-cp-unlock] body {
   /// immediately would stage a hidden thumbnail on a page whose real player is
   /// still mounting.
   function resumeCandidate(elapsed, graceMs = 3000) {
-    const sized = largestVideo();
+    const videos = allVideos();
+    // Biggest video THAT HAS SOMETHING TO PLAY, before biggest outright. An
+    // autoplaying advertisement is routinely larger than the player it sits
+    // above, and largest-wins staged it — which is what "Next played an ad"
+    // looks like. Both of these are sized, so a sized video still always
+    // beats a boxless one.
+    const playable = largestVideo(videos.filter(hasSomethingToPlay));
+    if (playable) return playable;
+    const sized = largestVideo(videos);
     if (sized) return sized;
     if (elapsed < graceMs) return null;
-    for (const v of allVideos()) {
-      if (v.currentSrc || v.src || v.readyState > 0 || v.querySelector('source')) {
-        return v;
-      }
+    for (const v of videos) {
+      if (hasSomethingToPlay(v)) return v;
     }
     return null;
   }
 
-  function largestVideo() {
+  function largestVideo(from) {
     let best = null, bestArea = 0;
-    for (const v of allVideos()) {
+    for (const v of (from || allVideos())) {
       const r = v.getBoundingClientRect();
       const area = r.width * r.height;
       if (area > bestArea) { best = v; bestArea = area; }
     }
     return bestArea > 0 ? best : null;
+  }
+
+  /// A source, a loaded frame, or a <source> child. The same question the
+  /// boxless fallback below has always asked, named once.
+  function hasSomethingToPlay(v) {
+    return !!(v.currentSrc || v.src || v.readyState > 0 || v.querySelector('source'));
   }
 
   // --- Interstitial / overlay blocking ------------------------------------
@@ -1991,7 +2003,18 @@ html[data-cp-unlock], html[data-cp-unlock] body {
   }
 
   function attachButton(video) {
-    if (!video || !video.parentElement) return;
+    if (!video) return;
+    // A <video> that is a shadow root's OWN child has no `parentElement`: its
+    // parent is the ShadowRoot, which is not an element. Bailing out on that
+    // left precisely the players shadow-DOM support was added for with no
+    // button at all — the walk found them and then nothing was offered.
+    // Anchor on the host instead and put the button beside the video, inside
+    // the root, where the stylesheet for that root already reaches.
+    const videoRoot = video.getRootNode();
+    const shadowHost = (videoRoot && videoRoot.host) ? videoRoot.host : null;
+    const container = video.parentElement || (shadowHost ? videoRoot : null);
+    const anchor = video.parentElement || shadowHost;
+    if (!container || !anchor) return;
 
     // Track the button ITSELF, not a flag on the video. A boolean marker meant
     // that once anything removed the button — the orphan sweep, or the page's
@@ -2005,29 +2028,27 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     if (r.width < 200 || r.height < 100) return;
 
     // The button is position:absolute, so it lands on the video only if the
-    // parent establishes a containing block. On a static parent it flies off to
+    // anchor establishes a containing block. On a static anchor it flies off to
     // whatever ancestor is positioned — usually the top-left of the page, where
     // it looks like no button was added at all.
-    const parent = video.parentElement;
-    if (getComputedStyle(parent).position === 'static') {
-      parent.style.position = 'relative';
-      parent.dataset.cpAnchored = '1';
+    if (getComputedStyle(anchor).position === 'static') {
+      anchor.style.position = 'relative';
+      anchor.dataset.cpAnchored = '1';
     }
 
     // A player inside a shadow root needs the stylesheet in that root.
-    const root = video.getRootNode();
-    ensureStyle(root === document ? document : root);
+    ensureStyle(videoRoot === document ? document : videoRoot);
 
     const theater = makeButton(video, 'Watch clean', 'Watch clean',
                                () => watchClean(video));
-    video.parentElement.appendChild(theater);
+    container.appendChild(theater);
     video.__cpBtn = theater;
 
     if (canNativeFullscreen(video)) {
       const full = makeButton(video, 'Fullscreen', 'Open in the system player',
                               () => nativeFullscreen(video));
       full.dataset.cpSecondary = '1';
-      video.parentElement.appendChild(full);
+      container.appendChild(full);
     }
   }
 
@@ -2036,7 +2057,9 @@ html[data-cp-unlock], html[data-cp-unlock] body {
   function sweepOrphans() {
     for (const b of allButtons()) {
       if (!b.__cpVideo || !b.__cpVideo.isConnected) {
-        const parent = b.parentElement;
+        const root = b.getRootNode();
+        const parent = b.parentElement
+          || ((root && root.host) ? root.host : null);
         b.remove();
         // Give back the position we borrowed, once nothing of ours needs it.
         if (parent && parent.dataset && parent.dataset.cpAnchored === '1'
@@ -2059,11 +2082,35 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     return found;
   }
 
+  /// Whether anything on this page is offering a control. Drives the sweep
+  /// below, so it costs nothing once a player has been found.
+  let haveControls = false;
+
   function scan(root = document) {
     sweepOrphans();
     for (const v of allVideos(root)) attachButton(v);
     checkStaged();
+    haveControls = allButtons().length > 0;
   }
+
+  /// A slow sweep for a player nothing told us about.
+  ///
+  /// A MutationObserver does not cross a shadow boundary, and attaching a
+  /// shadow root to an element that is ALREADY in the document mutates
+  /// nothing in the light tree. So a custom-element player that builds its
+  /// root and mounts its <video> after our first pass produced no event to
+  /// scan on and was never found at all — no button, no theater, on exactly
+  /// the players shadow-DOM support was added for.
+  ///
+  /// ponytail: a one-second poll, and only while nothing has been found.
+  /// Ceiling: a player appearing more than a second late is a second late to
+  /// get its button. Upgrade path: have popupguard patch `attachShadow` in
+  /// the page world and announce through a DOM event, the way it already
+  /// reports blocked popups.
+  const HUNT_MS = 1000;
+  setInterval(() => {
+    if (!haveControls && !staged) scan();
+  }, HUNT_MS);
 
   // --- A player that leaves ------------------------------------------------
 

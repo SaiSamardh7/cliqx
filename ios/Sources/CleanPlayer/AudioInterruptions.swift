@@ -39,6 +39,15 @@ public final class AudioInterruptions {
             centre.addObserver(forName: AVAudioSession.interruptionNotification,
                                object: nil, queue: .main) { note in
                 guard let event = Self.interruption(from: note.userInfo) else { return }
+                // iOS took the session to give it to whatever interrupted, and
+                // says nothing when that is over. A player that resumes without
+                // claiming it back calls play() into a session it no longer
+                // owns: the button moves, the scrubber runs, and no sound comes
+                // out — which is most of "I came back to the app and it was
+                // dead". Claimed here rather than in each of the four engines
+                // that handle this event, because all four need it and none of
+                // them did it.
+                if case .ended = event { MediaSession.activate() }
                 handler(event)
             },
             centre.addObserver(forName: AVAudioSession.routeChangeNotification,

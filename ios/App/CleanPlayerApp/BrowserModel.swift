@@ -157,7 +157,11 @@ final class BrowserModel: ObservableObject {
     }
 
     /// Set by `openWatched`, read once by the web view.
-    @Published var pendingAutoTheater: URL?
+    ///
+    /// Deliberately NOT `@Published`: nothing observes it, and it is written
+    /// from `makeUIView`/`updateUIView` — inside a SwiftUI view update, where
+    /// publishing a change is undefined behaviour the runtime complains about.
+    var pendingAutoTheater: URL?
 
     /// Spent by the next navigation whether or not it is the one that was
     /// armed — which is what the comment above has always claimed. Leaving it
