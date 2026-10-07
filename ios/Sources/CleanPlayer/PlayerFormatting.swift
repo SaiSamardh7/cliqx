@@ -9,8 +9,12 @@ public enum PlayerFormatting {
 
     public static let speeds: [Double] = [0.75, 1, 1.25, 1.5, 1.75, 2]
 
+    /// `%g` drops the trailing zeros and keeps every digit that matters. `%.2g`
+    /// is two SIGNIFICANT digits, which is fine for 1.5 and silently wrong for
+    /// the two speeds either side of it: the menu offered 1.25 and 1.75 and
+    /// labelled them "1.2" and "1.8".
     public static func rateText(_ rate: Double) -> String {
-        rate == rate.rounded() ? String(Int(rate)) : String(format: "%.2g", rate)
+        String(format: "%g", rate)
     }
 
     /// h:mm:ss only when there is an hour to show.

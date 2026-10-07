@@ -385,6 +385,9 @@ struct LocalPlayerView: View {
             // Shutdown save, before the engine is torn down.
             model.reportProgress()
             model.stop()
+            // The brightness swipe borrowed the screen; give it back. Without
+            // this a dark scene left the phone dim for everything afterwards.
+            ScreenBrightness.restore()
             if video.scoped { video.url.stopAccessingSecurityScopedResource() }
             // Hand the audio session back so whatever was playing before can
             // resume; .playback interrupted it and only this ends that.
@@ -509,7 +512,7 @@ struct LocalPlayerView: View {
                         dx: Double(value.translation.width),
                         dy: Double(value.translation.height),
                         startXFraction: Double(value.startLocation.x) / width)
-                    dragStartBrightness = UIScreen.main.brightness
+                    dragStartBrightness = ScreenBrightness.current
                     dragStartVolume = model.volumePercent
                 }
                 guard let dragAction else { return }
@@ -522,7 +525,7 @@ struct LocalPlayerView: View {
                     guard gestureSettings.brightnessAndVolume else { return }
                     let change = -value.translation.height / max(size.height, 1)
                     let brightness = min(max(dragStartBrightness + change, 0), 1)
-                    UIScreen.main.brightness = brightness
+                    ScreenBrightness.set(brightness)
                     gestureBrightnessPercent = Int((brightness * 100).rounded())
                     gestureVolumePercent = model.volumePercent
                 case .volume:
@@ -531,7 +534,7 @@ struct LocalPlayerView: View {
                                       / max(size.height, 1) * 200).rounded())
                     let volume = min(max(dragStartVolume + change, 0), 200)
                     model.setVolume(volume)
-                    gestureBrightnessPercent = Int((UIScreen.main.brightness * 100).rounded())
+                    gestureBrightnessPercent = Int((ScreenBrightness.current * 100).rounded())
                     gestureVolumePercent = volume
                 case .dismiss:
                     break

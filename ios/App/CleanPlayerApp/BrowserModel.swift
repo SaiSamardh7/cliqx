@@ -45,7 +45,12 @@ struct Site: Codable, Hashable, Identifiable {
     }
     /// Monogram for the tile — no third-party marks are bundled. Taken from
     /// the title, not the host: "developer.mozilla.org" would read as "D".
-    var initials: String { String(title.prefix(1)).uppercased() }
+    /// From the SHOW's name where there is one, so the letter matches the
+    /// label printed under the card: "Aniwave - The Exiled Heavy Knight" is
+    /// shown as "The Exiled Heavy Knight" and read as "A".
+    var initials: String {
+        String((seriesTitle ?? title).prefix(1)).uppercased()
+    }
 }
 
 private struct EpisodeProgress: Codable {
@@ -154,10 +159,14 @@ final class BrowserModel: ObservableObject {
     /// Set by `openWatched`, read once by the web view.
     @Published var pendingAutoTheater: URL?
 
+    /// Spent by the next navigation whether or not it is the one that was
+    /// armed — which is what the comment above has always claimed. Leaving it
+    /// set on a mismatch meant a tap on a card could still be armed pages
+    /// later, and open a player over something the user merely browsed to.
     func consumeAutoTheater(for url: URL) -> Bool {
-        guard let armed = pendingAutoTheater, armed == url else { return false }
+        guard let armed = pendingAutoTheater else { return false }
         pendingAutoTheater = nil
-        return true
+        return armed == url
     }
 
     /// WebKit can navigate without going through `open` (links, redirects,
@@ -336,12 +345,6 @@ final class BrowserModel: ObservableObject {
         guard let index = pinned.firstIndex(where: { $0.url == site.url }) else { return }
         pinned[index].staySignedIn = on
         persistPinned()
-    }
-
-    /// Pinned, or on the local network: where a saved password may live in
-    /// the keychain rather than die with the session.
-    func isOwnHost(_ host: String) -> Bool {
-        isPinnedHost(host) || AddressResolver.isLocalHost(host)
     }
 
     func unpinSite(_ url: URL) {

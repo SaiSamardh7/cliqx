@@ -1,3 +1,4 @@
+import CleanPlayer
 import CryptoKit
 import Foundation
 import UIKit
@@ -21,8 +22,25 @@ enum Thumbnails {
         return directory.appendingPathComponent(name).appendingPathExtension("jpg")
     }
 
-    static func save(_ data: Data, for url: URL) {
+    /// Keeps a frame only if there is a picture in it.
+    ///
+    /// A staged video snapshots as solid black — WebKit does not capture the
+    /// video layer — and a black JPEG is not nil, so `image(for:)` returned it
+    /// and the card's monogram fallback never ran. The library filled with
+    /// blank tiles. See `PosterFrame`.
+    @discardableResult
+    static func save(_ image: UIImage, for url: URL) -> Bool {
+        guard let frame = image.cgImage, PosterFrame.carriesPicture(frame),
+              let data = image.jpegData(compressionQuality: 0.7)
+        else {
+            // Clear any blank poster already cached for this page, so a
+            // library that filled with black tiles heals on the next watch
+            // rather than staying broken until the cache is evicted.
+            remove(for: url)
+            return false
+        }
         try? data.write(to: file(for: url), options: .atomic)
+        return true
     }
 
     static func image(for url: URL) -> UIImage? {

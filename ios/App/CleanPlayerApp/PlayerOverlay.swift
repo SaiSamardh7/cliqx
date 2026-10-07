@@ -42,10 +42,6 @@ struct PlayerOverlay: View {
     /// a fresh decision, so this holds the URL rather than a flag.
     @State private var autoHandedOffStream: URL?
     @State private var heldPreviousRate: Double?
-    /// The screen brightness before this player touched it, so it can be put
-    /// back. Without this, one swipe down during a dark scene left the phone
-    /// dim for everything the user did afterwards.
-    @State private var brightnessOnEntry: CGFloat?
     @State private var showingBoostWarning = false
     /// What the brightness slider shows.
     ///
@@ -53,7 +49,7 @@ struct PlayerOverlay: View {
     /// `UIScreen.main.brightness` is a plain property with nothing to observe:
     /// setting it gives SwiftUI no reason to redraw, so the track stayed where
     /// it was while the screen changed underneath it.
-    @State private var brightnessLevel = Double(UIScreen.main.brightness)
+    @State private var brightnessLevel = Double(ScreenBrightness.current)
     /// Whether the rotate button narrowed the app's supported orientations, so
     /// exiting knows whether it has anything to put back, and what the
     /// interface was showing before it did.
@@ -112,8 +108,7 @@ struct PlayerOverlay: View {
         .animation(.easeInOut(duration: 0.12), value: isShowingEdgeSliders)
         .animation(.easeInOut(duration: 0.18), value: chrome.isLocked)
         .onAppear {
-            brightnessOnEntry = UIScreen.main.brightness
-            brightnessLevel = Double(UIScreen.main.brightness)
+            brightnessLevel = Double(ScreenBrightness.current)
             // The three things the chrome initiates on its own. Everything
             // else is a button, and goes straight to `page.actions`.
             chrome.onAdvance = {
@@ -155,14 +150,7 @@ struct PlayerOverlay: View {
         .onDisappear {
             chrome.cancelEverything()
             restoreOrientation()
-            // Put the screen back the way it was found. Only if nothing else
-            // changed it since — the user may have used Control Centre, and
-            // overriding that would be the same rudeness in reverse.
-            if let entry = brightnessOnEntry,
-               let last = lastBrightnessSet,
-               abs(UIScreen.main.brightness - last) < 0.01 {
-                UIScreen.main.brightness = entry
-            }
+            ScreenBrightness.restore()
         }
         .sheet(isPresented: $showingEpisodes) { episodeSheet }
         // Says what AirPlay will and will not do here, and names the thing
@@ -211,10 +199,6 @@ struct PlayerOverlay: View {
     /// Amplification routes the element through Web Audio, which AirPlay
     /// cannot forward. While a route could carry the picture, that trade is
     /// not worth making silently.
-    /// The last brightness this view set, so it can tell its own change from
-    /// one the user made in Control Centre.
-    @State private var lastBrightnessSet: CGFloat?
-
     private var boostWithheldForAirPlay: Bool {
         page.airplayAvailable && page.airplayCanSendVideo
     }
@@ -314,8 +298,7 @@ struct PlayerOverlay: View {
                 label: "Brightness"
             ) { value in
                 brightnessLevel = value
-                UIScreen.main.brightness = CGFloat(value)
-                lastBrightnessSet = CGFloat(value)
+                ScreenBrightness.set(CGFloat(value))
                 chrome.interacted()
             }
 
@@ -360,7 +343,7 @@ struct PlayerOverlay: View {
                         dx: Double(value.translation.width),
                         dy: Double(value.translation.height),
                         startXFraction: Double(value.startLocation.x) / width)
-                    dragStartBrightness = UIScreen.main.brightness
+                    dragStartBrightness = ScreenBrightness.current
                     dragStartVolume = page.volumePercent
                 }
 
@@ -375,8 +358,7 @@ struct PlayerOverlay: View {
                     guard gestureSettings.brightnessAndVolume else { return }
                     let change = -value.translation.height / max(size.height, 1)
                     let brightness = min(max(dragStartBrightness + change, 0), 1)
-                    UIScreen.main.brightness = brightness
-                    lastBrightnessSet = brightness
+                    ScreenBrightness.set(brightness)
                     brightnessLevel = Double(brightness)
                     gestureBrightnessPercent = Int((brightness * 100).rounded())
                     gestureVolumePercent = page.mediaVolumeAvailable
@@ -408,7 +390,7 @@ struct PlayerOverlay: View {
                     let volume = PlayerVolume.clamp(dragStartVolume + change,
                                                     to: volumeCeiling)
                     page.actions.setVolume(volume)
-                    gestureBrightnessPercent = Int((UIScreen.main.brightness * 100).rounded())
+                    gestureBrightnessPercent = Int((ScreenBrightness.current * 100).rounded())
                     gestureVolumePercent = volume
                     chrome.interacted()
                 case .dismiss:

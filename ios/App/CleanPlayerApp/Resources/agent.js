@@ -934,6 +934,11 @@ html[data-cp-unlock], html[data-cp-unlock] body {
       staged.removeEventListener('pause', reportPlayback);
       for (const name of BUFFERING_EVENTS) staged.removeEventListener(name, reportPlayback);
       staged.removeEventListener('ended', reportEnded);
+      // Both of these were added by enterTheater and forgotten here. Left on a
+      // video the user has walked away from, a late `encrypted` reports DRM for
+      // whatever is staged now.
+      staged.removeEventListener('encrypted', reportProtected);
+      staged.removeEventListener('error', reportMediaError);
       staged.removeEventListener('timeupdate', onTimeUpdate);
       staged.removeEventListener('durationchange', reportTime);
       staged.removeEventListener('progress', onTimeUpdate);

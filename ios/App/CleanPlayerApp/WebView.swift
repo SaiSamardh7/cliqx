@@ -303,6 +303,12 @@ struct WebView: UIViewRepresentable {
 
         context.coordinator.observe(webView)
         context.coordinator.loaded = url
+        // Here too, not only in `updateUIView`. A library card is tapped from
+        // the home screen, where there is no browser yet — so that tap always
+        // builds this view and lands HERE, and the one path the feature exists
+        // for was the one path that never armed it. Tapping a card opened the
+        // site's raw page, header, ads and its own player included.
+        context.coordinator.armAutoTheater(for: url)
         webView.load(URLRequest(url: url))
 
         // A plain container rather than the web view itself, so the warm
@@ -620,8 +626,8 @@ struct WebView: UIViewRepresentable {
             let config = WKSnapshotConfiguration()
             config.snapshotWidth = 480          // points; a poster, not a frame grab
             webView.takeSnapshot(with: config) { image, _ in
-                guard let data = image?.jpegData(compressionQuality: 0.7) else { return }
-                Thumbnails.save(data, for: url)
+                guard let image else { return }
+                Thumbnails.save(image, for: url)
             }
         }
 
@@ -940,7 +946,10 @@ struct WebView: UIViewRepresentable {
             model.synchronizeCurrent(current)
             page.host = Self.displayHost(current)
             page.isSecure = current.scheme?.lowercased() == "https"
-            page.title = new.title ?? ""
+            // Sanitized like every other page-derived string: this one goes
+            // straight into the player's top bar, and the standby's document
+            // is as untrusted as any other.
+            page.title = Self.sanitizedForUI(new.title ?? "")
             page.loadError = nil
             page.blockedExternal = nil
             endResume(keepingTheater: true)

@@ -51,7 +51,10 @@ final class WebStreamEngine: NSObject, ObservableObject, @preconcurrency VLCMedi
 
         page.isTheater = true
         page.title = title
-        page.host = pageURL.host()?.replacingOccurrences(of: "www.", with: "") ?? ""
+        // `HostKey.canonical`, not a bare "www." replacement: that one strips
+        // the sequence wherever it appears, including out of the middle of a
+        // host. Every other host label in the app already goes through it.
+        page.host = pageURL.host().flatMap(HostKey.canonical) ?? pageURL.host() ?? ""
         page.overlayBlocking = false
         // The whole point of coming here. VLC decodes, so the app owns the
         // audio outright: no Web Audio, no CORS, nothing to fail.
