@@ -1,6 +1,6 @@
 # Shipping Cliqx — everything left before release
 
-_Verified 8 October 2026 · 248 Swift tests green on the simulator_
+_Verified 8 October 2026 · 259 Swift tests green on the simulator_
 
 The blocking engine is done and proven, and app identity, signing, privacy
 declarations and the store listing are all settled. What remains is screenshots,
@@ -13,7 +13,7 @@ priority.
 |---|---|
 | Rules active | **183,732** at Strict, 134,166 at Standard, across four lists |
 | Ad hosts covered | **~104,000** distinct domains in block rules |
-| Tests passing | **679** — 248 Swift · 11 UI · 420 agent (210 specs, two engines) |
+| Tests passing | **690** — 259 Swift · 11 UI · 420 agent (210 specs, two engines) |
 | Commits | **62** on this branch, 51 ahead of `origin/main` and unmerged |
 
 ---

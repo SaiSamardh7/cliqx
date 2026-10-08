@@ -5,15 +5,28 @@ import SwiftUI
 
 /// Address, username, password, Connect. The password goes to the server
 /// once and is not kept; the token that comes back is.
+///
+/// When the address turns out not to be a Jellyfin server, the sheet offers to
+/// play it as a direct stream instead. That covers the case this app had no
+/// answer for: a file served over plain HTTP from a NAS, or an HLS endpoint,
+/// where standing up a whole media server to watch one URL is absurd. It is
+/// offered here rather than as a fourth button on the home screen because the
+/// address field is where someone has already pasted the link.
 struct AddServerSheet: View {
     @ObservedObject var servers: JellyfinServers
     @Environment(\.dismiss) private var dismiss
+    /// Called with a URL to play directly. The sheet does not own a player.
+    var onOpenStream: (URL) -> Void = { _ in }
 
     @State private var address = ""
     @State private var username = ""
     @State private var password = ""
     @State private var connecting = false
     @State private var error: String?
+    /// Set when the probe says "not Jellyfin" and the address could still be a
+    /// stream. Holding the URL rather than a flag means the button plays the
+    /// address that was actually tested, not whatever the field says by then.
+    @State private var streamCandidate: URL?
     @FocusState private var focused: Field?
     private enum Field { case address, username, password }
 
@@ -49,6 +62,21 @@ struct AddServerSheet: View {
                 if let error {
                     Section { Text(error).foregroundStyle(.red) }
                 }
+                if let streamCandidate {
+                    Section {
+                        Button {
+                            onOpenStream(streamCandidate)
+                            dismiss()
+                        } label: {
+                            Label("Play as a video stream", systemImage: "play.rectangle")
+                        }
+                    } footer: {
+                        Text("Plays the address directly, with no sign-in. Works for a "
+                             + "video file or a live stream you can already reach — not "
+                             + "for a streaming service, whose video is encrypted and "
+                             + "playable only in its own app.")
+                    }
+                }
             }
             .navigationTitle("Add server")
             .navigationBarTitleDisplayMode(.inline)
@@ -60,8 +88,12 @@ struct AddServerSheet: View {
                     if connecting {
                         ProgressView()
                     } else {
+                        // No longer gated on a username: the probe runs first,
+                        // and needing one is the answer rather than the entry
+                        // fee. An address that cannot be parsed still cannot
+                        // be tried.
                         Button("Connect") { connect() }
-                            .disabled(JellyfinAPI.serverURL(from: address) == nil || username.isEmpty)
+                            .disabled(JellyfinAPI.serverURL(from: address) == nil)
                     }
                 }
             }
@@ -69,12 +101,35 @@ struct AddServerSheet: View {
         }
     }
 
+    /// Probe first, then sign in.
+    ///
+    /// The order matters. Asking "is this Jellyfin?" before the credentials
+    /// are required means someone pasting a stream URL never has to invent a
+    /// username to find out this is not a server — and the password is still
+    /// sent only after the same check that always gated it.
     private func connect() {
-        guard let url = JellyfinAPI.serverURL(from: address), !username.isEmpty else { return }
+        guard let url = JellyfinAPI.serverURL(from: address) else { return }
         connecting = true
         error = nil
+        streamCandidate = nil
         Task {
             defer { connecting = false }
+            do {
+                try await JellyfinClient.confirmJellyfin(server: url)
+            } catch {
+                self.error = error.localizedDescription
+                // Only offer what can actually be played. The stream URL is
+                // read from the raw text, not from `url`: the Jellyfin parse
+                // drops the filename and query, which for a stream is the
+                // whole address.
+                self.streamCandidate = StreamAddress.url(from: address)
+                return
+            }
+            guard !username.isEmpty else {
+                self.error = "That's a Jellyfin server. Enter your username to sign in."
+                self.focused = .username
+                return
+            }
             do {
                 let (server, token) = try await JellyfinClient.signIn(
                     server: url, username: username, password: password)
