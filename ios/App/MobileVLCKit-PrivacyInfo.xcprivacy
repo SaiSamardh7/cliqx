@@ -10,17 +10,31 @@
 	<array/>
 	<key>NSPrivacyAccessedAPITypes</key>
 	<array>
+		<!-- VLC reads metadata for app-container media and files explicitly
+		     selected by the user through the document picker. -->
 		<dict>
 			<key>NSPrivacyAccessedAPIType</key>
-			<string>NSPrivacyAccessedAPICategoryUserDefaults</string>
+			<string>NSPrivacyAccessedAPICategoryFileTimestamp</string>
 			<key>NSPrivacyAccessedAPITypeReasons</key>
-			<array><string>CA92.1</string></array>
+			<array>
+				<string>C617.1</string>
+				<string>3B52.1</string>
+			</array>
 		</dict>
+		<!-- VLC uses monotonic time to schedule and measure media playback. -->
 		<dict>
 			<key>NSPrivacyAccessedAPIType</key>
 			<string>NSPrivacyAccessedAPICategorySystemBootTime</string>
 			<key>NSPrivacyAccessedAPITypeReasons</key>
 			<array><string>35F9.1</string></array>
+		</dict>
+		<!-- VLC checks capacity before writing media cache data. If capacity is
+		     insufficient, playback/cache behavior changes visibly. -->
+		<dict>
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryDiskSpace</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array><string>E174.1</string></array>
 		</dict>
 	</array>
 </dict>

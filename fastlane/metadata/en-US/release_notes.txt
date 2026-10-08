@@ -1,0 +1,1 @@
+Initial release of Cliqx, including private browsing, bundled content blocking, local media playback, and optional connection to a user-owned media server.

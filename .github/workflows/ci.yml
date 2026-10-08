@@ -142,6 +142,11 @@ jobs:
       # is ignored outright.
       - run: python3 tools/check-plist.py
 
+      # Required-reason APIs must be declared by the executable that uses
+      # them. This also guards the build phase that installs a manifest into
+      # the prebuilt MobileVLCKit framework before App Store upload.
+      - run: python3 tools/check-app-store-readiness.py
+
       # Two configurations carried 0.1 and two carried 1.0, so which version
       # shipped depended on which scheme was built.
       - run: python3 tools/check-version.py

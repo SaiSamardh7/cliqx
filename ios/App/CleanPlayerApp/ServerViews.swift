@@ -21,7 +21,7 @@ struct AddServerSheet: View {
         NavigationStack {
             Form {
                 Section {
-                    TextField("192.168.1.170:8096", text: $address)
+                    TextField("media-server.local:8096", text: $address)
                         .keyboardType(.URL)
                         .textContentType(.URL)
                         .textInputAutocapitalization(.never)

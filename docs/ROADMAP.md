@@ -17,20 +17,18 @@ priority.
 
 ---
 
-## Blocked on you — 5 items
+## Release decisions and external work
 
 None of these are engineering problems. Each is a call only you can make, and
 four are hard App Store blockers.
 
-### 1. App identity — one field left
+### 1. App identity ✅ done
 
 Bundle ID is `com.saisamardh.cleanplayer` and signs against your team. The home
 screen now reads **Cliqx**, matching every screen inside the app — it
 installed as "CleanPlayerApp" until `INFOPLIST_KEY_CFBundleDisplayName` was set.
 
-What is left: `MARKETING_VERSION` is still `0.1`.
-
-**Say the word on 1.0.**
+Done: `VERSION` and every target configuration now use `1.0.0`.
 
 ### 2. App icon ✅ done
 
@@ -53,21 +51,18 @@ warns past 30 days, but the gap is real.
 **Choose:** host pre-converted JSON somewhere, or embed `adblock-rust` and accept
 MPL-2.0 in `NOTICE.md`.
 
-### 4. Privacy policy has no home
+### 4. Privacy policy and contact ✅ done
 
-`PRIVACY.md` is written and shown in-app, but the App Store listing needs a
-public URL, and the contact line is still a `TODO`.
+Done: the listing uses the public repository copy of `PRIVACY.md`, and privacy
+questions go through the repository issue tracker without inventing an email
+address. Both URLs live in `fastlane/metadata/en-US`.
 
-**Give me:** where it will live, and a contact address.
+### 5. Diagnostics and privacy claim ✅ done
 
-### 5. Crash reporting conflicts with your privacy claim
-
-Your declaration is "Data Not Collected" for every category, defensible because
-there are no third-party SDKs. Adding a crash reporter changes that answer.
-MetricKit with an explicit user-initiated export would not.
-
-**Choose:** no crash reporting, on-device MetricKit, or accept the declaration
-change.
+Done: on-device MetricKit payloads and aggregate Watch Clean outcome counts are
+kept locally and never uploaded. The in-app policy, `PRIVACY.md`, and App Store
+notes now say so consistently. MobileVLCKit is disclosed as a local decoder,
+not incorrectly described as absent.
 
 ### 6. A stale duplicate project is still on disk
 

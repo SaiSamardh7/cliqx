@@ -1,0 +1,14 @@
+Cliqx has no developer-operated account or backend. The Jellyfin sign-in screen
+is an optional client for a media server owned and supplied by the user, so no
+Cliqx demo credentials exist and Jellyfin is not required to review the app.
+
+Account-free review path:
+1. Complete the short onboarding flow.
+2. In Browser, open a public website chosen by the reviewer. Protection status
+   and private browsing are available from the browser toolbar and Settings.
+3. In Settings, open Local files to exercise the system document picker and
+   on-device playback with a reviewer-supplied media file.
+4. Settings > About contains the privacy policy and open-source attributions.
+
+"Watch Clean" appears only when a compatible page exposes a playable media
+stream. Cliqx does not provide, host, or unlock content.

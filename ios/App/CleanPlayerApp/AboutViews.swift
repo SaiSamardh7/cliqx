@@ -126,9 +126,15 @@ struct PrivacyPolicyView: View {
                 paragraph("What is not collected",
                           "No browsing history leaves the device. No "
                           + "identifiers, no advertising ID, no location, no "
-                          + "contacts. There are no third-party SDKs in the "
-                          + "app, so nothing is collected on anyone else's "
-                          + "behalf either.")
+                          + "contacts. VLCKit decodes video on this device; "
+                          + "there are no advertising, analytics or tracking "
+                          + "SDKs, and nothing is collected on anyone else's "
+                          + "behalf.")
+
+                paragraph("On-device diagnostics",
+                          "Apple MetricKit reports and Watch clean attempt and "
+                          + "success counts stay inside the app on this device. "
+                          + "Cliqx does not upload them.")
 
                 paragraph("Filter lists",
                           "The blocking rules are bundled with the app and "
@@ -143,6 +149,10 @@ struct PrivacyPolicyView: View {
                 paragraph("Children",
                           "The app opens whatever the web address you enter "
                           + "points to. It does not filter content for age.")
+
+                paragraph("Contact",
+                          "For privacy questions, open a support request at "
+                          + "github.com/SaiSamardh7/cliqx/issues.")
             }
             .padding(20)
         }

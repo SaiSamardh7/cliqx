@@ -1,6 +1,6 @@
 # Cliqx — Privacy Policy
 
-_Last updated: 2 September 2026_
+_Last updated: 7 October 2026_
 
 This is the text shown in the app at **Settings → About → Privacy policy**.
 It is kept here so it can be published at a URL, which the App Store listing
@@ -28,7 +28,9 @@ requests the filter lists block.
 - No browsing history leaves the device.
 - No device or advertising identifiers.
 - No location, contacts, photos, or health data.
-- No crash or usage analytics.
+- No crash or usage diagnostics are uploaded. Apple MetricKit reports and
+  aggregate "Watch clean" attempt/success counts are stored on the device so
+  they can be inspected during development or a user-requested support session.
 - No analytics, advertising or tracking SDKs are linked into the app, so
   nothing is collected on anyone else's behalf either. The app links one
   third-party component, VLCKit, which decodes video on this device; it
@@ -57,4 +59,6 @@ content for age.
 
 ## Contact
 
-Questions about this policy: <!-- TODO: contact address before submission -->
+For privacy questions, open a support request in the public
+[Cliqx issue tracker](https://github.com/SaiSamardh7/cliqx/issues). Do not include
+browsing history, passwords, server tokens, or other private information.
