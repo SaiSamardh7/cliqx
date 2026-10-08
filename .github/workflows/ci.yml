@@ -154,6 +154,11 @@ jobs:
       # The README claimed 66 Swift and 198 agent tests long after both moved.
       - run: python3 tools/count-tests.py --check
 
+      # Four documents stated Strict as 183,950, 183,880 and 133,333 while the
+      # bundle held 183,732, and ARCHITECTURE.md misquoted the per-list counts
+      # in the same sentence that cited the manifest.
+      - run: python3 tools/count-rules.py --check
+
       # PRIVACY.md says no server is contacted for filter rules. True only
       # while FilterListUpdater has no caller, which is the kind of fact that
       # rots silently.

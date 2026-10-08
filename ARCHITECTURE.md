@@ -999,7 +999,7 @@ lists several things there is nothing to preserve.
 ### The converter has been run
 
 `tools/convert-filters.sh` has been executed and `rules/manifest.json` records
-the result: EasyList at 77,360 rules and EasyPrivacy at 55,903, both converted
+the result: EasyList at 77,670 rules and EasyPrivacy at 56,426, both converted
 by `cargo 1.98.0`. The earlier note that it had "never been compiled or
 executed" was already stale when written and is corrected here.
 
@@ -1067,7 +1067,7 @@ Known limits, none of them fixable by adding rules:
   asserted by `testWhetherIgnorePreviousRulesReachesAcrossLists`. It is also why
   a per-site exception detaches every list rather than layering an allow rule.
 - **The 150,000-rule cap is per compiled list, not total.** Four lists at
-  183,950 are fine; the largest is 77,963. Merging them into one JSON is the
+  183,732 are fine; the largest is 77,670. Merging them into one JSON is the
   only way to hit the ceiling, and a test guards against it.
 - **Ad frames away from the video** that no list knows about stay visible.
   Blocking unknown cross-origin frames wholesale would break embedded players,

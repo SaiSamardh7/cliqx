@@ -16,13 +16,15 @@ release checklist. Every ❌ and ⚠️ from that audit is here, ordered by seve
 Tick the box, keep the ID in the commit message (`S1-04: …`), and delete the
 row when it lands so the file stays a to-do list, not a history.
 
-**Status, 22 September 2026.** S1 is done except S1-12, which is a privacy
-policy URL and a contact address — yours to supply, not mine to invent. The S2
-audio group (01, 02, 03, 05, 06) has landed; S2-04 is folded into S2-02, since
-the volume control no longer touches system volume at all. The episode group
-(07-13) has landed, S2-09 included: native is now the single authority on what
-"same site" means and hands the agent the registrable domain. Next is the
-browser group (S2-14 onwards).
+**Status, 8 October 2026. S1 is closed.** S1-12 was the last one: the listing
+now points at the public `PRIVACY.md` and privacy questions route to the issue
+tracker, so Gate-04 (zero open S1) is met. The S2 audio group (01, 02, 03, 05,
+06) has landed; S2-04 is folded into S2-02, since the volume control no longer
+touches system volume at all. The episode group (07-13) has landed, S2-09
+included: native is now the single authority on what "same site" means and hands
+the agent the registrable domain. The Jellyfin server client has since shipped,
+so the open S2-27 to S2-35 rows are now live code rather than a plan. Next is
+the browser group (S2-14 onwards).
 
 ---
 
@@ -82,7 +84,7 @@ browser group (S2-14 onwards).
 - [x] **S1-11 Two `MARKETING_VERSION`s (0.1 and 1.0).**
   [project.pbxproj:240](../ios/App/CleanPlayerApp.xcodeproj/project.pbxproj:240), `:338`.
   *Do:* one value, driven from a `VERSION` file; `JellyfinAPI.version` reads it.
-- [ ] **S1-12 Privacy policy has no contact address and no public URL.**
+- [x] **S1-12 Privacy policy has no contact address and no public URL.**
   [PRIVACY.md:56](../PRIVACY.md:56). *Do:* address + host the page; put URL in APP-STORE.md.
 - [x] **S1-13 Test counts in README/ROADMAP are wrong** (says 66 XCTest / 198
   specs; repo has 126 / 165×2). *Do:* `tools/count-tests.sh` writes them; CI diffs.

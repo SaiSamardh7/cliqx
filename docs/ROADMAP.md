@@ -1,26 +1,27 @@
 # Shipping Cliqx — everything left before release
 
-_Verified 6 September 2026 · both suites green locally_
+_Verified 8 October 2026 · 248 Swift tests green on the simulator_
 
-The blocking engine is done and proven. What remains is almost entirely
-identity, hardware, and one measurement nobody has taken yet.
+The blocking engine is done and proven, and app identity, signing, privacy
+declarations and the store listing are all settled. What remains is screenshots,
+a pass on real hardware, and one measurement nobody has taken yet.
 
 Grouped by **who can unblock it**, because that is the real constraint — not
 priority.
 
 | | |
 |---|---|
-| Rules active | **183,950** at Strict, 134,397 at Standard, across four lists |
-| Ad hosts covered | **~104,182** distinct domains in block rules |
+| Rules active | **183,732** at Strict, 134,166 at Standard, across four lists |
+| Ad hosts covered | **~104,000** distinct domains in block rules |
 | Tests passing | **679** — 248 Swift · 11 UI · 420 agent (210 specs, two engines) |
-| Commits | **6**, pushed to `SaiSamardh7/cliqx`, CI green |
+| Commits | **62** on this branch, 51 ahead of `origin/main` and unmerged |
 
 ---
 
 ## Release decisions and external work
 
-None of these are engineering problems. Each is a call only you can make, and
-four are hard App Store blockers.
+None of these are engineering problems. Five of the six are closed; item 3,
+how filter lists refresh, is the one call still yours to make.
 
 ### 1. App identity ✅ done
 
@@ -64,13 +65,11 @@ kept locally and never uploaded. The in-app policy, `PRIVACY.md`, and App Store
 notes now say so consistently. MobileVLCKit is disclosed as a local decoder,
 not incorrectly described as absent.
 
-### 6. A stale duplicate project is still on disk
+### 6. A stale duplicate project on disk ✅ gone
 
-`~/Desktop/repos/online vedio player ` — note the trailing space — holds
-`OnlineVideoPlayer`, the superseded 2-rule version. It is not in git. It is what
-the last audit accidentally read.
-
-**Say the word** and I'll delete it. I won't remove your files unasked.
+`~/Desktop/repos/online vedio player ` — note the trailing space — held
+`OnlineVideoPlayer`, the superseded 2-rule version that an earlier audit read by
+mistake. The path no longer exists, so no audit can read it again.
 
 ---
 
@@ -89,7 +88,7 @@ checks. The badge in the README is live.
 
 The app now runs there. What is still unmeasured on hardware:
 
-compile time, peak memory under 183,880 rules, cellular behaviour, landscape
+compile time, peak memory under 183,732 rules, cellular behaviour, landscape
 theater, and iPad Split View.
 
 **You do:** watch those while using it, and tell me what drags.
@@ -131,7 +130,7 @@ the one that most affects real protection.
 ### 11. A page open during first compile stays under-protected
 
 Rules apply at navigation time. If you open a site during the ~10s cold compile,
-that page keeps the 36-rule fallback until you reload — even after all 133,333
+that page keeps the 36-rule fallback until you reload — even after all 183,732
 land. It should reload itself when the full set arrives.
 
 ### 12. Onboarding should state coverage from the manifest
@@ -164,7 +163,7 @@ From the engine and licence assessment. Items 16, 17, 18 and 21 are **done**;
 
 ### 16. Add Fanboy's Annoyance ✅ done
 
-Shipped as `annoyances.json`, 49,553 rules, its own compiled list. EasyList
+Shipped as `annoyances.json`, 49,566 rules, its own compiled list. EasyList
 Cookie was **not** added separately: Fanboy's Annoyance already contains the
 Cookie and Social lists, so it would have been the same rules twice.
 
@@ -185,8 +184,8 @@ Also corrected: `brave-unbreak.txt` lives at the **repo root**. The copy in
 
 ### 18. Restore the Strict level ✅ done
 
-Off / Standard / Strict is back, and Strict is now a real superset: 183,950
-rules against Standard's 134,397. Two tests guard it — no two levels may select
+Off / Standard / Strict is back, and Strict is now a real superset: 183,732
+rules against Standard's 134,166. Two tests guard it — no two levels may select
 the same rule groups, and Strict must add at least one group over Standard.
 
 ### 19. Prototype the `adblock` crate on device, behind a flag
@@ -230,7 +229,9 @@ first three are now done; the list starts at 4.
 3. ~~**Device build with signing.**~~ Done — the app runs on the iPhone.
 4. **Ten-site measurement.** Failures become fixtures. **This is the next thing.**
 5. **On-device conversion, 19–20.** Closes the refresh gap for good.
-6. **Publish the privacy policy, fill in contact.** Required by the listing.
+6. ~~**Publish the privacy policy, fill in contact.**~~ Done — the listing
+   points at the public `PRIVACY.md`, and privacy mail routes to the issue
+   tracker.
 7. **TestFlight, 25–50 testers.** Where reliability numbers come from.
 8. **Hold for the targets.** >99.5% crash-free, >80% Watch clean success, <5%
    protection-disable rate.
@@ -274,7 +275,7 @@ overlay's timers are cancelled with the view.
 
 ## Already settled
 
-- 133,333 rules compiled, cached and attached
+- 183,732 rules compiled, cached and attached at Strict
 - Disposable-TLD blocking for rotating ad domains
 - Atomic activation with rollback
 - Content-hash cache keys
@@ -290,7 +291,11 @@ overlay's timers are cancelled with the view.
 - Privacy policy written
 - Accessibility and iPad passes
 - Bundle 15 MB → 2.9 MB
-- 116 tests across four suites
+- Local files played on-device through VLCKit, with external subtitle import
+- Optional Jellyfin client: sign-in, libraries, resume, and per-device episode
+  memory, with the server supplied by the user and no Cliqx backend
+- App Store listing metadata, privacy declarations and an account-free
+  review path (`fastlane/metadata`, `tools/check-app-store-readiness.py`)
 
 ---
 
