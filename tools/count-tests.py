@@ -59,7 +59,10 @@ def rewrite(text: str) -> str:
     # The totals line, and the spec count wherever it is phrased — the README
     # writes "(204 specs across" and the roadmap "(204 specs, two engines)".
     text = re.sub(r"\*\*\d+\*\* —", f"**{total}** —", text)
-    return re.sub(r"\(\d+ specs\b", f"({specs} specs", text)
+    text = re.sub(r"\(\d+ specs\b", f"({specs} specs", text)
+    # The README badge states the total too, and a badge is the first
+    # number anyone reads.
+    return re.sub(r"tests-\d+%20passing", f"tests-{total}%20passing", text)
 
 
 if "--write" in sys.argv:
@@ -85,6 +88,9 @@ elif "--check" in sys.argv:
         for claimed in re.findall(r"\((\d+) specs\b", text):
             if int(claimed) != specs:
                 problems.append(f"{name}: says {claimed} specs, found {specs}")
+        for claimed in re.findall(r"tests-(\d+)%20passing", text):
+            if int(claimed) != total:
+                problems.append(f"{name}: badge says {claimed}, found {total}")
     if problems:
         sys.exit("\n".join(problems)
                  + f"\n\nCurrent: {summary}"
