@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/SaiSamardh7/cliqx/security/advisories/new
+    about: Report privately. Do not open a public issue.
+  - name: How it works
+    url: https://github.com/SaiSamardh7/cliqx/blob/main/ARCHITECTURE.md
+    about: The long read — modes, heuristics, and why each one exists.
+  - name: What is left before release
+    url: https://github.com/SaiSamardh7/cliqx/blob/main/docs/ROADMAP.md
+    about: Check here before filing something already tracked.

@@ -1,0 +1,80 @@
+name: Bug report
+description: Something in the app behaves wrongly
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Security problems do not belong here — see [SECURITY.md](../blob/main/SECURITY.md).
+
+        A site that still shows ads is a **blocking gap**, not a bug; use the
+        "Blocking gap" template instead.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: And what you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open …
+        2. Tap …
+        3. …
+    validations:
+      required: true
+
+  - type: input
+    id: url
+    attributes:
+      label: Page URL
+      description: If it only happens on one site. Leave blank if it happens everywhere.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which part
+      options:
+        - Browser / navigation
+        - Watch clean (native player)
+        - Blocking or overlays
+        - Episodes / next-previous
+        - Local files
+        - Jellyfin server
+        - Settings
+        - Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: ios
+    attributes:
+      label: iOS version
+      placeholder: "26.1"
+    validations:
+      required: true
+
+  - type: input
+    id: device
+    attributes:
+      label: Device
+      placeholder: "iPhone 15 Pro, or iPhone 17 Pro Simulator"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: blocking
+    attributes:
+      label: Blocking level
+      options: ["Strict", "Standard", "Off", "Not sure"]
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Screenshots, a screen recording, or console output.

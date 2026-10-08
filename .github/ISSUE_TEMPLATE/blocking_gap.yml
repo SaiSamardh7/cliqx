@@ -1,0 +1,54 @@
+name: Blocking gap
+description: A site that still shows ads, popups, or an overlay you cannot tap through
+labels: ["blocking-gap"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Ad blocking is adversarial and never finished. These reports are the
+        most useful thing you can send: each one becomes a permanent fixture
+        under `tests/fixtures/`.
+
+  - type: input
+    id: url
+    attributes:
+      label: Page URL
+      description: The exact page, not just the domain.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What got through
+      options:
+        - An ad or banner rendered
+        - A popup or new window opened
+        - An overlay sat on top of the player
+        - A preroll played
+        - The page broke because something was blocked
+    validations:
+      required: true
+
+  - type: dropdown
+    id: level
+    attributes:
+      label: Blocking level when it happened
+      options: ["Strict", "Standard", "Off"]
+    validations:
+      required: true
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What you saw
+      description: A screenshot is worth more than a description here.
+    validations:
+      required: true
+
+  - type: input
+    id: ios
+    attributes:
+      label: iOS version
+    validations:
+      required: true
