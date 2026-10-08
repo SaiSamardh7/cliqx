@@ -31,7 +31,7 @@ final class ServerEngine: NSObject, ObservableObject, @preconcurrency VLCMediaPl
     private var desiredRate: Float = 1
     private let subtitleStyle: SubtitleStyle
     private let interruptions = AudioInterruptions()
-    private var wasPlayingBeforeInterruption = false
+    private var interruptionPolicy = InterruptionPolicy()
     var onClose: () -> Void = {}
 
     init(item: JellyfinItem, server: JellyfinServer, servers: JellyfinServers,
@@ -80,17 +80,10 @@ final class ServerEngine: NSObject, ObservableObject, @preconcurrency VLCMediaPl
     /// See the same handler in WebView: iOS pauses for an interruption and
     /// says nothing, and headphones leaving must always pause.
     private func handle(interruption event: AudioInterruptions.Event) {
-        switch event {
-        case .began:
-            wasPlayingBeforeInterruption = player.isPlaying
-            if player.isPlaying { player.pause() }
-        case .ended(let shouldResume):
-            guard shouldResume, wasPlayingBeforeInterruption, !player.isPlaying else { break }
-            wasPlayingBeforeInterruption = false
-            player.play()
-        case .outputDeviceLost:
-            wasPlayingBeforeInterruption = false
-            if player.isPlaying { player.pause() }
+        switch interruptionPolicy.response(to: event, isPlaying: player.isPlaying) {
+        case .pause: player.pause()
+        case .resume: player.play()
+        case .nothing: break
         }
         page.isPlaying = player.isPlaying
     }
@@ -267,16 +260,7 @@ final class ServerEngine: NSObject, ObservableObject, @preconcurrency VLCMediaPl
     /// contain = whole frame, cover = fill the screen and crop. VLC does this
     /// with a crop geometry in the screen's aspect ratio.
     private func setObjectFit(_ mode: String) {
-        if mode == "cover" {
-            let size = UIScreen.main.bounds.size
-            let w = Int(max(size.width, size.height)), h = Int(min(size.width, size.height))
-            // libvlc copies the string; ours is freed straight after.
-            let geometry = strdup("\(w):\(h)")
-            player.videoCropGeometry = geometry
-            free(geometry)
-        } else {
-            player.videoCropGeometry = nil
-        }
+        player.setFill(mode == "cover")
         page.objectFit = mode == "cover" ? "cover" : "contain"
     }
 

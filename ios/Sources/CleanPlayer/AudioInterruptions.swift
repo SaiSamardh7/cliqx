@@ -89,3 +89,49 @@ public final class AudioInterruptions {
         return reason == .oldDeviceUnavailable
     }
 }
+
+/// What a player should do about an interruption, and the single piece of
+/// state that decision needs.
+///
+/// Four players carried this rule: three VLC engines holding byte-identical
+/// copies, and the web coordinator holding the same logic spelled with
+/// `togglePlay`. A rule copied four times is a rule nobody can change, and
+/// none of the four copies was reachable from a test — the engines need a
+/// decoder and an audio session to exist at all.
+///
+/// Pure, so the rule itself is checkable: it answers what to do and leaves
+/// doing it to whoever owns the player.
+public struct InterruptionPolicy {
+    public enum Response: Equatable, Sendable {
+        case pause
+        case resume
+        case nothing
+    }
+
+    /// Whether the player was running when something took the session. The
+    /// whole reason this type holds state: resuming is only offered to a video
+    /// that was actually playing.
+    private var wasPlaying = false
+
+    public init() {}
+
+    public mutating func response(to event: AudioInterruptions.Event,
+                                  isPlaying: Bool) -> Response {
+        switch event {
+        case .began:
+            wasPlaying = isPlaying
+            return isPlaying ? .pause : .nothing
+        case .ended(let shouldResume):
+            // `shouldResume` is iOS saying the other app has finished with the
+            // session. Without it, staying paused is correct.
+            guard shouldResume, wasPlaying, !isPlaying else { return .nothing }
+            wasPlaying = false
+            return .resume
+        case .outputDeviceLost:
+            // Headphones out. Always pause, and never offer to resume: the
+            // alternative is the film playing out loud in a quiet room.
+            wasPlaying = false
+            return isPlaying ? .pause : .nothing
+        }
+    }
+}

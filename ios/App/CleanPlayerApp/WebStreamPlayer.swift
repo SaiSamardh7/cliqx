@@ -30,7 +30,7 @@ final class WebStreamEngine: NSObject, ObservableObject, @preconcurrency VLCMedi
     private let pageURL: URL
     private let subtitleStyle: SubtitleStyle
     private let interruptions = AudioInterruptions()
-    private var wasPlayingBeforeInterruption = false
+    private var interruptionPolicy = InterruptionPolicy()
     private var didReadTracks = false
     private var desiredRate: Float = 1
     private let startAt: Double
@@ -116,17 +116,10 @@ final class WebStreamEngine: NSObject, ObservableObject, @preconcurrency VLCMedi
         + "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
 
     private func handle(interruption event: AudioInterruptions.Event) {
-        switch event {
-        case .began:
-            wasPlayingBeforeInterruption = player.isPlaying
-            if player.isPlaying { player.pause() }
-        case .ended(let shouldResume):
-            guard shouldResume, wasPlayingBeforeInterruption, !player.isPlaying else { break }
-            wasPlayingBeforeInterruption = false
-            player.play()
-        case .outputDeviceLost:
-            wasPlayingBeforeInterruption = false
-            if player.isPlaying { player.pause() }
+        switch interruptionPolicy.response(to: event, isPlaying: player.isPlaying) {
+        case .pause: player.pause()
+        case .resume: player.play()
+        case .nothing: break
         }
         page.isPlaying = player.isPlaying
     }
@@ -170,9 +163,8 @@ final class WebStreamEngine: NSObject, ObservableObject, @preconcurrency VLCMedi
     }
 
     private func setObjectFit(_ mode: String) {
-        // VLC crops by scaling the picture past the surface; 0 is "fit".
-        player.scaleFactor = mode == "cover" ? 1.25 : 0
-        page.objectFit = mode
+        player.setFill(mode == "cover")
+        page.objectFit = mode == "cover" ? "cover" : "contain"
     }
 
     // MARK: VLCMediaPlayerDelegate

@@ -64,11 +64,12 @@ public enum HostKey {
                 if exact.contains(candidate) {
                     best = max(best, labels.count - index)
                 }
-                if index > labels.startIndex {
-                    let wildcardBase = labels[index...].joined(separator: ".")
-                    if wildcard.contains(wildcardBase) {
-                        best = max(best, labels.count - index + 1)
-                    }
+                // `*.ck` makes `<anything>.ck` a public suffix, so a wildcard
+                // match is worth one label MORE than the candidate it matched.
+                // The base is the candidate — it was joined a second time
+                // under another name, which read as though the two differed.
+                if index > labels.startIndex, wildcard.contains(candidate) {
+                    best = max(best, labels.count - index + 1)
                 }
             }
             return best

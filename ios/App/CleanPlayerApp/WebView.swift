@@ -424,9 +424,7 @@ struct WebView: UIViewRepresentable {
 
         /// Calls, alarms, and headphones being pulled out.
         private let interruptions = AudioInterruptions()
-        /// Playing when an interruption began, so resuming is only offered to
-        /// a video that was actually running.
-        private var wasPlayingBeforeInterruption = false
+        private var interruptionPolicy = InterruptionPolicy()
 
         /// Per-frame totals prevent a zero from one iframe erasing blocks
         /// reported by every other iframe. The keys also address each frame
@@ -504,17 +502,12 @@ struct WebView: UIViewRepresentable {
         /// out loud in a quiet room.
         private func handle(interruption event: AudioInterruptions.Event) {
             guard page.isTheater else { return }
-            switch event {
-            case .began:
-                wasPlayingBeforeInterruption = page.isPlaying
-                if page.isPlaying { togglePlay() }
-            case .ended(let shouldResume):
-                guard shouldResume, wasPlayingBeforeInterruption, !page.isPlaying else { break }
-                wasPlayingBeforeInterruption = false
-                togglePlay()
-            case .outputDeviceLost:
-                wasPlayingBeforeInterruption = false
-                if page.isPlaying { togglePlay() }
+            // The page is driven through one call, so pausing and resuming are
+            // the same action here — which is why this read as different logic
+            // from the three VLC copies while being the same rule.
+            switch interruptionPolicy.response(to: event, isPlaying: page.isPlaying) {
+            case .pause, .resume: togglePlay()
+            case .nothing: break
             }
         }
 

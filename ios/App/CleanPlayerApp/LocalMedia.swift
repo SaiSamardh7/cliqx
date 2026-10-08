@@ -67,7 +67,7 @@ final class LocalPlayerModel: NSObject, ObservableObject, @preconcurrency VLCMed
     var onProgress: (Int, Int) -> Void = { _, _ in }
 
     private let interruptions = AudioInterruptions()
-    private var wasPlayingBeforeInterruption = false
+    private var interruptionPolicy = InterruptionPolicy()
 
     /// How subtitles should look. Applied as media options, because VLCKit
     /// has no API for it — see SubtitleStyle.
@@ -89,17 +89,10 @@ final class LocalPlayerModel: NSObject, ObservableObject, @preconcurrency VLCMed
     }
 
     private func handle(interruption event: AudioInterruptions.Event) {
-        switch event {
-        case .began:
-            wasPlayingBeforeInterruption = player.isPlaying
-            if player.isPlaying { player.pause() }
-        case .ended(let shouldResume):
-            guard shouldResume, wasPlayingBeforeInterruption, !player.isPlaying else { break }
-            wasPlayingBeforeInterruption = false
-            player.play()
-        case .outputDeviceLost:
-            wasPlayingBeforeInterruption = false
-            if player.isPlaying { player.pause() }
+        switch interruptionPolicy.response(to: event, isPlaying: player.isPlaying) {
+        case .pause: player.pause()
+        case .resume: player.play()
+        case .nothing: break
         }
         isPlaying = player.isPlaying
     }
@@ -228,6 +221,30 @@ final class LocalPlayerModel: NSObject, ObservableObject, @preconcurrency VLCMed
         let h = total / 3600, m = (total % 3600) / 60, s = total % 60
         return h > 0 ? String(format: "%d:%02d:%02d", h, m, s)
                      : String(format: "%d:%02d", m, s)
+    }
+}
+
+extension VLCMediaPlayer {
+    /// "Fill screen" for a VLC surface.
+    ///
+    /// VLC has no `object-fit`, so filling means cropping to the screen's own
+    /// aspect ratio. The handoff player used `scaleFactor = 1.25` instead,
+    /// which is not that: it zooms by a fixed quarter whatever the screen and
+    /// whatever the video, so the control left bars on some films and cut the
+    /// picture on others. One implementation now, and it is the one that was
+    /// right.
+    func setFill(_ cover: Bool) {
+        guard cover else {
+            videoCropGeometry = nil
+            return
+        }
+        let size = UIScreen.main.bounds.size
+        let wide = Int(max(size.width, size.height))
+        let narrow = Int(min(size.width, size.height))
+        // libvlc copies the string; ours is freed straight after.
+        let geometry = strdup("\(wide):\(narrow)")
+        videoCropGeometry = geometry
+        free(geometry)
     }
 }
 
