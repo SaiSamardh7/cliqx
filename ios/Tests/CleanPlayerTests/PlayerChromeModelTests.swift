@@ -16,8 +16,31 @@ final class PlayerChromeModelTests: XCTestCase {
                           countdownStep: .milliseconds(20))
     }
 
+    /// Waits for a fixed period. Correct only for asserting that something
+    /// did NOT happen — where a longer wait can only make the test stricter.
     private func settle(_ ms: UInt64 = 120) async {
         try? await Task.sleep(for: .milliseconds(ms))
+    }
+
+    /// Waits until something becomes true, or gives up.
+    ///
+    /// The timers here are tens of milliseconds and the assertions used to sit
+    /// behind a sleep of 120. That holds on a developer's machine and does not
+    /// on CI, where this suite has been measured taking nine seconds to run a
+    /// pure-logic assertion — the auto-hide task simply had not been scheduled
+    /// yet, and the test reported the feature broken. A deadline this generous
+    /// costs nothing when things are quick, because it returns the moment the
+    /// condition holds.
+    private func eventually(
+        timeout: TimeInterval = 10,
+        _ condition: @MainActor () -> Bool
+    ) async -> Bool {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if condition() { return true }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        return condition()
     }
 
     // MARK: Auto-hide
@@ -27,9 +50,8 @@ final class PlayerChromeModelTests: XCTestCase {
         chrome.playbackChanged(isPlaying: true)
         XCTAssertTrue(chrome.areControlsVisible)
 
-        await settle()
-        XCTAssertFalse(chrome.areControlsVisible,
-                       "controls never faded out during playback")
+        let hid = await eventually { !chrome.areControlsVisible }
+        XCTAssertTrue(hid, "controls never faded out during playback")
     }
 
     /// Hiding the controls on a paused video leaves a still frame the user
@@ -84,8 +106,8 @@ final class PlayerChromeModelTests: XCTestCase {
 
         var advanced = false
         chrome.onAdvance = { advanced = true }
-        await settle(200)
-        XCTAssertTrue(advanced, "the countdown never advanced")
+        let finished = await eventually { advanced }
+        XCTAssertTrue(finished, "the countdown never advanced")
         XCTAssertNil(chrome.countdown)
     }
 
@@ -221,8 +243,8 @@ final class PlayerChromeModelTests: XCTestCase {
         chrome.flashSeek(-10)
         XCTAssertEqual(chrome.seekFlash, -10)
 
-        await settle()
-        XCTAssertNil(chrome.seekFlash)
+        let cleared = await eventually { chrome.seekFlash == nil }
+        XCTAssertTrue(cleared, "the seek flash never cleared itself")
     }
 
     /// Two quick double-taps: the first one's timer must not clear the second

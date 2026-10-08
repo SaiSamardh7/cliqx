@@ -19,8 +19,9 @@ is defensible from the architecture rather than from a promise:
 
 Supporting facts a reviewer can check:
 
-- No third-party SDKs. The only dependency is the local `CleanPlayer` Swift
-  package in this repository.
+- No advertising, analytics or tracking SDKs. The app embeds MobileVLCKit for
+  on-device video decoding; its licence and privacy behavior are disclosed in
+  `NOTICE.md` and `PRIVACY.md`.
 - No `NSUserTrackingUsageDescription`, because nothing tracks.
 - The app makes no network request of its own. Every request originates from a
   page the user navigated to. Filter lists are bundled, not fetched.
@@ -30,7 +31,15 @@ Supporting facts a reviewer can check:
 The app uses HTTPS through the system's own networking. It implements no
 cryptography of its own beyond SHA-256 hashing of bundled resources for cache
 keying, which is not a data-protection use. The standard exemption applies;
-confirm the current wording in App Store Connect at submission time.
+`ITSAppUsesNonExemptEncryption = false` records that answer in the built bundle.
+
+## Required-reason APIs
+
+The app manifest declares UserDefaults and the monotonic uptime timer used to
+rate-limit page-bridge events. MobileVLCKit uses its own manifest inside
+`MobileVLCKit.framework` for file metadata, playback timers, and cache-capacity
+checks. `tools/check-app-store-readiness.py` prevents those declarations or the
+framework-copy build phase from drifting.
 
 ## Licensing
 
@@ -52,6 +61,8 @@ the build-time converter. Both are asserted by
   attribution, licences, the protection picker, private browsing and the
   privacy policy.
 - iPad: builds and lays out for `TARGETED_DEVICE_FAMILY = 1,2`.
+- Version `1.0.0`, App Store metadata, support URL, privacy URL and actionable
+  account-free review notes are checked into `fastlane/metadata`.
 
 ## Closed since this list was written
 
@@ -69,12 +80,11 @@ Verified in `CleanPlayerApp.xcodeproj/project.pbxproj` rather than from memory:
 
 ## Open — must be closed before submission
 
-1. **Marketing version** is `0.1`. Ship `1.0`.
-2. **Privacy policy URL.** `PRIVACY.md` needs publishing somewhere with a
-   stable URL, and a contact address filling in.
-3. **Filter lists cannot update between app releases.** Settings warns after 30
+1. **Screenshots.** Capture the final iPhone and iPad UI at App Store-supported
+   dimensions after the release build is signed off. Do not substitute mock UI.
+2. **Filter lists cannot update between app releases.** Settings warns after 30
    days, which is honest but not a fix. ROADMAP items 19–20.
-4. **No measured success rate for "Watch clean".** ROADMAP item 10 — the one
+3. **No measured success rate for "Watch clean".** ROADMAP item 10 — the one
    number that decides whether the app is good.
 
 ## Review risk to prepare for

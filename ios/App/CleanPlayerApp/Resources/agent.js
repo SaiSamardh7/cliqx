@@ -41,6 +41,13 @@
 
 [data-cp-theater] { overflow: hidden !important; }
 
+/* A caption layer the player paints itself. Kept visible and lifted over the
+   staged video, which sits at z-index 2147483646. */
+[data-cp-caption] {
+  z-index: 2147483646 !important;
+  pointer-events: none !important;
+}
+
 .${BTN_CLASS} {
   all: unset;
   box-sizing: border-box;
@@ -70,10 +77,43 @@ html[data-cp-unlock], html[data-cp-unlock] body {
   let staged = null;                  // the video currently in theater
   let hosted = null;                  // the player frame this page is staging
   let airplayAvailable = false;
+  // `crypto.randomUUID` is secure-context only, and a home server on the LAN
+  // is plain http — where it is undefined and a bare call throws out of this
+  // whole IIFE, taking window.__cp with it. `getRandomValues` has no such
+  // restriction; the shape has to stay a UUID because native parses it as one.
+  const FRAME_ID = (() => {
+    if (typeof crypto?.randomUUID === 'function') return crypto.randomUUID();
+    const bytes = crypto.getRandomValues(new Uint8Array(16));
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;      // version 4
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;      // variant 1
+    const hex = [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('');
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}`
+         + `-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  })();
+
+  function frameMetrics() {
+    const width = Math.max(0, Math.round(window.innerWidth));
+    const height = Math.max(0, Math.round(window.innerHeight));
+    return {
+      width,
+      height,
+      visible: document.visibilityState !== 'hidden' && width > 0 && height > 0,
+    };
+  }
 
   function post(payload) {
-    try { window.webkit?.messageHandlers?.cp?.postMessage(payload); } catch (_) {}
+    try {
+      window.webkit?.messageHandlers?.cp?.postMessage(
+        { ...payload, v: 1, fid: FRAME_ID });
+    } catch (_) {}
   }
+
+  // popupguard has to patch the page world, where the named bridge is not
+  // visible. A DOM event crosses content worlds without leaving a readable
+  // counter or string-named property behind on `window`.
+  document.addEventListener('cliqx:popup-blocked', () => {
+    post({ type: 'popupBlocked' });
+  });
 
   /// Shadow DOM encapsulates styles, so a stylesheet in the document does not
   /// reach a button appended inside a shadow root. Each root that holds a
@@ -150,6 +190,87 @@ html[data-cp-unlock], html[data-cp-unlock] body {
   ///
   /// Works on the <video> in the frame that owns it, and on the player <iframe>
   /// in the page that hosts it — the walk is the same either way.
+  /// Subtitles a player paints itself, rather than through a <track>.
+  ///
+  /// Video.js, JW, Shaka and most of the players this app meets render
+  /// captions into a sibling <div> positioned over the video, NOT into the
+  /// element's own text tracks. Theater hides every sibling on the way up, so
+  /// it deleted the subtitles — and `textTracks()` sees nothing for those
+  /// players either, so the native menu could not offer them back. The one
+  /// feature people need most on a foreign-language video, silently gone.
+  const CAPTION_SELECTOR = [
+    '.vjs-text-track-display', '.jw-captions', '.shaka-text-container',
+    '.plyr__captions', '.captions', '.subtitles', '.subtitle',
+    '[class*="caption" i]', '[class*="subtitle" i]', '[id*="caption" i]',
+  ].join(',');
+
+  /// Anything a person could press. Subtitles have none: a box of text with a
+  /// close button or a link is a notice, not a caption — which is exactly what
+  /// the "Playing Episode 6" toast is, and it was being kept as one.
+  const INTERACTIVE = 'button,a[href],input,select,textarea,[role="button"],[onclick]';
+
+  function isCaptionLayer(el) {
+    if (!el || el.nodeType !== 1) return false;
+    if (el.querySelector(INTERACTIVE)) return false;
+    if (el.matches(CAPTION_SELECTOR)) return true;
+    // A player that names nothing usefully still gives itself away: a box
+    // positioned over the video that holds text and no media of its own.
+    const cs = getComputedStyle(el);
+    if (cs.position !== 'absolute' && cs.position !== 'fixed') return false;
+    if (el.querySelector('video,iframe,canvas,img')) return false;
+    const text = (el.textContent || '').trim();
+    return text.length > 0 && text.length < 300;
+  }
+
+  /// Everything the page paints over the staged video while theater is up.
+  ///
+  /// `looksLikeInterstitial` deliberately only catches things covering the
+  /// MIDDLE of the video by at least a third: outside theater, small site
+  /// furniture around a player is the site's business. Inside theater it is
+  /// not — the page is supposed to be gone — and that gap is what left
+  /// aniwave's "Playing Episode 6" card sitting in the corner of the film.
+  ///
+  /// So while a video is staged, anything painted over it goes, at any size,
+  /// unless it is ours, the video itself, something holding the video, or a
+  /// caption layer. Marked with the same attribute `stage()` uses, so leaving
+  /// theater restores every one of them.
+  function hideTheaterIntruders() {
+    if (!staged || !staged.isConnected) return 0;
+    const videoRect = staged.getBoundingClientRect();
+    if (videoRect.width < 1 || videoRect.height < 1) return 0;
+    const hosts = videoHosts();
+
+    let hidden = 0;
+    for (const el of deepElements()) {
+      if (el === staged || isOurs(el) || el.closest('[data-cp-keep]')) continue;
+      if (el.hasAttribute('data-cp-hidden') || el.hasAttribute('data-cp-caption')) continue;
+      if (el === document.body || el === document.documentElement) continue;
+      // Never the video's own ancestors: hiding one takes the video with it.
+      if (containsDeep(el, staged)) continue;
+      if (hosts.some(host => el === host || containsDeep(el, host))) continue;
+      if (el.querySelector('video') || el.querySelector('[data-cp-stage]')) continue;
+
+      const cs = getComputedStyle(el);
+      if (cs.position !== 'fixed' && cs.position !== 'absolute' && cs.position !== 'sticky') {
+        continue;
+      }
+      if (cs.display === 'none' || cs.visibility === 'hidden' || cs.opacity === '0') continue;
+      if (!hasVisibleSurface(el, cs)) continue;
+
+      const r = el.getBoundingClientRect();
+      if (r.width < 8 || r.height < 8) continue;
+      if (overlapFraction(r, videoRect) <= 0) continue;
+
+      if (isCaptionLayer(el)) {
+        el.dataset.cpCaption = '1';
+        continue;
+      }
+      el.dataset.cpHidden = '1';
+      hidden++;
+    }
+    return hidden;
+  }
+
   function stage(el) {
     ensureStyle();
     unstage();                        // only one stage at a time
@@ -159,6 +280,11 @@ html[data-cp-unlock], html[data-cp-unlock] body {
       const parent = node.parentElement;
       for (const sib of parent.children) {
         if (sib !== node && !sib.hasAttribute('data-cp-keep')) {
+          // A caption layer belongs to the video, not to the page around it.
+          if (isCaptionLayer(sib)) {
+            sib.dataset.cpCaption = '1';
+            continue;
+          }
           sib.dataset.cpHidden = '1';
         }
       }
@@ -182,11 +308,15 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     // a shadow root. A document-only query leaves those marks in place, and the
     // marks are what make the video full-screen-fixed and its siblings
     // display:none — so the page stays bricked after Close.
-    for (const el of allDeep('[data-cp-hidden],[data-cp-untrap],[data-cp-stage]')) {
+    for (const el of allDeep(
+      '[data-cp-hidden],[data-cp-untrap],[data-cp-stage],[data-cp-caption]')) {
+      forgetMark(el);
       delete el.dataset.cpHidden;
       delete el.dataset.cpUntrap;
       delete el.dataset.cpStage;
+      delete el.dataset.cpCaption;
     }
+    forgetMark(document.documentElement);
     delete document.documentElement.dataset.cpTheater;
     for (const b of allButtons()) delete b.dataset.cpStaged;
   }
@@ -217,17 +347,69 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     delete video.__cpInlined;
   }
 
+  /// WebKit draws its own control bar inside any <video> that has `controls`,
+  /// and once theater pins the element to the viewport it picks the full-size
+  /// layout: fullscreen and PiP top-left, AirPlay and volume top-right,
+  /// skip/play/skip in the centre, timecodes and "..." along the bottom. That
+  /// is the same set of controls the native overlay draws, rendered a second
+  /// time underneath it. `stage()` cannot hide it: it lives in the video's own
+  /// shadow root, not among the siblings theater hides.
+  ///
+  /// Only taken back if we took it, so a page that had no controls keeps none.
+  function suppressControls(video) {
+    video.__cpHadControls = video.hasAttribute('controls');
+    if (video.__cpHadControls) video.removeAttribute('controls');
+  }
+
+  function restoreControls(video) {
+    if (video.__cpHadControls) video.setAttribute('controls', '');
+    delete video.__cpHadControls;
+  }
+
+  let reportedProtected = false;
+
+  function reportProtected() {
+    if (reportedProtected) return;
+    reportedProtected = true;
+    post({ type: 'mediaError', reason: 'drm' });
+  }
+
+  /// Only the failures a person can act on. A decode error on one of several
+  /// sources is the site's business; a source nothing here can open is not.
+  function reportMediaError() {
+    if (!staged || !staged.error) return;
+    const code = staged.error.code;
+    if (code === 4 /* MEDIA_ERR_SRC_NOT_SUPPORTED */) {
+      // EME present and a source that will not open is almost always
+      // protected content rather than a broken file.
+      post({ type: 'mediaError',
+             reason: navigator.requestMediaKeySystemAccess ? 'drm' : 'unsupported' });
+    } else if (code === 2 /* MEDIA_ERR_NETWORK */) {
+      post({ type: 'mediaError', reason: 'network' });
+    }
+  }
+
   /// Distinct from the `pause` that follows it. "Finished" is the only state
   /// that should offer the next episode; a pause halfway through must not.
   function reportEnded() {
     post({ type: 'ended' });
   }
 
+  /// Events beyond play/pause that change what the native button should say.
+  /// `paused` flips to false the instant play() is called, before any data
+  /// arrives; these are how the agent tells "requested" from "rendering".
+  const BUFFERING_EVENTS = ['playing', 'waiting', 'stalled', 'canplay'];
+
   function reportPlayback() {
     // `armed` marks playback from the frame native armed before an episode
     // change. Native cannot tell frames apart itself: WKFrameInfo is a
     // transient object with no value equality.
     if (staged) post({ type: 'playback', playing: !staged.paused,
+                       // Not paused is a request, not a picture. Until there is
+                       // a frame to show, the native button says "loading", and
+                       // the chrome does not auto-hide over a black screen.
+                       buffering: !staged.paused
+                                  && staged.readyState < 3 /* HAVE_FUTURE_DATA */,
                        ...(armedEpisodeSource !== null && { armed: true }) });
   }
 
@@ -355,68 +537,40 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     return true;
   }
 
-  // iOS ignores writes to HTMLMediaElement.volume. Route every requested level
-  // through Web Audio when the stream is CORS-safe, not only the boosted range.
-  // Creating the graph while entering theater is important: watchClean runs in
-  // the site's real click, while a later native evaluateJavaScript call has no
-  // WebKit user activation and may leave AudioContext permanently suspended.
-  const boostedAudio = new WeakMap();
-  function prepareVolume(video) {
-    const existing = boostedAudio.get(video);
-    if (existing) return existing;
-    const sourceURL = video.currentSrc || video.src || '';
-    let safeSource = sourceURL.startsWith('blob:') || sourceURL.startsWith('data:');
-    try {
-      const parsed = new URL(sourceURL, location.href);
-      safeSource = safeSource || parsed.origin === location.origin || !!video.crossOrigin;
-    } catch (_) {}
-    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-    if (!safeSource || !AudioContextClass) return null;
-    try {
-      const context = new AudioContextClass();
-      const source = context.createMediaElementSource(video);
-      const gain = context.createGain();
-      source.connect(gain);
-      gain.connect(context.destination);
-      const chain = { context, source, gain };
-      boostedAudio.set(video, chain);
-      // Confirm activation when a level is requested. Not every theater entry
-      // path carries a WebKit user gesture.
-      return chain;
-    } catch (_) {
-      return null;
-    }
+  // --- Website volume: there is none, and the app says so ------------------
+  //
+  // Measured on an iPhone, not assumed. Three things are true at once on iOS:
+  //
+  //   1. `HTMLMediaElement.volume` is ignored. Writing 0.25 reads back 1, in
+  //      this app and in Safari alike.
+  //   2. `AVAudioSession.outputVolume` has no setter, and the only supported
+  //      way to offer device volume is to SHOW an `MPVolumeView` for the user
+  //      to drag. The app does that — see SystemVolumeSlider.
+  //   3. A Web Audio gain node does not reach the sound. The app used to route
+  //      the element through one; the control moved and nothing changed, on
+  //      device, on ordinary sites.
+  //
+  // So a web page on iOS has no supported way to change its own volume, and
+  // every arrangement of these three that this project has tried has been a
+  // way of not saying that. `MPVolumeView`'s private slider said it by using
+  // an undocumented view hierarchy; Web Audio said it by moving a control that
+  // was outside the audible path; both reported success they had not had.
+  //
+  // What replaces it is not a cleverer workaround. It is two controls that
+  // genuinely work: the device slider, which never fails, and the Cliqx
+  // player, which decodes the stream itself and therefore owns its audio
+  // outright — volume, boost and all. See WebStreamPlayer.
+  //
+  // `setVolume` stays on the bridge because native calls it on theater entry,
+  // and answers honestly rather than disappearing.
+  function setVolume() {
+    reportVolumeAvailability();
+    return false;
   }
 
-  function setVolume(percent) {
-    if (!staged) return false;
-    const wanted = Math.min(Math.max(Math.round(Number(percent) || 0), 0), 200);
-    const chain = prepareVolume(staged);
-    if (!chain) {
-      // Native owns 0...100 through MPVolumeView. Cross-origin streams without
-      // CORS cannot be routed through Web Audio, so boost honestly caps at 100.
-      if (wanted <= 100) {
-        post({ type: 'volume', percent: wanted, boosted: false });
-        return true;
-      }
-      post({ type: 'volume', percent: 100, boosted: false });
-      return false;
-    }
-    staged.volume = 1;
-    // Native already attenuates 0...100. Applying that level here too would
-    // turn 50% into 25%, so Web Audio is boost-only.
-    chain.gain.gain.value = Math.max(wanted / 100, 1);
-    Promise.resolve(chain.context.resume()).then(() => {
-      if (chain.context.state && chain.context.state !== 'running') {
-        post({ type: 'volume', percent: Math.min(wanted, 100), boosted: false });
-        return;
-      }
-      post({ type: 'volume', percent: wanted, boosted: wanted > 100 });
-    }).catch(() => {
-      chain.gain.gain.value = 1;
-      post({ type: 'volume', percent: Math.min(wanted, 100), boosted: false });
-    });
-    return true;
+  function reportVolumeAvailability() {
+    if (!staged) return;
+    post({ type: 'volume', percent: 100, boosted: false, available: false });
   }
 
   /// Only tracks the page exposes as real TextTracks. Sites that paint their
@@ -529,7 +683,11 @@ html[data-cp-unlock], html[data-cp-unlock] body {
   }
 
   function reportVideo() {
-    if (staged) post({ type: 'video', info: videoInfo() });
+    if (!staged) return;
+    post({ type: 'video', info: videoInfo() });
+    // Wired to loadedmetadata, which is where a late `currentSrc` arrives and
+    // the honest answer about routing can change.
+    reportVolumeAvailability();
   }
 
   /// The whole episode list, not just the neighbours, so the player can offer
@@ -640,26 +798,47 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     // Before anything asks it to play: setting this on a playing element does
     // not always bring the picture back on iOS.
     allowInline(video);
+    suppressControls(video);
     staged = video;
-    prepareVolume(video);
+    reportedProtected = false;
+    if (startMuted) video.muted = true;
     trackAirPlay(video);
     // Theater hides the page, and the page is where the player's own play
     // button lives. The native bar has to know whether it is showing play or
     // pause, or the user is left with no way to control what they are watching.
     video.addEventListener('play', reportPlayback);
     video.addEventListener('pause', reportPlayback);
+    for (const name of BUFFERING_EVENTS) video.addEventListener(name, reportPlayback);
     video.addEventListener('ended', reportEnded);
+    // A protected stream cannot play here, and until now said nothing: the
+    // curtain came up on a black rectangle with working-looking controls.
+    // `encrypted` fires when the stream carries DRM initialisation data;
+    // MEDIA_ERR_SRC_NOT_SUPPORTED with EME present is the same story arriving
+    // as a failure instead.
+    video.addEventListener('encrypted', reportProtected);
+    video.addEventListener('error', reportMediaError);
     video.addEventListener('timeupdate', onTimeUpdate);
     video.addEventListener('durationchange', reportTime);
     video.addEventListener('progress', onTimeUpdate);
 
-    post({ type: 'theater', airplay: airplayAvailable, pip: canPiP() });
+    post({ type: 'theater', airplay: airplayAvailable, pip: canPiP(), ...frameMetrics() });
     reportPlayback();
     reportTime();
     reportTracks();
     reportVideo();
     video.addEventListener('loadedmetadata', reportVideo);
     video.addEventListener('resize', reportVideo);
+    return true;
+  }
+
+  /// Warm standby: native decodes the next episode in a second web view
+  /// behind the one on screen, and it must not be heard until it is swapped
+  /// in. Applies to the staged video now and to whatever autoTheater stages
+  /// later, so it can be set before the frame has found its video.
+  let startMuted = false;
+  function setMuted(on) {
+    startMuted = !!on;
+    if (staged) staged.muted = startMuted;
     return true;
   }
 
@@ -753,7 +932,13 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     if (staged) {
       staged.removeEventListener('play', reportPlayback);
       staged.removeEventListener('pause', reportPlayback);
+      for (const name of BUFFERING_EVENTS) staged.removeEventListener(name, reportPlayback);
       staged.removeEventListener('ended', reportEnded);
+      // Both of these were added by enterTheater and forgotten here. Left on a
+      // video the user has walked away from, a late `encrypted` reports DRM for
+      // whatever is staged now.
+      staged.removeEventListener('encrypted', reportProtected);
+      staged.removeEventListener('error', reportMediaError);
       staged.removeEventListener('timeupdate', onTimeUpdate);
       staged.removeEventListener('durationchange', reportTime);
       staged.removeEventListener('progress', onTimeUpdate);
@@ -762,6 +947,7 @@ html[data-cp-unlock], html[data-cp-unlock] body {
       staged.style.removeProperty('object-fit');
       untrackAirPlay(staged);
       detachAirPlaySource(staged);
+      restoreControls(staged);
       restoreInline(staged);
       endScrub();
       staged = null;
@@ -781,6 +967,7 @@ html[data-cp-unlock], html[data-cp-unlock] body {
   /// no way back to our controls — so it cannot be the default. It is offered
   /// as a separate button instead.
   function watchClean(video) {
+    post({ type: 'watchCleanTapped' });
     // Players routinely swap the <video> out after they initialise (Wikimedia's
     // does), leaving a detached node behind. Re-resolve rather than fail.
     if (!video || !video.isConnected) video = largestVideo();
@@ -836,6 +1023,43 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     } catch (_) {
       return false;
     }
+  }
+
+  /// What the app's own player could take over, best first.
+  ///
+  /// `streamCandidates` answers a different question. It was written for
+  /// AirPlay, where a wrong URL is handed silently to a television, so it
+  /// trusts nothing but a manifest seen in resource timing and rejects `.mp4`
+  /// outright — an `.mp4` there is as likely to be an init segment as a whole
+  /// file.
+  ///
+  /// For a handoff that reasoning inverts. Where the element plays an ordinary
+  /// URL — a progressive file, or an HLS manifest it loaded directly — that URL
+  /// is not a guess at all: it is what is playing, read off the element. VLC
+  /// opens it, so the app owns the audio and the volume swipe works. Leaving it
+  /// out meant every site that serves a plain file had no handoff and therefore
+  /// no volume control, which is most of them.
+  ///
+  /// MSE keeps the old route, because a `blob:` means nothing outside this
+  /// process and resource timing is the only way to find what fed it.
+  function handoffCandidates() {
+    const video = staged || largestVideo();
+    const out = [];
+    if (video) {
+      const kind = sourceKind(video);
+      if (kind === 'file' || kind === 'hls') {
+        const src = video.currentSrc || video.src || '';
+        // https only, and a real URL: the native side re-validates this, but
+        // there is no reason to offer it something it will only reject.
+        try {
+          if (new URL(src, location.href).protocol === 'https:') out.push(src);
+        } catch (_) { /* not a URL we can use */ }
+      }
+    }
+    for (const url of streamCandidates()) {
+      if (!out.includes(url)) out.push(url);
+    }
+    return out;
   }
 
   function sourceKind(video) {
@@ -1027,6 +1251,35 @@ html[data-cp-unlock], html[data-cp-unlock] body {
             el.textContent || '').replace(/\s+/g, ' ').trim();
   }
 
+  /// The registrable domain of the page, as native computed it.
+  ///
+  /// The agent cannot work this out for itself: it needs the Public Suffix
+  /// List to know that `bbc.co.uk` is a site and `co.uk` is not, and that list
+  /// is 200KB. Native has it, so native says. Null until it does.
+  let siteDomain = null;
+  function setSite(domain) {
+    siteDomain = (typeof domain === 'string' && domain) ? domain.toLowerCase() : null;
+  }
+
+  /// Whether a hostname belongs to the page's site.
+  ///
+  /// Exact origin was the old rule, and it is wrong for the shape these sites
+  /// actually take: the player on `player.example.com`, the episode list on
+  /// `www.example.com`. Those got no episode discovery at all, while the very
+  /// same URLs passed native's check when a navigation was attempted — two
+  /// definitions of "same site" in one feature.
+  ///
+  /// Without a site from native this stays at hostname equality rather than
+  /// guessing: a suffix rule invented here would call `evil.co.uk` and
+  /// `bank.co.uk` the same site. Native re-validates everything this produces
+  /// against the real list, so being conservative costs a fallback, not safety.
+  function sameSiteHost(hostname) {
+    const host = hostname.toLowerCase();
+    if (host === location.hostname.toLowerCase()) return true;
+    if (!siteDomain) return false;
+    return host === siteDomain || host.endsWith('.' + siteDomain);
+  }
+
   /// Resolves a link and refuses anything off-site. Keeps a link to the
   /// current page, which the episode list needs: that entry is the one it
   /// marks, and the one the neighbours are measured from.
@@ -1036,7 +1289,7 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     let url;
     try { url = new URL(href, location.href); } catch (_) { return null; }
     if (url.protocol !== 'https:' && url.protocol !== 'http:') return null;
-    if (url.origin !== location.origin) return null;      // never leave the site
+    if (!sameSiteHost(url.hostname)) return null;         // never leave the site
     return url.href;
   }
 
@@ -1061,7 +1314,7 @@ html[data-cp-unlock], html[data-cp-unlock] body {
   function navigateEpisode(href) {
     let wanted;
     try { wanted = new URL(href, location.href); } catch (_) { return false; }
-    if (wanted.origin !== location.origin) return false;
+    if (!sameSiteHost(wanted.hostname)) return false;
     const key = pageKey(wanted.href);
     if (key === pageKey(location.href)) return false;
 
@@ -1084,15 +1337,26 @@ html[data-cp-unlock], html[data-cp-unlock] body {
   /// incrementing a number in the path — that silently sends people to the
   /// wrong page or a 404.
   function findEpisodes() {
-    const found = { next: null, prev: null };
+    // `source` records WHERE each link came from, because the three signals
+    // are not equally trustworthy and one of them decides whether the player
+    // will navigate on its own when the video ends.
+    //
+    //   rel  — <link rel="next">. The standard, and unambiguous.
+    //   list — the neighbour in a list of numbered episodes on this page.
+    //   text — an anchor whose text matches /\bnext\b/.
+    //
+    // The last one matches "Next »" on page 2 of a forum, a docs footer, any
+    // gallery. Good enough to offer a button the user may press; NOT good
+    // enough to move them off the page by itself while they are not looking.
+    const found = { next: null, prev: null, nextSource: null, prevSource: null };
 
     for (const el of document.querySelectorAll('link[rel~="next"],a[rel~="next"]')) {
       found.next = sameOriginHref(el);
-      if (found.next) break;
+      if (found.next) { found.nextSource = 'rel'; break; }
     }
     for (const el of document.querySelectorAll('link[rel~="prev"],a[rel~="prev"]')) {
       found.prev = sameOriginHref(el);
-      if (found.prev) break;
+      if (found.prev) { found.prevSource = 'rel'; break; }
     }
 
     if (!found.next || !found.prev) {
@@ -1101,9 +1365,11 @@ html[data-cp-unlock], html[data-cp-unlock] body {
         if (!name || name.length > 40) continue;
         if (!found.next && NEXT_RE.test(name) && !PREV_RE.test(name)) {
           found.next = sameOriginHref(a);
+          if (found.next) found.nextSource = 'text';
         }
         if (!found.prev && PREV_RE.test(name)) {
           found.prev = sameOriginHref(a);
+          if (found.prev) found.prevSource = 'text';
         }
         if (found.next && found.prev) break;
       }
@@ -1118,8 +1384,14 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     // far more reliable source than matching words.
     if (!found.next || !found.prev) {
       const neighbours = episodeNeighbours();
-      found.next = found.next || neighbours.next;
-      found.prev = found.prev || neighbours.prev;
+      if (!found.next && neighbours.next) {
+        found.next = neighbours.next;
+        found.nextSource = neighbours.source;
+      }
+      if (!found.prev && neighbours.prev) {
+        found.prev = neighbours.prev;
+        found.prevSource = neighbours.source;
+      }
     }
     return found;
   }
@@ -1127,7 +1399,7 @@ html[data-cp-unlock], html[data-cp-unlock] body {
   /// The entries either side of the current one in the episode list.
   function episodeNeighbours() {
     const list = episodeList();
-    if (list.length < 2) return { next: null, prev: null };
+    if (list.length < 2) return { next: null, prev: null, source: null };
 
     // Episode lists are usually in order already, but a site that renders them
     // newest-first would give the wrong neighbours. When every entry carries a
@@ -1138,10 +1410,13 @@ html[data-cp-unlock], html[data-cp-unlock] body {
       : list;
 
     const at = ordered.findIndex(e => e.current);
-    if (at < 0) return { next: null, prev: null };
+    if (at < 0) return { next: null, prev: null, source: null };
     return {
       next: at + 1 < ordered.length ? ordered[at + 1].href : null,
       prev: at - 1 >= 0 ? ordered[at - 1].href : null,
+      // A list whose every entry carries an episode number is a real episode
+      // list. One matched only by position could be any set of links.
+      source: numbered ? 'list' : 'text',
     };
   }
 
@@ -1223,25 +1498,37 @@ html[data-cp-unlock], html[data-cp-unlock] body {
   /// immediately would stage a hidden thumbnail on a page whose real player is
   /// still mounting.
   function resumeCandidate(elapsed, graceMs = 3000) {
-    const sized = largestVideo();
+    const videos = allVideos();
+    // Biggest video THAT HAS SOMETHING TO PLAY, before biggest outright. An
+    // autoplaying advertisement is routinely larger than the player it sits
+    // above, and largest-wins staged it — which is what "Next played an ad"
+    // looks like. Both of these are sized, so a sized video still always
+    // beats a boxless one.
+    const playable = largestVideo(videos.filter(hasSomethingToPlay));
+    if (playable) return playable;
+    const sized = largestVideo(videos);
     if (sized) return sized;
     if (elapsed < graceMs) return null;
-    for (const v of allVideos()) {
-      if (v.currentSrc || v.src || v.readyState > 0 || v.querySelector('source')) {
-        return v;
-      }
+    for (const v of videos) {
+      if (hasSomethingToPlay(v)) return v;
     }
     return null;
   }
 
-  function largestVideo() {
+  function largestVideo(from) {
     let best = null, bestArea = 0;
-    for (const v of allVideos()) {
+    for (const v of (from || allVideos())) {
       const r = v.getBoundingClientRect();
       const area = r.width * r.height;
       if (area > bestArea) { best = v; bestArea = area; }
     }
     return bestArea > 0 ? best : null;
+  }
+
+  /// A source, a loaded frame, or a <source> child. The same question the
+  /// boxless fallback below has always asked, named once.
+  function hasSomethingToPlay(v) {
+    return !!(v.currentSrc || v.src || v.readyState > 0 || v.querySelector('source'));
   }
 
   // --- Interstitial / overlay blocking ------------------------------------
@@ -1283,16 +1570,44 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     return out;
   }
 
+  /// Marks this code removed itself. The observer reports our own writes the
+  /// same way it reports the page's, and a mark restored after `unstage()`
+  /// leaves the page bricked behind a video that is no longer there.
+  const clearedByUs = new WeakSet();
+
+  function forgetMark(el) { clearedByUs.add(el); }
+
+  /// Puts a theater mark back after the PAGE removed it. Returns whether it
+  /// did, so the caller can skip a full pass for a change it has answered.
+  function restoreTheaterMark(el, attributeName, previous) {
+    if (previous === null || previous === undefined) return false;   // freshly added
+    if (el.hasAttribute(attributeName)) return false;                // still there
+    if (clearedByUs.has(el)) { clearedByUs.delete(el); return false; }
+    if (attributeName === 'data-cp-stage' && el !== staged) return false;
+    if (attributeName === 'data-cp-theater' && el !== document.documentElement) return false;
+    el.setAttribute(attributeName, previous);
+    return true;
+  }
+
   const OBSERVE = {
     childList: true, subtree: true,
-    // Three attributes, not all of them. `data-cp-blocked` because a page that
-    // strips our mark would otherwise stay unblocked until something else
-    // happened to move a node; `open` because a <dialog> interstitial arrives
-    // by attribute, not by insertion; `style` because the usual way to show an
-    // ad is to flip the display on markup that was already in the document.
-    // `class` is left out deliberately — players churn it every frame.
+    // `attributeOldValue` so a mark can be restored to what it was, and so
+    // our own removals (old value present, new value absent, set BY us) are
+    // distinguishable from the page's.
+    attributeOldValue: true,
     attributes: true,
-    attributeFilter: ['data-cp-blocked', 'open', 'style'],
+    // `data-cp-blocked` because a page that strips our mark would otherwise
+    // stay unblocked until something else happened to move a node; the three
+    // theater marks for the same reason — removing `data-cp-hidden` from an
+    // overlay put it straight back on top of the video, and nothing was
+    // watching for it; `open` because a <dialog> interstitial arrives by
+    // attribute, not by insertion; `style` because the usual way to show an ad
+    // is to flip the display on markup that was already in the document.
+    // `class` is left out deliberately — players churn it every frame.
+    attributeFilter: [
+      'data-cp-blocked', 'data-cp-hidden', 'data-cp-stage', 'data-cp-theater',
+      'open', 'style',
+    ],
   };
   const watchedRoots = new WeakSet();
   let domObserver = null;
@@ -1688,7 +2003,18 @@ html[data-cp-unlock], html[data-cp-unlock] body {
   }
 
   function attachButton(video) {
-    if (!video || !video.parentElement) return;
+    if (!video) return;
+    // A <video> that is a shadow root's OWN child has no `parentElement`: its
+    // parent is the ShadowRoot, which is not an element. Bailing out on that
+    // left precisely the players shadow-DOM support was added for with no
+    // button at all — the walk found them and then nothing was offered.
+    // Anchor on the host instead and put the button beside the video, inside
+    // the root, where the stylesheet for that root already reaches.
+    const videoRoot = video.getRootNode();
+    const shadowHost = (videoRoot && videoRoot.host) ? videoRoot.host : null;
+    const container = video.parentElement || (shadowHost ? videoRoot : null);
+    const anchor = video.parentElement || shadowHost;
+    if (!container || !anchor) return;
 
     // Track the button ITSELF, not a flag on the video. A boolean marker meant
     // that once anything removed the button — the orphan sweep, or the page's
@@ -1702,29 +2028,27 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     if (r.width < 200 || r.height < 100) return;
 
     // The button is position:absolute, so it lands on the video only if the
-    // parent establishes a containing block. On a static parent it flies off to
+    // anchor establishes a containing block. On a static anchor it flies off to
     // whatever ancestor is positioned — usually the top-left of the page, where
     // it looks like no button was added at all.
-    const parent = video.parentElement;
-    if (getComputedStyle(parent).position === 'static') {
-      parent.style.position = 'relative';
-      parent.dataset.cpAnchored = '1';
+    if (getComputedStyle(anchor).position === 'static') {
+      anchor.style.position = 'relative';
+      anchor.dataset.cpAnchored = '1';
     }
 
     // A player inside a shadow root needs the stylesheet in that root.
-    const root = video.getRootNode();
-    ensureStyle(root === document ? document : root);
+    ensureStyle(videoRoot === document ? document : videoRoot);
 
     const theater = makeButton(video, 'Watch clean', 'Watch clean',
                                () => watchClean(video));
-    video.parentElement.appendChild(theater);
+    container.appendChild(theater);
     video.__cpBtn = theater;
 
     if (canNativeFullscreen(video)) {
       const full = makeButton(video, 'Fullscreen', 'Open in the system player',
                               () => nativeFullscreen(video));
       full.dataset.cpSecondary = '1';
-      video.parentElement.appendChild(full);
+      container.appendChild(full);
     }
   }
 
@@ -1733,7 +2057,9 @@ html[data-cp-unlock], html[data-cp-unlock] body {
   function sweepOrphans() {
     for (const b of allButtons()) {
       if (!b.__cpVideo || !b.__cpVideo.isConnected) {
-        const parent = b.parentElement;
+        const root = b.getRootNode();
+        const parent = b.parentElement
+          || ((root && root.host) ? root.host : null);
         b.remove();
         // Give back the position we borrowed, once nothing of ours needs it.
         if (parent && parent.dataset && parent.dataset.cpAnchored === '1'
@@ -1756,11 +2082,35 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     return found;
   }
 
+  /// Whether anything on this page is offering a control. Drives the sweep
+  /// below, so it costs nothing once a player has been found.
+  let haveControls = false;
+
   function scan(root = document) {
     sweepOrphans();
     for (const v of allVideos(root)) attachButton(v);
     checkStaged();
+    haveControls = allButtons().length > 0;
   }
+
+  /// A slow sweep for a player nothing told us about.
+  ///
+  /// A MutationObserver does not cross a shadow boundary, and attaching a
+  /// shadow root to an element that is ALREADY in the document mutates
+  /// nothing in the light tree. So a custom-element player that builds its
+  /// root and mounts its <video> after our first pass produced no event to
+  /// scan on and was never found at all — no button, no theater, on exactly
+  /// the players shadow-DOM support was added for.
+  ///
+  /// ponytail: a one-second poll, and only while nothing has been found.
+  /// Ceiling: a player appearing more than a second late is a second late to
+  /// get its button. Upgrade path: have popupguard patch `attachShadow` in
+  /// the page world and announce through a DOM event, the way it already
+  /// reports blocked popups.
+  const HUNT_MS = 1000;
+  setInterval(() => {
+    if (!haveControls && !staged) scan();
+  }, HUNT_MS);
 
   // --- A player that leaves ------------------------------------------------
 
@@ -1820,7 +2170,12 @@ html[data-cp-unlock], html[data-cp-unlock] body {
   function schedulePass() {
     if (passPending) return;
     passPending = true;
-    requestAnimationFrame(() => { passPending = false; scan(); blockOverlays(); });
+    requestAnimationFrame(() => {
+      passPending = false;
+      scan();
+      blockOverlays();
+      hideTheaterIntruders();
+    });
   }
 
   /// The slow lane, for the wake-ups that are not a node arriving: scrolling,
@@ -1836,6 +2191,7 @@ html[data-cp-unlock], html[data-cp-unlock] body {
       slowTimer = 0;
       scan();
       blockOverlays();
+      hideTheaterIntruders();
     }, SLOW_PASS_MS);
   }
 
@@ -1850,8 +2206,18 @@ html[data-cp-unlock], html[data-cp-unlock] body {
   function announce() {
     if (announced) return;
     announced = true;
-    post({ type: 'ready' });
+    post({ type: 'ready', ...frameMetrics() });
   }
+
+  // A subframe navigation has no frame-specific WKNavigationDelegate callback.
+  // Tell native while this document still owns its fid so per-frame state can
+  // be removed. A page restored from the back-forward cache announces again.
+  addEventListener('pagehide', () => post({ type: 'frameGone' }));
+  addEventListener('pageshow', (event) => {
+    if (!event.persisted) return;
+    announced = false;
+    announce();
+  });
 
   domObserver = new MutationObserver((records) => {
     let structural = false;
@@ -1867,6 +2233,18 @@ html[data-cp-unlock], html[data-cp-unlock] body {
       if (rec.attributeName === 'style' && rec.target.nodeType === 1
           && rec.target.hasAttribute('data-cp-blocked')) {
         hideHard(rec.target);
+        continue;
+      }
+      // A theater mark was taken off something theater had marked. Put it
+      // back at once rather than at the next pass: a quarter second of the
+      // page's header over the video, several times a second, is the page
+      // winning. Only while theater is actually showing, and only for the
+      // element that lost the mark, so this cannot fight a legitimate exit.
+      if (staged && rec.target.nodeType === 1
+          && (rec.attributeName === 'data-cp-hidden'
+              || rec.attributeName === 'data-cp-stage'
+              || rec.attributeName === 'data-cp-theater')
+          && restoreTheaterMark(rec.target, rec.attributeName, rec.oldValue)) {
         continue;
       }
       needsPass = true;
@@ -1888,6 +2266,7 @@ html[data-cp-unlock], html[data-cp-unlock] body {
     ensureStyle();
     scan();
     blockOverlays();
+    hideTheaterIntruders();
     announce();
   }
 
@@ -1896,14 +2275,14 @@ html[data-cp-unlock], html[data-cp-unlock] body {
   window.__cp = {
     enterTheater, exitTheater, isTheater, autoTheater,
     hostTheater, unhostTheater, largestFrame,
-    togglePlay, seek, skip, beginScrub, setRate, setVolume,
+    togglePlay, seek, skip, beginScrub, setRate, setVolume, setMuted,
     armEpisodeTransition,
     textTracks, selectTextTrack, setObjectFit, selectSource, togglePiP,
-    findEpisodes, episodeList, navigateEpisode,
+    findEpisodes, episodeList, navigateEpisode, setSite, sameSiteHost,
     largestVideo, allVideos, resumeCandidate, scan,
     checkStaged,
     showAirPlay, nativeFullscreen, untrackAirPlay, isManifestURL,
-    streamCandidates, sourceKind, attachAirPlaySource,
-    blockOverlays, setOverlayBlocking,
+    streamCandidates, handoffCandidates, sourceKind, attachAirPlaySource,
+    blockOverlays, setOverlayBlocking, hideTheaterIntruders,
   };
 })();

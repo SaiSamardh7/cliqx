@@ -1,0 +1,14 @@
+Cliqx is a private browser built for watching video. It blocks advertising and tracking requests, stops pop-ups before they open, and removes overlays that get between you and the player.
+
+When a compatible page exposes a playable stream, Watch Clean opens it in a native player with playback controls, Picture in Picture, AirPlay, subtitles, and next/previous episode navigation.
+
+You can also play videos stored in Files or connect to a Jellyfin server you control. Jellyfin is optional; Cliqx does not provide or host media.
+
+Privacy by design:
+• No Cliqx account
+• No developer-operated backend
+• No browsing history sent to us
+• No advertising or tracking SDKs
+• Filter lists are bundled with the app
+
+Cliqx opens websites you choose. It does not provide content and is not a parental-control or age-filtering service.

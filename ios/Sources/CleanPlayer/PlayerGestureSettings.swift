@@ -16,6 +16,10 @@ public final class PlayerGestureSettings: ObservableObject {
     @Published public var temporaryFastForward: Bool {
         didSet { store.set(temporaryFastForward, forKey: Keys.temporaryFastForward) }
     }
+    /// Shown once, the first time someone amplifies past 100%.
+    @Published public var hasSeenBoostWarning: Bool {
+        didSet { store.set(hasSeenBoostWarning, forKey: Keys.hasSeenBoostWarning) }
+    }
     @Published public var swipeToDismiss: Bool {
         didSet { store.set(swipeToDismiss, forKey: Keys.swipeToDismiss) }
     }
@@ -26,6 +30,7 @@ public final class PlayerGestureSettings: ObservableObject {
         static let brightnessAndVolume = "player.gesture.brightnessAndVolume.v1"
         static let temporaryFastForward = "player.gesture.temporaryFastForward.v1"
         static let swipeToDismiss = "player.gesture.swipeToDismiss.v1"
+        static let hasSeenBoostWarning = "player.volume.boostWarningSeen.v1"
     }
 
     private let store: UserDefaults
@@ -37,6 +42,7 @@ public final class PlayerGestureSettings: ObservableObject {
         brightnessAndVolume = store.object(forKey: Keys.brightnessAndVolume) as? Bool ?? true
         temporaryFastForward = store.object(forKey: Keys.temporaryFastForward) as? Bool ?? true
         swipeToDismiss = store.object(forKey: Keys.swipeToDismiss) as? Bool ?? true
+        hasSeenBoostWarning = store.object(forKey: Keys.hasSeenBoostWarning) as? Bool ?? false
     }
 }
 
@@ -45,6 +51,34 @@ public enum PlayerDragAction: Equatable {
     case brightness
     case volume
     case dismiss
+}
+
+/// One definition of how loud the controls may go, because there are two ways
+/// to ask — the menu and the vertical drag — and they disagreed.
+public enum PlayerVolume {
+    public static let levels = [0, 25, 50, 75, 100, 125, 150, 175, 200]
+
+    /// The highest level the controls may offer.
+    ///
+    /// Amplifying past 100% routes the element through Web Audio, and a routed
+    /// element cannot follow AirPlay: the television would get the picture and
+    /// no sound. So while a route could carry the video, boost is withheld.
+    ///
+    /// Except once the video is *already* boosted. That routing has happened
+    /// and is irreversible for the element's lifetime, so there is nothing left
+    /// to protect — and withholding the level it is already playing at would
+    /// leave the menu showing a selection none of its rows carry.
+    public static func ceiling(current: Int, airplayCouldSendVideo: Bool) -> Int {
+        airplayCouldSendVideo && current <= 100 ? 100 : levels.last!
+    }
+
+    public static func levels(upTo ceiling: Int) -> [Int] {
+        levels.filter { $0 <= ceiling }
+    }
+
+    public static func clamp(_ percent: Int, to ceiling: Int) -> Int {
+        min(max(percent, 0), ceiling)
+    }
 }
 
 /// Pure gesture arbitration kept outside SwiftUI so edge cases are testable.

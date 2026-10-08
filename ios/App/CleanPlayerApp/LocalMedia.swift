@@ -33,7 +33,15 @@ struct LocalVideo: Identifiable {
 /// would sip less battery on MP4. Split by format only if that bites.
 @MainActor
 final class LocalPlayerModel: NSObject, ObservableObject, @preconcurrency VLCMediaPlayerDelegate {
-    let player = VLCMediaPlayer()
+    init(subtitleStyle: SubtitleStyle = SubtitleStyle()) {
+        self.subtitleStyle = subtitleStyle
+        player = VLCMediaPlayer(options: subtitleStyle.playerOptions)
+        super.init()
+    }
+
+    /// Built with the subtitle style, because colour and the background band
+    /// are only read from the PLAYER's options — see SubtitleStyle.
+    let player: VLCMediaPlayer
 
     @Published var isPlaying = false
     @Published var position: Float = 0          // 0…1, for the scrubber
@@ -58,12 +66,35 @@ final class LocalPlayerModel: NSObject, ObservableObject, @preconcurrency VLCMed
     /// Called with (positionMs, durationMs) on the plan's save points.
     var onProgress: (Int, Int) -> Void = { _, _ in }
 
+    private let interruptions = AudioInterruptions()
+    private var interruptionPolicy = InterruptionPolicy()
+
+    /// How subtitles should look. Applied as media options, because VLCKit
+    /// has no API for it — see SubtitleStyle.
+    private let subtitleStyle: SubtitleStyle
+
     func start(url: URL, resumeMs: Int = 0) {
         pendingResumeMs = resumeMs
         didResume = resumeMs <= 0
         player.delegate = self
-        player.media = VLCMedia(url: url)
+        let media = VLCMedia(url: url)
+        for option in subtitleStyle.mediaOptions { media.addOption(option) }
+        player.media = media
         player.play()
+        // A call, an alarm, or headphones leaving. iOS pauses the audio for
+        // the first two and says nothing; the third must always pause.
+        interruptions.start { [weak self] event in
+            MainActor.assumeIsolated { self?.handle(interruption: event) }
+        }
+    }
+
+    private func handle(interruption event: AudioInterruptions.Event) {
+        switch interruptionPolicy.response(to: event, isPlaying: player.isPlaying) {
+        case .pause: player.pause()
+        case .resume: player.play()
+        case .nothing: break
+        }
+        isPlaying = player.isPlaying
     }
 
     /// Save points from the plan: every 5s while playing, plus pause, PiP or
@@ -78,6 +109,26 @@ final class LocalPlayerModel: NSObject, ObservableObject, @preconcurrency VLCMed
         player.currentVideoSubTitleIndex = id
     }
 
+    /// A subtitle file the user picked, alongside whatever the video carries.
+    /// `enforce` selects it immediately — someone who just chose a file means
+    /// to see it, not to go hunting in the menu for it.
+    @discardableResult
+    func addSubtitleFile(_ url: URL) -> Bool {
+        player.addPlaybackSlave(url, type: .subtitle, enforce: true) == 0
+    }
+
+    /// Nudge subtitles that run ahead of or behind the audio. VLC counts in
+    /// microseconds; this takes seconds, which is what a person adjusts in.
+    var subtitleDelay: Double {
+        get { Double(player.currentVideoSubTitleDelay) / 1_000_000 }
+        set { player.currentVideoSubTitleDelay = Int(newValue * 1_000_000) }
+    }
+
+    var audioDelay: Double {
+        get { Double(player.currentAudioPlaybackDelay) / 1_000_000 }
+        set { player.currentAudioPlaybackDelay = Int(newValue * 1_000_000) }
+    }
+
     func selectAudio(_ id: Int32) {
         player.currentAudioTrackIndex = id
     }
@@ -88,7 +139,10 @@ final class LocalPlayerModel: NSObject, ObservableObject, @preconcurrency VLCMed
         volumePercent = safe
     }
 
-    func stop() { player.stop() }
+    func stop() {
+        interruptions.stop()
+        player.stop()
+    }
 
     func togglePlay() { player.isPlaying ? player.pause() : player.play() }
 
@@ -170,6 +224,30 @@ final class LocalPlayerModel: NSObject, ObservableObject, @preconcurrency VLCMed
     }
 }
 
+extension VLCMediaPlayer {
+    /// "Fill screen" for a VLC surface.
+    ///
+    /// VLC has no `object-fit`, so filling means cropping to the screen's own
+    /// aspect ratio. The handoff player used `scaleFactor = 1.25` instead,
+    /// which is not that: it zooms by a fixed quarter whatever the screen and
+    /// whatever the video, so the control left bars on some films and cut the
+    /// picture on others. One implementation now, and it is the one that was
+    /// right.
+    func setFill(_ cover: Bool) {
+        guard cover else {
+            videoCropGeometry = nil
+            return
+        }
+        let size = UIScreen.main.bounds.size
+        let wide = Int(max(size.width, size.height))
+        let narrow = Int(min(size.width, size.height))
+        // libvlc copies the string; ours is freed straight after.
+        let geometry = strdup("\(wide):\(narrow)")
+        videoCropGeometry = geometry
+        free(geometry)
+    }
+}
+
 /// VLC renders into a plain UIView, which is exactly what lets us put our own
 /// gesture and control layer on top.
 struct VLCVideoSurface: UIViewRepresentable {
@@ -241,7 +319,20 @@ struct LocalPlayerView: View {
     /// (positionMs, durationMs) at each of the plan's save points.
     var onProgress: (Int, Int) -> Void = { _, _ in }
 
-    @StateObject private var model = LocalPlayerModel()
+    @StateObject private var model: LocalPlayerModel
+
+    init(video: LocalVideo, onClose: @escaping () -> Void,
+         gestureSettings: PlayerGestureSettings,
+         subtitleStyle: SubtitleStyle = SubtitleStyle(),
+         onProgress: @escaping (Int, Int) -> Void = { _, _ in }) {
+        self.video = video
+        self.onClose = onClose
+        self.gestureSettings = gestureSettings
+        self.onProgress = onProgress
+        // The style is fixed when the player is built, which is here — see
+        // SubtitleStyle for why it cannot be changed on a running one.
+        _model = StateObject(wrappedValue: LocalPlayerModel(subtitleStyle: subtitleStyle))
+    }
     @State private var controlsVisible = true
     @State private var hideTask: Task<Void, Never>?
 
@@ -302,6 +393,7 @@ struct LocalPlayerView: View {
         .statusBarHidden(true)
         .persistentSystemOverlays(.hidden)
         .onAppear {
+            MediaSession.activate()
             model.onProgress = onProgress
             model.start(url: video.url, resumeMs: video.resumeMs)
             scheduleHide()
@@ -310,7 +402,13 @@ struct LocalPlayerView: View {
             // Shutdown save, before the engine is torn down.
             model.reportProgress()
             model.stop()
+            // The brightness swipe borrowed the screen; give it back. Without
+            // this a dark scene left the phone dim for everything afterwards.
+            ScreenBrightness.restore()
             if video.scoped { video.url.stopAccessingSecurityScopedResource() }
+            // Hand the audio session back so whatever was playing before can
+            // resume; .playback interrupted it and only this ends that.
+            MediaSession.deactivate()
         }
         // Backgrounding is a save point too.
         .onReceive(NotificationCenter.default.publisher(
@@ -401,7 +499,9 @@ struct LocalPlayerView: View {
                 get: { model.volumePercent },
                 set: { model.setVolume($0); scheduleHide() }
             )) {
-                ForEach([0, 25, 50, 75, 100, 125, 150, 175, 200], id: \.self) { level in
+                // The full range: this player decodes locally and never routes
+                // through Web Audio, so boost costs it no AirPlay.
+                ForEach(PlayerVolume.levels, id: \.self) { level in
                     Text(level > 100 ? "\(level)% Boost" : "\(level)%").tag(level)
                 }
             }
@@ -429,7 +529,7 @@ struct LocalPlayerView: View {
                         dx: Double(value.translation.width),
                         dy: Double(value.translation.height),
                         startXFraction: Double(value.startLocation.x) / width)
-                    dragStartBrightness = UIScreen.main.brightness
+                    dragStartBrightness = ScreenBrightness.current
                     dragStartVolume = model.volumePercent
                 }
                 guard let dragAction else { return }
@@ -442,7 +542,7 @@ struct LocalPlayerView: View {
                     guard gestureSettings.brightnessAndVolume else { return }
                     let change = -value.translation.height / max(size.height, 1)
                     let brightness = min(max(dragStartBrightness + change, 0), 1)
-                    UIScreen.main.brightness = brightness
+                    ScreenBrightness.set(brightness)
                     gestureBrightnessPercent = Int((brightness * 100).rounded())
                     gestureVolumePercent = model.volumePercent
                 case .volume:
@@ -451,7 +551,7 @@ struct LocalPlayerView: View {
                                       / max(size.height, 1) * 200).rounded())
                     let volume = min(max(dragStartVolume + change, 0), 200)
                     model.setVolume(volume)
-                    gestureBrightnessPercent = Int((UIScreen.main.brightness * 100).rounded())
+                    gestureBrightnessPercent = Int((ScreenBrightness.current * 100).rounded())
                     gestureVolumePercent = volume
                 case .dismiss:
                     break

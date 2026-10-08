@@ -8,7 +8,7 @@ and what each one's licence would cost. **Three conclusions turned out to be
 wrong** — two from elsewhere in the repo, and one from this document itself.
 All are corrected below.
 
-Current state: **183,950 rules at Strict, 134,397 at Standard**, across four
+Current state: **183,732 rules at Strict, 134,166 at Standard**, across four
 compiled lists.
 
 ## Recommendation
@@ -58,12 +58,12 @@ modify** — which, using it as a dependency, is none.
 
 ### Correction 2 — we are nowhere near the rule ceiling
 
-WebKit caps a content rule list at **150,000 rules**. At 183,950 total that
+WebKit caps a content rule list at **150,000 rules**. At 183,732 total that
 would read as over the ceiling. That reading is wrong.
 
 The cap is **per compiled list**, and lists stack — AdGuard for Safari reaches
 900,000 by splitting across six content blockers. We compile four separately,
-and the largest is EasyList at 77,963: **52% of one list's budget**. A test now
+and the largest is EasyList at 77,670: **52% of one list's budget**. A test now
 asserts every shipped list stays under the cap.
 
 The one thing not to do is merge them into a single JSON.
@@ -112,8 +112,8 @@ _Evidence: observed live, now blocked by TLD rule, permanent probe in
 This was why "Strict" had to be deleted: it selected rule groups no bundled
 list populated, so it was byte-identical to Standard while the UI promised more.
 
-Fanboy's Annoyance now ships as `annoyances.json` (49,553 rules) and Strict is
-back as a real superset — 183,950 rules against Standard's 134,397. EasyList
+Fanboy's Annoyance now ships as `annoyances.json` (49,566 rules) and Strict is
+back as a real superset — 183,732 rules against Standard's 134,166. EasyList
 Cookie was not added separately; Fanboy's Annoyance already contains it.
 
 _Evidence: `RuleGroup.groups(for:)` — `popups` and `annoyances` had zero lists._

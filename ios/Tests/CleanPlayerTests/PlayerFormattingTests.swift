@@ -99,10 +99,21 @@ final class PlayerFormattingTests: XCTestCase {
         XCTAssertEqual(PlayerFormatting.timecode(-5), "0:00")
     }
 
+    /// Two servers on one machine are two sites. Keyed on the host alone they
+    /// collapsed, and a show on one evicted the show on the other.
+    func testSeriesIdentityKeepsThePortApart() {
+        let first = PlayerFormatting.seriesIdentity(
+            title: "Episode 1", url: URL(string: "http://localhost:8096/web/#/x")!)
+        let second = PlayerFormatting.seriesIdentity(
+            title: "Episode 1", url: URL(string: "http://localhost:8920/web/#/x")!)
+        XCTAssertNotEqual(first, second)
+    }
+
+    /// Every speed the menu actually offers, because the two it used to get
+    /// wrong were the two this test did not cover: at two significant digits
+    /// 1.25 was labelled "1.2" and 1.75 "1.8".
     func testSpeedLabelsReadCleanly() {
-        XCTAssertEqual(PlayerFormatting.rateText(1), "1")
-        XCTAssertEqual(PlayerFormatting.rateText(2), "2")
-        XCTAssertEqual(PlayerFormatting.rateText(1.5), "1.5")
-        XCTAssertEqual(PlayerFormatting.rateText(0.75), "0.75")
+        XCTAssertEqual(PlayerFormatting.speeds.map(PlayerFormatting.rateText),
+                       ["0.75", "1", "1.25", "1.5", "1.75", "2"])
     }
 }

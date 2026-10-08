@@ -14,6 +14,15 @@ public enum FilterUpdateError: Error, Equatable {
 /// Fetches filter lists and puts them on disk without ever destroying the copy
 /// that currently works.
 ///
+/// **Nothing in the app calls this yet, and that is deliberate.** The app
+/// consumes WebKit content-blocker JSON; this fetches Adblock Plus text, and
+/// the converter between them is a build-time Rust tool. Wiring it needs the
+/// hosted-JSON pipeline in docs/FIX-LIST.md (S2-47), not just a caller — and
+/// until that lands, `PRIVACY.md` is correct that the app contacts no server
+/// for rules: this type is compiled in but unreachable. `RuleCatalogTests`
+/// asserts that the app has no caller, so "we shipped an updater nobody
+/// noticed was live" cannot happen quietly.
+///
 /// Everything downloaded is untrusted input: it is size-capped before and after
 /// transfer, type-checked, sniffed for filter-list shape, and only then written
 /// — atomically, so an interrupted update cannot leave a half-file behind.

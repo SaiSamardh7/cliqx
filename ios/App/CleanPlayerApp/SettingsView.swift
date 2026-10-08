@@ -9,6 +9,7 @@ struct SettingsView: View {
     @ObservedObject var rules: RuleListController
     @ObservedObject var settings: ProtectionSettings
     @ObservedObject var gestureSettings: PlayerGestureSettings
+    @ObservedObject var playback: PlaybackPreferences
 
     /// The site the user was on when they opened Settings, if any. Per-site
     /// controls only make sense with one.
@@ -167,9 +168,12 @@ struct SettingsView: View {
     // MARK: Browser player preferences
 
     private var browserPlayerSection: some View {
-        Section("Browser player") {
+        Section("Player") {
             NavigationLink("Gestures") {
                 PlayerGesturePreferencesView(settings: gestureSettings)
+            }
+            NavigationLink("Subtitles") {
+                SubtitleAppearanceView(playback: playback)
             }
         }
     }
@@ -261,5 +265,110 @@ private struct PlayerGesturePreferencesView: View {
                 Toggle("Swipe down in centre to close", isOn: $settings.swipeToDismiss)
             }
         }.navigationTitle("Gestures")
+    }
+}
+
+
+/// How subtitles look in the local and server players.
+///
+/// Not the browser player: a website draws its own captions and none of this
+/// reaches them.
+struct SubtitleAppearanceView: View {
+    @ObservedObject var playback: PlaybackPreferences
+
+    var body: some View {
+        Form {
+            Section {
+                preview
+                    .listRowBackground(Color.black)
+            } header: {
+                Text("Preview")
+            } footer: {
+                // Said plainly, because it is the one surprising thing here:
+                // a player's options are fixed when it is built, and both
+                // players are built per playback.
+                Text("Changes apply to the next video you open.")
+            }
+
+            Section("Size") {
+                Picker("Size", selection: $playback.subtitles.size) {
+                    ForEach(SubtitleStyle.Size.allCases, id: \.self) { size in
+                        Text(size.title).tag(size)
+                    }
+                }
+                .pickerStyle(.segmented)
+            }
+
+            Section("Colour") {
+                Picker("Colour", selection: $playback.subtitles.colour) {
+                    ForEach(SubtitleStyle.Colour.allCases, id: \.self) { colour in
+                        Label {
+                            Text(colour.title)
+                        } icon: {
+                            Circle().fill(colour.swatch)
+                                .frame(width: 14, height: 14)
+                        }
+                        .tag(colour)
+                    }
+                }
+            }
+
+            Section {
+                Toggle("Outline", isOn: $playback.subtitles.outline)
+                Toggle("Background band", isOn: $playback.subtitles.background)
+            } footer: {
+                Text("An outline keeps light text readable over a bright "
+                     + "scene. The band is for footage an outline cannot save.")
+            }
+        }
+        .navigationTitle("Subtitles")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    /// Drawn with SwiftUI rather than VLC, so it cannot promise more than the
+    /// renderer delivers — it shows size, colour, outline and band, which are
+    /// the four things on this screen.
+    private var preview: some View {
+        ZStack {
+            LinearGradient(colors: [.gray.opacity(0.55), .black],
+                           startPoint: .topLeading, endPoint: .bottomTrailing)
+            Text("The quick brown fox")
+                .font(.system(size: playback.subtitles.size.previewPoints,
+                              weight: .semibold))
+                .foregroundStyle(playback.subtitles.colour.swatch)
+                .shadow(color: playback.subtitles.outline ? .black : .clear, radius: 0.6)
+                .padding(.horizontal, 6).padding(.vertical, 2)
+                .background(playback.subtitles.background
+                            ? Color.black.opacity(0.67) : .clear)
+        }
+        .frame(height: 96)
+        .clipShape(.rect(cornerRadius: 8))
+        .accessibilityLabel("Preview: \(playback.subtitles.colour.title) subtitles, "
+                            + "\(playback.subtitles.size.title)")
+    }
+}
+
+private extension SubtitleStyle.Colour {
+    var swatch: Color {
+        switch self {
+        case .white: .white
+        case .yellow: .yellow
+        case .cyan: .cyan
+        case .green: .green
+        case .magenta: Color(red: 1, green: 0, blue: 1)
+        }
+    }
+}
+
+private extension SubtitleStyle.Size {
+    /// Only for the preview. The real size is a fraction of the video's
+    /// height, which no fixed point size can mirror exactly.
+    var previewPoints: CGFloat {
+        switch self {
+        case .small: 12
+        case .medium: 15
+        case .large: 19
+        case .extraLarge: 24
+        }
     }
 }

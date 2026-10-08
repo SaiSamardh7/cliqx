@@ -1,0 +1,7 @@
+{
+  "bundleId": "com.saisamardh.cleanplayer",
+  "metadataDir": "fastlane/metadata",
+  "screenshotsDir": "auto",
+  "locales": ["en-US"],
+  "reviewPrepNotes": "Cliqx has no developer-operated account or backend. Jellyfin sign-in is optional and works only with a server the reviewer owns; it is not required to review the app. Complete onboarding, open a public web page in Browser, and use Settings > Local files to exercise the account-free features. The app does not provide or host media."
+}

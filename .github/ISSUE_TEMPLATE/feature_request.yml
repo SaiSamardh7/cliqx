@@ -1,0 +1,33 @@
+name: Feature request
+description: Suggest something Cliqx should do
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Two things are permanently out of scope, so please check first:
+
+        - **Other platforms.** Cliqx is iOS-only by architecture — it is built on
+          `WKContentWorld`, `WKContentRuleList` and `webkitEnterFullscreen`. It
+          does not port.
+        - **Content.** Cliqx does not host, index, provide or link to media.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do that the app makes hard? Describe the situation, not the solution.
+    validations:
+      required: true
+
+  - type: textarea
+    id: idea
+    attributes:
+      label: What you have in mind
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you do instead today

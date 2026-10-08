@@ -97,6 +97,37 @@ The unmodified list is bundled at
 keep unrelated tenants on shared hosting domains such as `github.io` and
 `pages.dev` in separate security boundaries.
 
+## VLCKit — media playback
+
+Source: https://code.videolan.org/videolan/VLCKit, consumed as the Swift
+package https://github.com/tylerjonesio/vlckit-spm (pinned to 3.6.0 in
+`Package.resolved`) — **LGPL-2.1-or-later**.
+
+VLCKit wraps libVLC and plays every local file and every server stream: MKV,
+AVI, FLV and the codecs AVFoundation will not open. It is linked into the
+shipped binary, so its obligations are live.
+
+LGPL-2.1 §6 allows linking with a work under other terms provided the recipient
+can **relink** the result against a modified VLCKit. For an iOS application
+that is satisfied by:
+
+- **Licence text.** Shipped with the app and reachable at **Settings -> About
+  -> Attribution and licences**.
+- **Source.** VLCKit is used unmodified at the pinned version above; its source
+  is at the URL above, and this file records the exact revision consumed.
+- **Relinking.** The app's own source is MIT and public, so anyone may rebuild
+  it against their own VLCKit. `Package.resolved` pins the version they would
+  be replacing.
+
+> Media playback by VLCKit (code.videolan.org/videolan/VLCKit), used under
+> LGPL-2.1-or-later.
+
+This is the one third-party component **linked into the binary**. It collects
+nothing and contacts nothing on its own: it is handed a local file URL or a
+stream URL the user's own server issued. `PRIVACY.md` says the app links no
+analytics or tracking SDKs, which remains true, and deliberately no longer says
+"no third-party SDKs" — that claim was wrong while VLCKit was linked.
+
 ## Hand-written rules
 
 `ios/App/CleanPlayerApp/Resources/blocklist.json` was written for this project

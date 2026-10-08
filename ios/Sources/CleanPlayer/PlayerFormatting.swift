@@ -9,8 +9,12 @@ public enum PlayerFormatting {
 
     public static let speeds: [Double] = [0.75, 1, 1.25, 1.5, 1.75, 2]
 
+    /// `%g` drops the trailing zeros and keeps every digit that matters. `%.2g`
+    /// is two SIGNIFICANT digits, which is fine for 1.5 and silently wrong for
+    /// the two speeds either side of it: the menu offered 1.25 and 1.75 and
+    /// labelled them "1.2" and "1.8".
     public static func rateText(_ rate: Double) -> String {
-        rate == rate.rounded() ? String(Int(rate)) : String(format: "%.2g", rate)
+        String(format: "%g", rate)
     }
 
     /// h:mm:ss only when there is an hour to show.
@@ -124,7 +128,12 @@ public enum PlayerFormatting {
     /// preferred because sites change URL shapes; the path fallback covers
     /// pages whose title is only "Episode 5".
     public static func seriesIdentity(title: String, url: URL) -> String {
-        let host = HostKey.canonical(url.host() ?? "") ?? (url.host() ?? "")
+        // The PORT is part of which server this is. Without it two home
+        // servers on one machine — `localhost:8096` and `localhost:8920`, a
+        // real pair found in a live store — were the same site, so a show on
+        // one evicted the show on the other from the shelf.
+        let bare = HostKey.canonical(url.host() ?? "") ?? (url.host() ?? "")
+        let host = url.port.map { "\(bare):\($0)" } ?? bare
         if let series = seriesTitle(title, host: host),
            series.range(of: #"(?i)^episode\s*\d+$"#, options: .regularExpression) == nil {
             let folded = series.folding(options: [.caseInsensitive, .diacriticInsensitive],

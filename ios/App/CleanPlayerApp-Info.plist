@@ -32,5 +32,10 @@
 	<!-- Shown when iOS asks permission to reach devices on the local network. -->
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Cliqx uses your local network only to reach media servers you enter yourself, such as a NAS or home media server. It never scans or browses your network on its own.</string>
+	<!-- Cliqx implements no non-exempt encryption. HTTPS is provided by Apple's
+	     networking stack; this prevents App Store Connect from asking the same
+	     export-compliance question on every upload. -->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 </dict>
 </plist>

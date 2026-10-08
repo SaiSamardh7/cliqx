@@ -604,6 +604,41 @@ The native control bar has **not** been seen working on a real page yet.
 
 ---
 
+## Volume ownership
+
+Measured on an iPhone, not reasoned about. Three things are true at once:
+
+1. **`HTMLMediaElement.volume` is ignored.** Writing `0.25` reads back `1` — in
+   this app and in Safari alike. Every web player's volume slider is inert on
+   iOS.
+2. **`AVAudioSession.outputVolume` has no setter.** The only supported way to
+   offer device volume is to *show* an `MPVolumeView` and let the user drag it.
+   Reaching into its `subviews` for the slider is an undocumented view
+   hierarchy, and that is why it was removed.
+3. **A Web Audio gain node does not reach the sound.** The app routed the
+   element through one for a while. The control moved and nothing changed.
+
+So **a web page on iOS has no supported way to change its own volume.** Every
+arrangement this project tried was a way of not saying that, and each reported
+a success it had not had: the private `MPVolumeView` slider by depending on an
+undocumented hierarchy, Web Audio by moving a node outside the audible path.
+
+What ships instead is two controls that work, and no third that pretends to:
+
+- **Device volume** — a real `MPVolumeView`, shown in the player, backed by the
+  hardware buttons. Never fails, works on DRM and MSE alike, and cannot be
+  driven by the swipe gesture because programmatic control is the unsupported
+  part. See `SystemVolumeSlider.swift`.
+- **The Cliqx player** — hands a stream recovered from the page to VLC, which
+  decodes it and therefore owns its audio outright: 0–200% including boost,
+  from the menu and the swipe. Needs a manifest in resource timing, so DRM and
+  some DASH keep the in-page player. See `WebStreamPlayer.swift`.
+
+The media-level control appears **only where the app decodes the audio** — the
+Cliqx player, a Jellyfin stream, a local file. On a web page it is absent
+rather than greyed, because a disabled control that can never be enabled is
+just an apology taking up a row.
+
 ## Interstitial and ad blocking
 
 Reported symptom: a full-screen "Checking your browser before visiting the
@@ -964,7 +999,7 @@ lists several things there is nothing to preserve.
 ### The converter has been run
 
 `tools/convert-filters.sh` has been executed and `rules/manifest.json` records
-the result: EasyList at 77,360 rules and EasyPrivacy at 55,903, both converted
+the result: EasyList at 77,670 rules and EasyPrivacy at 56,426, both converted
 by `cargo 1.98.0`. The earlier note that it had "never been compiled or
 executed" was already stale when written and is corrected here.
 
@@ -1032,7 +1067,7 @@ Known limits, none of them fixable by adding rules:
   asserted by `testWhetherIgnorePreviousRulesReachesAcrossLists`. It is also why
   a per-site exception detaches every list rather than layering an allow rule.
 - **The 150,000-rule cap is per compiled list, not total.** Four lists at
-  183,950 are fine; the largest is 77,963. Merging them into one JSON is the
+  183,732 are fine; the largest is 77,670. Merging them into one JSON is the
   only way to hit the ceiling, and a test guards against it.
 - **Ad frames away from the video** that no list knows about stay visible.
   Blocking unknown cross-origin frames wholesale would break embedded players,
@@ -1075,4 +1110,3 @@ forward, both decisions rather than code:
 Until one is chosen, Settings shows each list's version and how long ago the
 rules were generated, and warns outright once they pass 30 days. Protection
 that quietly decays behind an "Active" label is the failure being prevented.
-
