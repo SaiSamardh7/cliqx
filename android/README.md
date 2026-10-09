@@ -129,13 +129,23 @@ Ranked by how much they would hurt.
    `ios/Sources/CleanPlayer/Resources/public_suffix_list.dat.txt`.
 3. **Only `blocklist.json` is loaded**, not the four real lists. See
    [blocking](#blocking).
-4. **No UI.** `MainActivity` is a WebView, a `PlayerView` and log statements.
+4. **No cleartext to a LAN media server.** iOS allows one with
+   `NSAllowsLocalNetworking`; Android's network security config has no
+   counterpart, because `<domain>` matches a hostname and has no CIDR form.
+   The entries that looked like they covered `10/8` and `192.168/16` matched
+   only those literal network addresses, so they permitted nothing and have been
+   removed — see the note in
+   [`network_security_config.xml`](app/src/main/res/xml/network_security_config.xml).
+   Reaching a user-entered server needs cleartext permitted in the config and
+   non-private hosts refused in code; that belongs with the Jellyfin feature,
+   which does not exist here yet.
+5. **No UI.** `MainActivity` is a WebView, a `PlayerView` and log statements.
    The ~14,700 lines of SwiftUI in `ios/Sources/CleanPlayer` have no counterpart
    yet; the ~2,900 lines of Apple-free logic there are a mechanical Kotlin port
    and the obvious next step.
-5. **No PiP, Cast, subtitles or episode navigation**, though the agent already
+6. **No PiP, Cast, subtitles or episode navigation**, though the agent already
    exposes all of it and `MediaSession` is on the classpath.
-6. **`firstUrl` extracts a stream with a regex.** A placeholder for decoding the
+7. **`firstUrl` extracts a stream with a regex.** A placeholder for decoding the
    agent's candidate list properly.
 
 ## Building
