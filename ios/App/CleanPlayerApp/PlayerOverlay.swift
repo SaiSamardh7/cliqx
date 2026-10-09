@@ -705,7 +705,7 @@ struct PlayerOverlay: View {
     private var centreTransport: some View {
         HStack(spacing: 34) {
             circleButton("gobackward.10", label: "Back 10 seconds", size: 30) {
-                page.actions.skip(-10)
+                page.actions.skip(-PlayerSkip.interval)
                 chrome.interacted()
             }
             Button {
@@ -727,7 +727,7 @@ struct PlayerOverlay: View {
             .accessibilityLabel(page.isBuffering ? "Loading, tap to pause"
                                 : page.isPlaying ? "Pause" : "Play")
             circleButton("goforward.10", label: "Forward 10 seconds", size: 30) {
-                page.actions.skip(10)
+                page.actions.skip(PlayerSkip.interval)
                 chrome.interacted()
             }
         }
@@ -797,7 +797,7 @@ struct PlayerOverlay: View {
         .accessibilityLabel("Playback position")
         .accessibilityValue(PlayerFormatting.spoken(page.currentTime))
         .accessibilityAdjustableAction { direction in
-            page.actions.skip(direction == .increment ? 10 : -10)
+            page.actions.skip(direction == .increment ? PlayerSkip.interval : -PlayerSkip.interval)
         }
     }
 
