@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The shield and play mark from tools/make-icon.py, traced as a path rather
+     than exported as a PNG: same reason the iOS icon is a script and not a
+     checked-in binary — it is geometry, so it is edited in one place.
+     Adaptive icons are 108x108 with the inner 72x72 safe from masking. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <path android:pathData="M54,30 C47.5,30 40.5,31.8 34,34.5 C34,45 35,53.5 38.5,61 C43,70.5 48.5,76.5 54,80 C59.5,76.5 65,70.5 69.5,61 C73,53.5 74,45 74,34.5 C67.5,31.8 60.5,30 54,30 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:startX="34" android:startY="30"
+                android:endX="74" android:endY="80"
+                android:type="linear">
+                <item android:offset="0" android:color="#FF38A5FF" />
+                <item android:offset="1" android:color="#FF1454D6" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <path
+        android:pathData="M49,45 L64,54.5 L49,64 Z"
+        android:fillColor="#F4F9FF" />
+</vector>

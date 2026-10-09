@@ -14,3 +14,12 @@ tools/filter-convert/target/
 
 # Local development-council state (SQLite database, locks, and workspace cache).
 .devcouncil/
+
+# Android. The `build/` rule above already covers the module build dirs;
+# local.properties holds this machine's SDK path and must not be shared.
+android/.gradle/
+android/.kotlin/
+android/local.properties
+android/gradle/wrapper/gradle-wrapper.jar
+*.apk
+*.aab

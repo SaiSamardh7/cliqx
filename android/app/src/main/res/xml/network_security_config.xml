@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Cleartext is off for the open web. Loopback is exempt so a dev server and
+     the Robolectric tests can use plain http.
+
+     A Jellyfin or NAS box on the LAN is plain http too, and that exception is
+     deliberately NOT here, because this file cannot express it.
+
+     iOS says it in one key: `NSAllowsLocalNetworking` permits cleartext to all
+     local and private addresses while ATS stays enforced for everything else.
+     Android has no counterpart. `<domain>` matches a HOSTNAME — exactly, or
+     with its subdomains under includeSubdomains — and there is no CIDR or
+     wildcard form at any API level.
+
+     This file used to carry `<domain>10.0.0.0</domain>` and
+     `<domain>192.168.0.0</domain>` in the belief that they covered those
+     ranges. They did not. Each matched only the literal string, and both are
+     network addresses that nothing ever listens on, so the rule permitted
+     cleartext to precisely zero reachable hosts: a server at 192.168.1.50 fell
+     through to base-config and was blocked. The entries are gone rather than
+     left to look like a working exception.
+
+     Reaching a user-entered LAN server therefore needs a different mechanism —
+     permitting cleartext here and refusing non-private hosts in code, where the
+     host is actually known. That belongs with the Jellyfin feature, which this
+     skeleton does not have yet. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false" />
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">localhost</domain>
+        <domain includeSubdomains="true">127.0.0.1</domain>
+    </domain-config>
+</network-security-config>

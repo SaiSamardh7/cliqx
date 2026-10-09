@@ -8,7 +8,7 @@
 Blocks the ads, kills the popups, strips the overlays — then hands the stream to a native player.</p>
 
 [![CI](https://github.com/SaiSamardh7/cliqx/actions/workflows/ci.yml/badge.svg)](https://github.com/SaiSamardh7/cliqx/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-679%20passing-brightgreen)](#verification)
+[![Tests](https://img.shields.io/badge/tests-695%20passing-brightgreen)](#verification)
 [![Blocking](https://img.shields.io/badge/lists-EasyList%20%2B%20EasyPrivacy%20%2B%20Fanboy-blue)](#how-it-blocks)
 [![Platform](https://img.shields.io/badge/platform-iOS%2017%2B-lightgrey)](#requirements)
 [![Licence](https://img.shields.io/badge/licence-MIT-green)](LICENSE)
@@ -51,9 +51,17 @@ finishes loading.
 | **Talks to no one** | No account, no backend, no analytics, no tracking SDK, no crash reporter. Filter lists ship inside the binary; the app makes no network request of its own. |
 
 > [!NOTE]
-> **iOS only, and that is architectural, not a backlog item.** The whole approach
-> is built on `WKContentWorld`, `WKContentRuleList` and `webkitEnterFullscreen`.
-> There is no Android, web or desktop version — not planned, not in progress.
+> **iOS is the platform that ships.** The *implementation* is WebKit-bound:
+> `WKContentWorld`, `WKContentRuleList` and `webkitEnterFullscreen` have no
+> Android counterparts, and each needed a different mechanism rather than a
+> port. The *approach* turned out to travel. A walking skeleton lives in
+> [`android/`](android/README.md) — it shares `agent.js` verbatim with iOS,
+> blocks per request in `shouldInterceptRequest` instead of compiling a rule
+> list, and hands streams to ExoPlayer instead of asking the page's own
+> `<video>` to go full screen. It compiles and its tests pass, but it has no
+> UI, loses DRM and MSE sources, and has not yet run on hardware. Treat it as
+> a feasibility study, not a second product. There is no web or desktop
+> version — not planned, not in progress.
 
 ## Screens
 
@@ -139,7 +147,7 @@ assessment, and why each list was picked.
 
 ## Verification
 
-**679** — 248 Swift · 11 UI · 420 agent (210 specs, two engines). All green in
+**695** — 248 Swift · 11 UI · 436 agent (218 specs, two engines). All green in
 CI, on every push and every pull request.
 
 | Suite | Runs on | Why it is there |
