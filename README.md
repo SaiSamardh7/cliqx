@@ -51,9 +51,17 @@ finishes loading.
 | **Talks to no one** | No account, no backend, no analytics, no tracking SDK, no crash reporter. Filter lists ship inside the binary; the app makes no network request of its own. |
 
 > [!NOTE]
-> **iOS only, and that is architectural, not a backlog item.** The whole approach
-> is built on `WKContentWorld`, `WKContentRuleList` and `webkitEnterFullscreen`.
-> There is no Android, web or desktop version — not planned, not in progress.
+> **iOS is the platform that ships.** The *implementation* is WebKit-bound:
+> `WKContentWorld`, `WKContentRuleList` and `webkitEnterFullscreen` have no
+> Android counterparts, and each needed a different mechanism rather than a
+> port. The *approach* turned out to travel. A walking skeleton lives in
+> [`android/`](android/README.md) — it shares `agent.js` verbatim with iOS,
+> blocks per request in `shouldInterceptRequest` instead of compiling a rule
+> list, and hands streams to ExoPlayer instead of asking the page's own
+> `<video>` to go full screen. It compiles and its tests pass, but it has no
+> UI, loses DRM and MSE sources, and has not yet run on hardware. Treat it as
+> a feasibility study, not a second product. There is no web or desktop
+> version — not planned, not in progress.
 
 ## Screens
 

@@ -184,7 +184,12 @@ npx playwright test tests/android-bridge.spec.ts
 
 ## If this gets built out
 
-The iOS README currently says there is no Android version, "not planned, not in
-progress", and the badge reads `platform iOS 17+`. Both need rewording if this
-becomes real — and the claim that the approach is architecturally iOS-only is
-half right at best: the *implementation* is WebKit-bound, the *approach* is not.
+The root README's "iOS only" note has been reworded: it now points here and
+says what this is and is not. The claim that the approach was architecturally
+iOS-only was half right — the *implementation* is WebKit-bound, the *approach*
+is not, and this module is the evidence.
+
+The `platform iOS 17+` badge was deliberately left alone. iOS is still the only
+platform you can install and use; a badge implying otherwise would overstate a
+skeleton with no UI that has never run on hardware. It should change when there
+is something a person can actually run.
