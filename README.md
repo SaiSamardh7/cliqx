@@ -8,7 +8,7 @@
 Blocks the ads, kills the popups, strips the overlays — then hands the stream to a native player.</p>
 
 [![CI](https://github.com/SaiSamardh7/cliqx/actions/workflows/ci.yml/badge.svg)](https://github.com/SaiSamardh7/cliqx/actions/workflows/ci.yml)
-[![Tests](https://img.shields.io/badge/tests-679%20passing-brightgreen)](#verification)
+[![Tests](https://img.shields.io/badge/tests-695%20passing-brightgreen)](#verification)
 [![Blocking](https://img.shields.io/badge/lists-EasyList%20%2B%20EasyPrivacy%20%2B%20Fanboy-blue)](#how-it-blocks)
 [![Platform](https://img.shields.io/badge/platform-iOS%2017%2B-lightgrey)](#requirements)
 [![Licence](https://img.shields.io/badge/licence-MIT-green)](LICENSE)
@@ -139,7 +139,7 @@ assessment, and why each list was picked.
 
 ## Verification
 
-**679** — 248 Swift · 11 UI · 420 agent (210 specs, two engines). All green in
+**695** — 248 Swift · 11 UI · 436 agent (218 specs, two engines). All green in
 CI, on every push and every pull request.
 
 | Suite | Runs on | Why it is there |

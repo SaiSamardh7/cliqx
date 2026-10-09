@@ -13,7 +13,7 @@ priority.
 |---|---|
 | Rules active | **183,732** at Strict, 134,166 at Standard, across four lists |
 | Ad hosts covered | **~104,000** distinct domains in block rules |
-| Tests passing | **679** — 248 Swift · 11 UI · 420 agent (210 specs, two engines) |
+| Tests passing | **695** — 248 Swift · 11 UI · 436 agent (218 specs, two engines) |
 | Commits | **62** on this branch, 51 ahead of `origin/main` and unmerged |
 
 ---
