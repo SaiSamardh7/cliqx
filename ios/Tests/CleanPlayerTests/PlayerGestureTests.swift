@@ -91,41 +91,35 @@ final class PlayerGestureTests: XCTestCase {
         XCTAssertEqual(PlayerGestureClassifier.seekDelta(dx: 150, width: 300), 45)
     }
 
-    // MARK: Volume ceiling
+    // MARK: Volume
 
-    func testBoostIsOfferedWhenNoRouteCouldCarryTheVideo() {
-        XCTAssertEqual(
-            PlayerVolume.ceiling(current: 100, airplayCouldSendVideo: false), 200)
-        XCTAssertEqual(PlayerVolume.levels(upTo: 200), PlayerVolume.levels)
+    /// The AirPlay ceiling was deleted rather than fixed. It withheld boost
+    /// while a route could carry the video, but it read `airplayAvailable` off
+    /// a `PageState` that only the browser ever sets, and the controls it
+    /// guarded appear only on the two players that own their own — so the flag
+    /// was false by construction and the ceiling was always its maximum. These
+    /// tests passed for years by calling the function directly, which is the
+    /// part worth remembering: they asserted the arithmetic and never the wire.
+    func testTheFullRangeIsOfferedAndTheLevelsMatchIt() {
+        XCTAssertEqual(PlayerVolume.maximum, 200)
+        XCTAssertEqual(PlayerVolume.levels.last, PlayerVolume.maximum)
+        XCTAssertEqual(PlayerVolume.levels.first, 0)
     }
 
-    /// Amplifying routes the element through Web Audio and a routed element
-    /// cannot follow AirPlay, so the television would get the picture and no
-    /// sound.
-    func testBoostIsWithheldWhileARouteCouldCarryTheVideo() {
-        XCTAssertEqual(
-            PlayerVolume.ceiling(current: 100, airplayCouldSendVideo: true), 100)
-        XCTAssertEqual(PlayerVolume.levels(upTo: 100), [0, 25, 50, 75, 100])
+    /// One definition of how loud, because the menu, the margin slider and the
+    /// vertical drag all ask through it.
+    func testClampHoldsEveryRouteToTheSameRange() {
+        XCTAssertEqual(PlayerVolume.clamp(180), 180)
+        XCTAssertEqual(PlayerVolume.clamp(260), 200)
+        XCTAssertEqual(PlayerVolume.clamp(-40), 0)
+        XCTAssertEqual(PlayerVolume.clamp(75), 75)
     }
 
-    /// The routing is irreversible for the element's lifetime, so once it has
-    /// happened there is nothing left to protect. Withholding the level the
-    /// video is already playing at would only leave the menu showing a
-    /// selection that none of its rows carry.
-    func testAnAlreadyBoostedVideoKeepsTheLevelsItIsUsing() {
-        XCTAssertEqual(
-            PlayerVolume.ceiling(current: 150, airplayCouldSendVideo: true), 200)
-        XCTAssertTrue(PlayerVolume.levels(upTo: 200).contains(150))
-    }
-
-    /// The bug this closes: the menu withheld boost and the vertical drag did
-    /// not, so a swipe could amplify past a ceiling the menu was refusing to
-    /// offer — breaking AirPlay by the one route that skipped the check.
-    func testTheDragCannotAmplifyPastTheMenusCeiling() {
-        let ceiling = PlayerVolume.ceiling(current: 100,
-                                           airplayCouldSendVideo: true)
-        XCTAssertEqual(PlayerVolume.clamp(180, to: ceiling), 100)
-        XCTAssertEqual(PlayerVolume.clamp(-40, to: ceiling), 0)
-        XCTAssertEqual(PlayerVolume.clamp(75, to: ceiling), 75)
+    /// The boost warning keys off this, so a level the menu labels "Boost"
+    /// must be a level that triggers it.
+    func testEveryLevelLabelledBoostIsAboveTheWarningThreshold() {
+        XCTAssertEqual(PlayerVolume.boostThreshold, 100)
+        XCTAssertEqual(PlayerVolume.levels.filter { $0 > PlayerVolume.boostThreshold },
+                       [125, 150, 175, 200])
     }
 }

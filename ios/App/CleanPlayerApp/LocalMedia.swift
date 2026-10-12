@@ -147,7 +147,7 @@ final class LocalPlayerModel: NSObject, ObservableObject, @preconcurrency VLCMed
     }
 
     func setVolume(_ percent: Int) {
-        let safe = min(max(percent, 0), 200)
+        let safe = PlayerVolume.clamp(percent)
         player.audio?.volume = Int32(safe)
         volumePercent = safe
     }
@@ -585,9 +585,9 @@ struct LocalPlayerView: View {
                     gestureVolumePercent = model.volumePercent
                 case .volume:
                     guard gestureSettings.brightnessAndVolume else { return }
-                    let change = Int((-value.translation.height
-                                      / max(size.height, 1) * 200).rounded())
-                    let volume = min(max(dragStartVolume + change, 0), 200)
+                    let change = Int((-value.translation.height / max(size.height, 1)
+                                      * Double(PlayerVolume.maximum)).rounded())
+                    let volume = PlayerVolume.clamp(dragStartVolume + change)
                     model.setVolume(volume)
                     gestureBrightnessPercent = Int((ScreenBrightness.current * 100).rounded())
                     gestureVolumePercent = volume

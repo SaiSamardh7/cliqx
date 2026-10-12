@@ -153,7 +153,7 @@ final class WebStreamEngine: NSObject, ObservableObject, @preconcurrency VLCMedi
 
     /// VLC's scale is 0…200 — the chrome's own scale, boost included.
     private func setVolume(_ percent: Int) {
-        let safe = min(max(percent, 0), 200)
+        let safe = PlayerVolume.clamp(percent)
         player.audio?.volume = Int32(safe)
         page.volumePercent = safe
     }

@@ -246,7 +246,7 @@ final class ServerEngine: NSObject, ObservableObject, @preconcurrency VLCMediaPl
     /// VLC's volume is 0…200 already — the same scale the chrome uses, boost
     /// included, with no Web Audio and no CORS to fall foul of.
     private func setVolume(_ percent: Int) {
-        let safe = min(max(percent, 0), 200)
+        let safe = PlayerVolume.clamp(percent)
         player.audio?.volume = Int32(safe)
         page.volumePercent = safe
     }
