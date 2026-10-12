@@ -623,21 +623,28 @@ arrangement this project tried was a way of not saying that, and each reported
 a success it had not had: the private `MPVolumeView` slider by depending on an
 undocumented hierarchy, Web Audio by moving a node outside the audible path.
 
-What ships instead is two controls that work, and no third that pretends to:
+What ships instead is one control that works, and no second that pretends to:
 
-- **Device volume** — a real `MPVolumeView`, shown in the player, backed by the
-  hardware buttons. Never fails, works on DRM and MSE alike, and cannot be
-  driven by the swipe gesture because programmatic control is the unsupported
-  part. See `SystemVolumeSlider.swift`.
 - **The Cliqx player** — hands a stream recovered from the page to VLC, which
   decodes it and therefore owns its audio outright: 0–200% including boost,
-  from the menu and the swipe. Needs a manifest in resource timing, so DRM and
-  some DASH keep the in-page player. See `WebStreamPlayer.swift`.
+  from the menu, the margin bar and the swipe. 0–100 is the video's ordinary
+  range and 100–200 is gain the app adds, so the default sits halfway up the
+  track. Needs a manifest in resource timing, so DRM and some DASH keep the
+  in-page player. See `WebStreamPlayer.swift`.
 
-The media-level control appears **only where the app decodes the audio** — the
-Cliqx player, a Jellyfin stream, a local file. On a web page it is absent
-rather than greyed, because a disabled control that can never be enabled is
-just an apology taking up a row.
+**Device volume stays with iOS**: the side buttons and Control Centre. The app
+does not show a slider for it. One shipped from 2–10 Oct 2026, a real
+`MPVolumeView` in the right margin, and it was removed for two reasons. It sat
+inside the volume swipe zone, so a thumb up the right-hand edge dragged the
+phone's volume instead of the video's; and it shared its slot with the media
+bar, swapping places the moment a handoff landed, which changed what that
+margin did in the middle of a film. Two volume bars in one margin was one more
+than the player needed.
+
+Where the app does not own the decode the media bar is **dimmed in place**,
+with a hint naming the volume buttons. Dimmed rather than absent so nothing
+moves when a handoff makes it live, and not greyed-forever either: the handoff
+usually arrives within a second or two of playback starting.
 
 ## Interstitial and ad blocking
 

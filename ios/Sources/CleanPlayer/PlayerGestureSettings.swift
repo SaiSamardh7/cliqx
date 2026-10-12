@@ -55,30 +55,29 @@ public enum PlayerDragAction: Equatable {
 
 /// One definition of how loud the controls may go, because there are two ways
 /// to ask — the menu and the vertical drag — and they disagreed.
+///
+/// There used to be a third opinion here: a ceiling that withheld boost while
+/// AirPlay could carry the video, on the grounds that amplifying routes the
+/// element through Web Audio and a routed element cannot follow a route. It was
+/// removed because it could not fire. The controls it guarded only appear when
+/// the app owns the decode — the Cliqx player and the server player — and each
+/// of those has its own `PageState` on which `airplayAvailable` is never set.
+/// The one `PageState` that learns about routes is the browser's, where there
+/// is no volume to offer and no control to guard. The ceiling read a flag that
+/// was false by construction, so it only ever returned its maximum.
 public enum PlayerVolume {
     public static let levels = [0, 25, 50, 75, 100, 125, 150, 175, 200]
 
-    /// The highest level the controls may offer.
-    ///
-    /// Amplifying past 100% routes the element through Web Audio, and a routed
-    /// element cannot follow AirPlay: the television would get the picture and
-    /// no sound. So while a route could carry the video, boost is withheld.
-    ///
-    /// Except once the video is *already* boosted. That routing has happened
-    /// and is irreversible for the element's lifetime, so there is nothing left
-    /// to protect — and withholding the level it is already playing at would
-    /// leave the menu showing a selection none of its rows carry.
-    public static func ceiling(current: Int, airplayCouldSendVideo: Bool) -> Int {
-        airplayCouldSendVideo && current <= 100 ? 100 : levels.last!
+    /// Boost included: these players decode locally, so gain is theirs to give.
+    public static let maximum = levels.last!
+
+    public static func clamp(_ percent: Int) -> Int {
+        min(max(percent, 0), maximum)
     }
 
-    public static func levels(upTo ceiling: Int) -> [Int] {
-        levels.filter { $0 <= ceiling }
-    }
-
-    public static func clamp(_ percent: Int, to ceiling: Int) -> Int {
-        min(max(percent, 0), ceiling)
-    }
+    /// Above this is software gain stacked on the device volume, which is loud
+    /// enough on headphones to be worth saying so once.
+    public static let boostThreshold = 100
 }
 
 /// Pure gesture arbitration kept outside SwiftUI so edge cases are testable.

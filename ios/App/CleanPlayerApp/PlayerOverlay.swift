@@ -196,25 +196,20 @@ struct PlayerOverlay: View {
     /// Playing as the user would mean it: not paused, and with a picture.
     private var isShowingFrames: Bool { page.isPlaying && !page.isBuffering }
 
-    /// Amplification routes the element through Web Audio, which AirPlay
-    /// cannot forward. While a route could carry the picture, that trade is
-    /// not worth making silently.
-    private var boostWithheldForAirPlay: Bool {
-        page.airplayAvailable && page.airplayCanSendVideo
-    }
-
-    /// Shared by the menu and the vertical drag. They used to decide
-    /// separately, so a drag could amplify past a ceiling the menu was
-    /// refusing to offer — routing the element through Web Audio and taking
-    /// AirPlay's video with it, which is the exact thing the ceiling exists to
-    /// prevent.
-    private var volumeCeiling: Int {
-        PlayerVolume.ceiling(current: page.volumePercent,
-                             airplayCouldSendVideo: boostWithheldForAirPlay)
-    }
-
-    private var volumeLevels: [Int] {
-        PlayerVolume.levels(upTo: volumeCeiling)
+    /// Sets the level, and says the one thing worth saying about boost.
+    ///
+    /// Every way of asking goes through here — the menu, the margin slider and
+    /// the vertical drag. The drag used not to, so the one route that needed
+    /// the warning most was the only route without it: a thumb can reach 200%
+    /// on the right-hand edge in a single swipe, and someone who never opens
+    /// the menu never saw "Careful with your hearing" at all.
+    private func setVolume(_ percent: Int) {
+        let level = PlayerVolume.clamp(percent)
+        if level > PlayerVolume.boostThreshold, !gestureSettings.hasSeenBoostWarning {
+            gestureSettings.hasSeenBoostWarning = true
+            showingBoostWarning = true
+        }
+        page.actions.setVolume(level)
     }
 
     // MARK: Tap and double-tap
@@ -279,18 +274,33 @@ struct PlayerOverlay: View {
     /// of a pair that the HUD treats as either/or left a gap: anything setting
     /// a volume level alone put the slider and the HUD up together, each
     /// drawing the same number beside the other.
+    ///
+    /// Deliberately not gated on `brightnessAndVolume`. That preference is
+    /// "Swipe for brightness and volume", and it used to hide these sliders
+    /// too — so turning off a *gesture* took away two controls you tap, and on
+    /// a web page the app cannot hand off it took away the device-volume
+    /// slider, which is the only volume control the app has there. Switching
+    /// off a shortcut should not remove the thing it is a shortcut to.
     private var isShowingEdgeSliders: Bool {
         chrome.areControlsVisible && !chrome.isLocked
-            && gestureSettings.brightnessAndVolume
             && gestureBrightnessPercent == nil && gestureVolumePercent == nil
     }
 
-    /// The pair that sits in the margins. Two different mechanisms behind one
-    /// arrangement: brightness is the app's to set, and on a web page device
-    /// volume is not — see `VerticalSystemVolumeSlider` for why that one looks
-    /// like the system control, because it is one.
+    /// Brightness in the left margin, volume in the right. One bar each.
+    ///
+    /// The volume bar runs 0–200: 0–100 is the video's ordinary range and
+    /// 100–200 is gain the app adds on top, so the default 100 sits halfway up
+    /// the track with the boost headroom visible above it.
+    ///
+    /// There used to be a second bar here, a real `MPVolumeView` for the
+    /// phone's own level. It was dropped because two volume bars in one margin
+    /// is one more than anybody wants, and because the one that mattered less
+    /// was the one sitting at the screen edge, inside the volume swipe zone —
+    /// a thumb up the right-hand side hit the phone's volume instead of the
+    /// video's. Device volume goes back to where iOS keeps it: the side
+    /// buttons and Control Centre. The app never could set it in code.
     private var edgeSliders: some View {
-        HStack {
+        HStack(spacing: 0) {
             PlayerEdgeSlider(
                 symbol: "sun.max.fill",
                 fraction: brightnessLevel,
@@ -304,26 +314,23 @@ struct PlayerOverlay: View {
 
             Spacer(minLength: 0)
 
-            if page.mediaVolumeAvailable {
-                // The app decodes this one, so the level is ours to set and
-                // the slider can be the same slider.
-                PlayerEdgeSlider(
-                    symbol: page.volumePercent > 100
-                        ? "speaker.wave.3.fill" : "speaker.wave.2.fill",
-                    fraction: Double(page.volumePercent) / Double(volumeCeiling),
-                    accent: page.volumePercent > 100 ? .red : .white,
-                    label: "Volume"
-                ) { value in
-                    let level = Int((value * Double(volumeCeiling)).rounded())
-                    if level > 100, !gestureSettings.hasSeenBoostWarning {
-                        gestureSettings.hasSeenBoostWarning = true
-                        showingBoostWarning = true
-                    }
-                    page.actions.setVolume(PlayerVolume.clamp(level, to: volumeCeiling))
-                    chrome.interacted()
-                }
-            } else {
-                VerticalSystemVolumeSlider()
+            // Dimmed rather than absent while a site decodes its own media:
+            // there is no level for the app to set until it owns the decode,
+            // and a control that comes and goes mid-film moves everything
+            // beside it. See `setVolume` for the boost warning.
+            PlayerEdgeSlider(
+                symbol: page.volumePercent > 100
+                    ? "speaker.wave.3.fill" : "speaker.wave.2.fill",
+                fraction: Double(page.volumePercent) / Double(PlayerVolume.maximum),
+                accent: page.volumePercent > 100 ? .red : .white,
+                label: "Volume",
+                hint: page.mediaVolumeAvailable
+                    ? "Above halfway amplifies the video's own audio"
+                    : "Unavailable for this stream; use the phone's volume buttons",
+                isEnabled: page.mediaVolumeAvailable
+            ) { value in
+                setVolume(Int((value * Double(PlayerVolume.maximum)).rounded()))
+                chrome.interacted()
             }
         }
         .padding(.horizontal, 10)
@@ -384,12 +391,10 @@ struct PlayerOverlay: View {
                         chrome.interacted()
                         return
                     }
-                    let change = Int((-value.translation.height
-                                      / max(size.height, 1) * 200).rounded())
-                    // The menu's ceiling, not a second opinion.
-                    let volume = PlayerVolume.clamp(dragStartVolume + change,
-                                                    to: volumeCeiling)
-                    page.actions.setVolume(volume)
+                    let change = Int((-value.translation.height / max(size.height, 1)
+                                      * Double(PlayerVolume.maximum)).rounded())
+                    let volume = PlayerVolume.clamp(dragStartVolume + change)
+                    setVolume(volume)
                     gestureBrightnessPercent = Int((ScreenBrightness.current * 100).rounded())
                     gestureVolumePercent = volume
                     chrome.interacted()
@@ -705,7 +710,7 @@ struct PlayerOverlay: View {
     private var centreTransport: some View {
         HStack(spacing: 34) {
             circleButton("gobackward.10", label: "Back 10 seconds", size: 30) {
-                page.actions.skip(-10)
+                page.actions.skip(-PlayerSkip.interval)
                 chrome.interacted()
             }
             Button {
@@ -727,7 +732,7 @@ struct PlayerOverlay: View {
             .accessibilityLabel(page.isBuffering ? "Loading, tap to pause"
                                 : page.isPlaying ? "Pause" : "Play")
             circleButton("goforward.10", label: "Forward 10 seconds", size: 30) {
-                page.actions.skip(10)
+                page.actions.skip(PlayerSkip.interval)
                 chrome.interacted()
             }
         }
@@ -797,7 +802,7 @@ struct PlayerOverlay: View {
         .accessibilityLabel("Playback position")
         .accessibilityValue(PlayerFormatting.spoken(page.currentTime))
         .accessibilityAdjustableAction { direction in
-            page.actions.skip(direction == .increment ? 10 : -10)
+            page.actions.skip(direction == .increment ? PlayerSkip.interval : -PlayerSkip.interval)
         }
     }
 
@@ -882,27 +887,14 @@ struct PlayerOverlay: View {
         Menu {
             Picker("Volume", selection: Binding(
                 get: { page.volumePercent },
-                set: { level in
-                    // Once, the first time anyone amplifies. Above 100% this is
-                    // software gain on top of whatever the device is already
-                    // doing, and on headphones that is loud.
-                    if level > 100, !gestureSettings.hasSeenBoostWarning {
-                        gestureSettings.hasSeenBoostWarning = true
-                        showingBoostWarning = true
-                    }
-                    page.actions.setVolume(level)
-                }
+                set: { level in setVolume(level) }
             )) {
-                ForEach(volumeLevels, id: \.self) { level in
+                ForEach(PlayerVolume.levels, id: \.self) { level in
                     Text(level > 100 ? "\(level)% Boost" : "\(level)%").tag(level)
                 }
             }
             Divider()
-            if boostWithheldForAirPlay {
-                Text("Boost is off while AirPlay can send this video")
-            } else {
-                Text("Above 100% may distort loud audio")
-            }
+            Text("Above 100% may distort loud audio")
         } label: {
             Label("Volume \(page.volumePercent)%",
                   systemImage: page.volumePercent > 100

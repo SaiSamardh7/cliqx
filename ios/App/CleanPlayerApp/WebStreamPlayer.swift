@@ -35,6 +35,7 @@ final class WebStreamEngine: NSObject, ObservableObject, @preconcurrency VLCMedi
     private var desiredRate: Float = 1
     private let startAt: Double
     private var didSeekToStart = false
+    private let nowPlaying = NowPlayingController()
     var onClose: (Double) -> Void = { _ in }
 
     private static let log = Logger(subsystem: "com.saisamardh.cleanplayer",
@@ -89,6 +90,7 @@ final class WebStreamEngine: NSObject, ObservableObject, @preconcurrency VLCMedi
     // MARK: Lifecycle
 
     func start() {
+        nowPlaying.begin(driving: page)
         let media = VLCMedia(url: stream)
         for option in subtitleStyle.mediaOptions { media.addOption(option) }
         // Many hosts serve segments only to the page that asked for them. VLC
@@ -105,6 +107,7 @@ final class WebStreamEngine: NSObject, ObservableObject, @preconcurrency VLCMedi
     func close() {
         let reached = page.currentTime
         player.stop()
+        nowPlaying.end()
         MediaSession.deactivate()
         onClose(reached)
     }
@@ -150,7 +153,7 @@ final class WebStreamEngine: NSObject, ObservableObject, @preconcurrency VLCMedi
 
     /// VLC's scale is 0…200 — the chrome's own scale, boost included.
     private func setVolume(_ percent: Int) {
-        let safe = min(max(percent, 0), 200)
+        let safe = PlayerVolume.clamp(percent)
         player.audio?.volume = Int32(safe)
         page.volumePercent = safe
     }
@@ -172,6 +175,7 @@ final class WebStreamEngine: NSObject, ObservableObject, @preconcurrency VLCMedi
     func mediaPlayerStateChanged(_ notification: Notification!) {
         page.isPlaying = player.isPlaying
         page.isBuffering = player.state == .buffering || player.state == .opening
+        nowPlaying.update(from: page)
         if player.state == .ended {
             page.playbackEnded = true
             page.isPlaying = false
@@ -188,6 +192,7 @@ final class WebStreamEngine: NSObject, ObservableObject, @preconcurrency VLCMedi
         page.duration = Double(length) / 1000
         page.bufferedTo = page.currentTime      // VLC does not expose the buffer
         page.isBuffering = false
+        nowPlaying.update(from: page)
         guard length > 0 else { return }
 
         // Pick up where the page had got to, once seeking is actually possible.

@@ -203,11 +203,18 @@ struct JellyfinClient {
     }
     private struct Page: Decodable { var Items: [JellyfinItem] }
 
-    /// Sign in: confirm the address is Jellyfin, then exchange the password
-    /// for a token. The password is sent once, in a JSON body over the
-    /// connection the user chose, and never stored.
-    static func signIn(server: URL, username: String, password: String) async throws
-        -> (JellyfinServer, token: String) {
+    /// Is this a Jellyfin server? Throws `.notAJellyfinServer` if not.
+    ///
+    /// Split out of `signIn` so the Add Server sheet can ask the question
+    /// *before* collecting a password, and offer to play the address as a
+    /// stream when the answer is no. The check itself is unchanged and lives
+    /// in one place: it is what decides whether the password gets sent, so a
+    /// second, laxer copy of it is the bug this split must not introduce.
+    static func confirmJellyfin(server: URL) async throws {
+        _ = try await publicInfo(server: server)
+    }
+
+    private static func publicInfo(server: URL) async throws -> PublicInfo {
         let anonymous = JellyfinClient(server: server, token: nil)
         let info: PublicInfo
         do {
@@ -223,6 +230,16 @@ struct JellyfinClient {
         if let product = info.ProductName, !product.contains("Jellyfin") {
             throw Failure.notAJellyfinServer
         }
+        return info
+    }
+
+    /// Sign in: confirm the address is Jellyfin, then exchange the password
+    /// for a token. The password is sent once, in a JSON body over the
+    /// connection the user chose, and never stored.
+    static func signIn(server: URL, username: String, password: String) async throws
+        -> (JellyfinServer, token: String) {
+        let anonymous = JellyfinClient(server: server, token: nil)
+        let info = try await publicInfo(server: server)
 
         let body = ["Username": username, "Pw": password]
         let auth: AuthResult

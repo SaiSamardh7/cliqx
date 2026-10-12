@@ -68,12 +68,25 @@ final class LocalPlayerModel: NSObject, ObservableObject, @preconcurrency VLCMed
 
     private let interruptions = AudioInterruptions()
     private var interruptionPolicy = InterruptionPolicy()
+    private let nowPlaying = NowPlayingController()
+    /// What the lock screen calls this. The player itself never showed a
+    /// title, so there was no field for one.
+    private var displayTitle = ""
 
     /// How subtitles should look. Applied as media options, because VLCKit
     /// has no API for it — see SubtitleStyle.
     private let subtitleStyle: SubtitleStyle
 
-    func start(url: URL, resumeMs: Int = 0) {
+    func start(url: URL, resumeMs: Int = 0, title: String = "") {
+        displayTitle = title
+        // Remote buttons go through the same methods the on-screen controls
+        // use, so there is one definition of what play, skip and seek mean.
+        nowPlaying.begin(.init(
+            play: { [weak self] in if self?.player.isPlaying == false { self?.player.play() } },
+            pause: { [weak self] in if self?.player.isPlaying == true { self?.player.pause() } },
+            toggle: { [weak self] in self?.togglePlay() },
+            seek: { [weak self] seconds in self?.seek(toSeconds: seconds) },
+            skip: { [weak self] seconds in self?.skip(seconds) }))
         pendingResumeMs = resumeMs
         didResume = resumeMs <= 0
         player.delegate = self
@@ -134,7 +147,7 @@ final class LocalPlayerModel: NSObject, ObservableObject, @preconcurrency VLCMed
     }
 
     func setVolume(_ percent: Int) {
-        let safe = min(max(percent, 0), 200)
+        let safe = PlayerVolume.clamp(percent)
         player.audio?.volume = Int32(safe)
         volumePercent = safe
     }
@@ -142,6 +155,28 @@ final class LocalPlayerModel: NSObject, ObservableObject, @preconcurrency VLCMed
     func stop() {
         interruptions.stop()
         player.stop()
+        nowPlaying.end()
+    }
+
+    /// Absolute seek in seconds, for the lock-screen scrubber. The on-screen
+    /// one scrubs by fraction; a remote one hands over a time.
+    func seek(toSeconds seconds: Double) {
+        let length = Double(player.media?.length.intValue ?? 0)   // ms
+        guard length > 0 else { return }
+        player.time = VLCTime(int: Int32(min(max(seconds * 1000, 0), length)))
+    }
+
+    /// The card, from this player's own fields. The `PageState` players share
+    /// a binding for this; here there is no page to read.
+    private func refreshNowPlaying() {
+        let length = Double(player.media?.length.intValue ?? 0)
+        nowPlaying.update(NowPlayingSnapshot(
+            title: displayTitle,
+            isPlaying: player.isPlaying,
+            currentTime: Double(player.time.intValue) / 1000,
+            duration: length / 1000,
+            rate: Double(player.rate),
+            isLive: false))
     }
 
     func togglePlay() { player.isPlaying ? player.pause() : player.play() }
@@ -167,6 +202,7 @@ final class LocalPlayerModel: NSObject, ObservableObject, @preconcurrency VLCMed
 
     func mediaPlayerStateChanged(_ notification: Notification!) {
         isPlaying = player.isPlaying
+        refreshNowPlaying()
     }
 
     func mediaPlayerTimeChanged(_ notification: Notification!) {
@@ -174,6 +210,7 @@ final class LocalPlayerModel: NSObject, ObservableObject, @preconcurrency VLCMed
         elapsed = Self.clock(ms: player.time.intValue)
         let length = player.media?.length.intValue ?? 0
         remaining = "-" + Self.clock(ms: max(0, length - player.time.intValue))
+        refreshNowPlaying()
 
         guard length > 0 else { return }
 
@@ -395,7 +432,8 @@ struct LocalPlayerView: View {
         .onAppear {
             MediaSession.activate()
             model.onProgress = onProgress
-            model.start(url: video.url, resumeMs: video.resumeMs)
+            model.start(url: video.url, resumeMs: video.resumeMs,
+                        title: video.displayName)
             scheduleHide()
         }
         .onDisappear {
@@ -547,9 +585,9 @@ struct LocalPlayerView: View {
                     gestureVolumePercent = model.volumePercent
                 case .volume:
                     guard gestureSettings.brightnessAndVolume else { return }
-                    let change = Int((-value.translation.height
-                                      / max(size.height, 1) * 200).rounded())
-                    let volume = min(max(dragStartVolume + change, 0), 200)
+                    let change = Int((-value.translation.height / max(size.height, 1)
+                                      * Double(PlayerVolume.maximum)).rounded())
+                    let volume = PlayerVolume.clamp(dragStartVolume + change)
                     model.setVolume(volume)
                     gestureBrightnessPercent = Int((ScreenBrightness.current * 100).rounded())
                     gestureVolumePercent = volume

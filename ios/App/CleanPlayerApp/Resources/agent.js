@@ -543,9 +543,11 @@ html[data-cp-unlock], html[data-cp-unlock] body {
   //
   //   1. `HTMLMediaElement.volume` is ignored. Writing 0.25 reads back 1, in
   //      this app and in Safari alike.
-  //   2. `AVAudioSession.outputVolume` has no setter, and the only supported
-  //      way to offer device volume is to SHOW an `MPVolumeView` for the user
-  //      to drag. The app does that — see SystemVolumeSlider.
+  //   2. `AVAudioSession.outputVolume` has no setter. The only supported way
+  //      to offer device volume at all is to SHOW an `MPVolumeView` for the
+  //      user to drag, which the app tried and then dropped: it has to sit
+  //      somewhere, and anywhere in the player is inside a gesture zone.
+  //      Device volume is the side buttons' job.
   //   3. A Web Audio gain node does not reach the sound. The app used to route
   //      the element through one; the control moved and nothing changed, on
   //      device, on ordinary sites.

@@ -94,7 +94,11 @@ struct HomeView: View {
                              gestureSettings: gestureSettings, playback: playback,
                              onProtectionChanged: {})
             }
-            .sheet(isPresented: $addingServer) { AddServerSheet(servers: servers) }
+            .sheet(isPresented: $addingServer) {
+                AddServerSheet(servers: servers) { url in
+                    playing = streamVideo(for: url)
+                }
+            }
             // Re-read when a server is added or removed, and again whenever the
             // app comes back to the front: the position moves while you are
             // watching on the television, and a stale row is the whole reason
@@ -421,6 +425,24 @@ struct HomeView: View {
             displayName: url.deletingPathExtension().lastPathComponent,
             // A finished video starts over rather than resuming at the end.
             resumeMs: (saved?.completed == true) ? 0 : (saved?.positionMs ?? 0))
+    }
+
+    /// A URL played directly, with nothing stored about it.
+    ///
+    /// No fingerprint, so no position is saved and no Continue Watching card
+    /// appears. `MediaFingerprint.compute` hashes the first 256 KB off disk
+    /// and returns nil for anything it cannot open as a file, so a stream
+    /// would get nil here anyway — this says so deliberately rather than
+    /// relying on that. Resuming a stream needs the URL persisted in
+    /// `MediaProgress`, which it has no field for; until it does, a card that
+    /// cannot reopen is worse than no card.
+    ///
+    /// ponytail: play it and forget it. Add the URL field when someone asks
+    /// to resume a stream, not before.
+    private func streamVideo(for url: URL) -> LocalVideo {
+        LocalVideo(url: url, scoped: false, fingerprint: nil, bookmark: nil,
+                   sourceKind: "url",
+                   displayName: StreamAddress.displayName(for: url))
     }
 
     /// Reopen from a saved bookmark. A stale bookmark means the file moved or

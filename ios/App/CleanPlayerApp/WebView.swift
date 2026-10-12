@@ -257,7 +257,7 @@ struct WebView: UIViewRepresentable {
                 coordinator?.callPlayer("setRate(\(rate))")
             },
             setVolume: { [weak coordinator = context.coordinator] percent in
-                let safe = min(max(percent, 0), 200)
+                let safe = PlayerVolume.clamp(percent)
                 coordinator?.callPlayer("setVolume(\(safe))")
             },
             selectTrack: { [weak coordinator = context.coordinator] index in

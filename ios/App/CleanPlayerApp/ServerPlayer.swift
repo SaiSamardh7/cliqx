@@ -32,6 +32,7 @@ final class ServerEngine: NSObject, ObservableObject, @preconcurrency VLCMediaPl
     private let subtitleStyle: SubtitleStyle
     private let interruptions = AudioInterruptions()
     private var interruptionPolicy = InterruptionPolicy()
+    private let nowPlaying = NowPlayingController()
     var onClose: () -> Void = {}
 
     init(item: JellyfinItem, server: JellyfinServer, servers: JellyfinServers,
@@ -91,6 +92,7 @@ final class ServerEngine: NSObject, ObservableObject, @preconcurrency VLCMediaPl
     // MARK: Lifecycle
 
     func start() {
+        nowPlaying.begin(driving: page)
         load(item)
         Task { await loadSiblings() }
     }
@@ -134,6 +136,7 @@ final class ServerEngine: NSObject, ObservableObject, @preconcurrency VLCMediaPl
     func close() {
         if !reportedStop { report(final: true) }
         player.stop()
+        nowPlaying.end()
         MediaSession.deactivate()
         onClose()
     }
@@ -243,7 +246,7 @@ final class ServerEngine: NSObject, ObservableObject, @preconcurrency VLCMediaPl
     /// VLC's volume is 0…200 already — the same scale the chrome uses, boost
     /// included, with no Web Audio and no CORS to fall foul of.
     private func setVolume(_ percent: Int) {
-        let safe = min(max(percent, 0), 200)
+        let safe = PlayerVolume.clamp(percent)
         player.audio?.volume = Int32(safe)
         page.volumePercent = safe
     }
@@ -269,6 +272,7 @@ final class ServerEngine: NSObject, ObservableObject, @preconcurrency VLCMediaPl
     func mediaPlayerStateChanged(_ notification: Notification!) {
         page.isPlaying = player.isPlaying
         page.isBuffering = player.state == .buffering || player.state == .opening
+        nowPlaying.update(from: page)
         if player.state == .ended {
             page.playbackEnded = true
             page.isPlaying = false
@@ -290,6 +294,7 @@ final class ServerEngine: NSObject, ObservableObject, @preconcurrency VLCMediaPl
         page.duration = Double(length) / 1000
         page.bufferedTo = page.currentTime      // VLC does not expose the buffer
         page.isBuffering = false
+        nowPlaying.update(from: page)
         guard length > 0 else { return }
 
         if !didResume, player.isSeekable {
